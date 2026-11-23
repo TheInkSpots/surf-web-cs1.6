@@ -1,4 +1,7 @@
 # surf-web-cs1.6
+Demo: https://theinkspots.github.io/surf-web-cs1.6/
+
+<img width="2491" height="1167" alt="image" src="https://github.com/user-attachments/assets/92dda728-00fe-45f7-a1fb-8b497154bfba" />
 
 ###1. Core Gameplay & Match Rules
 The game is a browser-based, first-person multiplayer movement shooter replicating Counter-Strike 1.6 Surf mechanics. Matches operate on a dedicated, room-based server model with two configurable team structures controlled by the Room Master:
