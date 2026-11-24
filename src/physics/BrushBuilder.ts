@@ -1,8 +1,71 @@
 import { f32 } from '../core/constants';
 
+
+export type TriggerType = 'start' | 'end' | 'push' | 'teleport' | 'checkpoint' | 'explosion';
+
+export interface PushTriggerMeta {
+  mode?: string;
+  dirX?: number;
+  dirY?: number;
+  dirZ?: number;
+  addSpeed?: number;
+  minSpeedXY?: number;
+  minVelZ?: number;
+  cooldownTicks?: number;
+}
+
+export interface TeleportTriggerMeta {
+  dest?: {
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    pitch: number;
+  };
+}
+
+export interface CheckpointTriggerMeta {
+  index?: number;
+  label?: string;
+  respawnX?: number;
+  respawnY?: number;
+  respawnZ?: number;
+  respawnYaw?: number;
+  respawnPitch?: number;
+  respawnVelX?: number;
+  respawnVelY?: number;
+  respawnVelZ?: number;
+}
+
+export interface ExplosionTriggerMeta {
+  originX?: number;
+  originY?: number;
+  originZ?: number;
+  maxDamage?: number;
+  radius?: number;
+  pushScale?: number;
+  cooldownTicks?: number;
+}
+
+export type TriggerMeta = Partial<
+  PushTriggerMeta & TeleportTriggerMeta & CheckpointTriggerMeta & ExplosionTriggerMeta
+>;
+
+export interface TriggerVolume {
+  id: string;
+  type: TriggerType;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  meta: TriggerMeta;
+}
+
+
 export type Vec3Tuple = [number, number, number];
 export type BrushStyle = 'slate' | 'ramp' | 'steep' | 'walkable' | 'booster' | 'finish';
-export type TriggerType = 'start' | 'end' | 'push' | 'teleport';
 
 export interface BrushPlane {
   nx: number;
@@ -38,31 +101,6 @@ export interface SurfRampOptions {
   style?: BrushStyle;
 }
 
-export interface PushTriggerMeta {
-  mode: 'hybrid';
-  dirX: number;
-  dirY: number;
-  dirZ: number;
-  addSpeed: number;
-  minSpeedXY: number;
-  minVelZ: number;
-}
-
-export interface TeleportTriggerMeta {
-  dest: { x: number; y: number; z: number; yaw: number; pitch: number };
-}
-
-export interface TriggerVolume {
-  id: string;
-  type: TriggerType;
-  minX: number;
-  minY: number;
-  minZ: number;
-  maxX: number;
-  maxY: number;
-  maxZ: number;
-  meta: Partial<PushTriggerMeta & TeleportTriggerMeta>;
-}
 
 export class BrushBuilder {
   public readonly brushes: ConvexBrush[] = [];
@@ -248,28 +286,26 @@ export class BrushBuilder {
   }
 
   public addTrigger(
-    id: string,
-    type: TriggerType,
-    minX: number,
-    minY: number,
-    minZ: number,
-    maxX: number,
-    maxY: number,
-    maxZ: number,
-    meta: Partial<PushTriggerMeta & TeleportTriggerMeta> = {},
-  ): TriggerVolume {
-    const trigger: TriggerVolume = {
-      id,
-      type,
-      minX: f32(minX),
-      minY: f32(minY),
-      minZ: f32(minZ),
-      maxX: f32(maxX),
-      maxY: f32(maxY),
-      maxZ: f32(maxZ),
-      meta,
-    };
-    this.triggers.push(trigger);
-    return trigger;
-  }
+      id: string,
+      type: TriggerType,
+      minX: number,
+      minY: number,
+      minZ: number,
+      maxX: number,
+      maxY: number,
+      maxZ: number,
+      meta: TriggerMeta = {},
+    ): void {
+      this.triggers.push({
+        id,
+        type,
+        minX: f32(Math.min(minX, maxX)),
+        minY: f32(Math.min(minY, maxY)),
+        minZ: f32(Math.min(minZ, maxZ)),
+        maxX: f32(Math.max(minX, maxX)),
+        maxY: f32(Math.max(minY, maxY)),
+        maxZ: f32(Math.max(minZ, maxZ)),
+        meta,
+      });
+    }
 }

@@ -41,7 +41,6 @@ export class SurfApp {
   private activeCheckpoint: CheckpointState | null = null;
   private customCheckpoint: CheckpointState | null = null;
   private readonly visitedCheckpoints = new Set<number>();
-  private runStartTick = 0;
 
   private spawnedPropCount = 0;
   private lastFrameTime = performance.now();
@@ -91,34 +90,52 @@ export class SurfApp {
           this.visitedCheckpoints.add(cp.index);
           this.activeCheckpoint = cp;
 
-          const elapsedSec =
-            this.runTracker.state === 'RUNNING'
-              ? (this.abi.i32[I32.TICK] - this.runStartTick) * FIXED_DT
-              : 0;
-          const timeSuffix = elapsedSec > 0 ? `  •  ${RunTracker.formatTime(elapsedSec)}` : '';
+          const split = this.runTracker.recordCheckpoint(cp.index, cp.label, this.abi.i32[I32.TICK]);
+
+          const deltaStr =
+            split.deltaSec !== null ? `  [${RunTracker.formatDelta(split.deltaSec)}]` : '';
+          const goldStr = split.isNewBestSegment ? ' ★ GOLD SEG!' : '';
+          const toastColor =
+            split.deltaSec !== null && split.deltaSec <= 0
+              ? 'rgba(52, 211, 153, 0.8)'
+              : 'rgba(168, 85, 247, 0.8)';
+
           this.audio.playStartBeep();
           this.hud.flashScreen('rgba(168, 85, 247, 0.25)');
           this.hud.showToast(
-            `${cp.label}${timeSuffix}  (Press B to Respawn Here)`,
-            'rgba(168,85,247,0.75)',
+            `${cp.label}  •  ${RunTracker.formatTime(split.elapsedSec)}${deltaStr}${goldStr}  (Checkpoint Saved)`,
+            toastColor,
           );
         },
         onTeleport: (isFail) => {
-          this.runTracker.reset();
           if (isFail) {
             this.audio.playTeleport();
             this.hud.flashScreen('rgba(251, 113, 133, 0.42)');
-            const cpHint = this.activeCheckpoint
-              ? `  •  Press B for ${this.activeCheckpoint.label}`
-              : '';
-            this.hud.showToast(`FAIL ZONE — TELEPORTED TO SPAWN${cpHint}`, 'rgba(251,113,133,0.65)');
+
+            // Automatically respawn at the last reached stage checkpoint if available
+            if (this.activeCheckpoint) {
+              this.runTracker.invalidateRankedRun();
+              this.physics.teleportToCheckpoint(this.activeCheckpoint);
+              this.input.resetView(this.activeCheckpoint.yaw, this.activeCheckpoint.pitch);
+              this.hud.showToast(
+                `FAIL ZONE — RESPAWNED AT ${this.activeCheckpoint.label}  (R: Full Reset)`,
+                'rgba(168, 85, 247, 0.8)',
+              );
+              return;
+            }
+
+            this.runTracker.reset();
+            this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
+            this.hud.showToast('FAIL ZONE — TELEPORTED TO SPAWN', 'rgba(251,113,133,0.65)');
+          } else {
+            this.runTracker.reset();
           }
         },
         onStartRun: () => {
           if (this.runTracker.state !== 'RUNNING') {
-            this.runStartTick = this.abi.i32[I32.TICK];
             this.visitedCheckpoints.clear();
-            this.runTracker.start(this.runStartTick);
+            this.activeCheckpoint = null;
+            this.runTracker.start(this.abi.i32[I32.TICK]);
             this.audio.playStartBeep();
             this.hud.showToast('RUN STARTED — GO!', 'rgba(52,211,153,0.6)');
           }
@@ -128,9 +145,16 @@ export class SurfApp {
           if (!result) return;
           this.audio.playFinishChime();
           this.hud.flashScreen('rgba(16, 185, 129, 0.42)');
-          const pbNote = result.isNewPb ? ' ★ NEW PERSONAL BEST!' : '';
+
+          const deltaStr =
+            result.deltaSec !== null ? `  [${RunTracker.formatDelta(result.deltaSec)}]` : '';
+          const pbNote = result.isNewPb
+            ? ' ★ NEW PERSONAL BEST!'
+            : !result.isRanked
+              ? ' (CHECKPOINT RUN)'
+              : '';
           this.hud.showToast(
-            `FINISHED IN ${RunTracker.formatTime(result.finishSec)}${pbNote}  (Press R to Restart)`,
+            `FINISHED IN ${RunTracker.formatTime(result.finishSec)}${deltaStr}${pbNote}  (Press R for Full Run)`,
             'rgba(16,185,129,0.75)',
           );
         },
@@ -146,7 +170,7 @@ export class SurfApp {
         this.visitedCheckpoints.clear();
         this.physics.teleportToSpawn(false);
         this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
-        this.hud.showToast('RUN RESET', 'rgba(245,158,11,0.6)');
+        this.hud.showToast('FULL RUN RESET', 'rgba(245,158,11,0.6)');
       },
       onToggleDebug: () => {
         const next = !this.renderer.debugGroup.visible;
@@ -190,7 +214,7 @@ export class SurfApp {
 
   /**
    * Live Sandbox Hotkeys (while pointer-locked):
-   *   B = Respawn at active stage checkpoint (Stages 2–4)
+   *   B = Manual respawn at active stage checkpoint (Stages 2–4)
    *   C = Save custom practice checkpoint
    *   V = Load custom practice checkpoint (preserves velocity)
    *   G = Spawn VPhysics crate ahead
@@ -205,11 +229,12 @@ export class SurfApp {
         this.hud.showToast('NO STAGE CHECKPOINT REACHED YET', 'rgba(148,163,184,0.6)');
         return;
       }
+      this.runTracker.invalidateRankedRun();
       this.physics.teleportToCheckpoint(this.activeCheckpoint);
       this.input.resetView(this.activeCheckpoint.yaw, this.activeCheckpoint.pitch);
       this.audio.playTeleport();
       this.hud.flashScreen('rgba(168, 85, 247, 0.32)');
-      this.hud.showToast(`RESPAWNED AT ${this.activeCheckpoint.label}`, 'rgba(168,85,247,0.75)');
+      this.hud.showToast(`RESPAWNED AT ${this.activeCheckpoint.label} (Unranked)`, 'rgba(168,85,247,0.75)');
     } else if (e.code === 'KeyC') {
       this.customCheckpoint = this.physics.captureCheckpointState(99, 'PRACTICE SAVE');
       this.audio.playStartBeep();
@@ -219,10 +244,11 @@ export class SurfApp {
         this.hud.showToast('NO PRACTICE SAVE (Press C First)', 'rgba(148,163,184,0.6)');
         return;
       }
+      this.runTracker.invalidateRankedRun();
       this.physics.teleportToCheckpoint(this.customCheckpoint);
       this.input.resetView(this.customCheckpoint.yaw, this.customCheckpoint.pitch);
       this.audio.playTeleport();
-      this.hud.showToast('LOADED PRACTICE CHECKPOINT', 'rgba(56,189,248,0.7)');
+      this.hud.showToast('LOADED PRACTICE CHECKPOINT (Unranked)', 'rgba(56,189,248,0.7)');
     } else if (e.code === 'KeyG') {
       this.spawnCrateAhead();
     } else if (e.code === 'KeyF') {

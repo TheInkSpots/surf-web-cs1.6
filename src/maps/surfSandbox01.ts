@@ -372,17 +372,17 @@ export function buildSurfSandbox01(): MapBuildResult {
 
   // Stage 4 Checkpoint Trigger (covers flight into Ramp 9 South Slalom)
   builder.addTrigger('trig_cp_4', 'checkpoint', 12120, 680, 180, 12960, 1320, 920, {
-    index: 4,
-    label: 'STAGE 4 — SOUTH SLALOM',
-    respawnX: 12420,
-    respawnY: 860,
-    respawnZ: 430,
-    respawnYaw: -1.836,
-    respawnPitch: -0.05,
-    respawnVelX: -230,
-    respawnVelY: -850,
-    respawnVelZ: 0,
-  });
+      index: 4,
+      label: 'STAGE 4 — SOUTH SLALOM',
+      respawnX: 12640,
+      respawnY: 880,
+      respawnZ: 480,
+      respawnYaw: -1.836,
+      respawnPitch: -0.05,
+      respawnVelX: -230,
+      respawnVelY: -850,
+      respawnVelZ: 0,
+    });
 
   // --- 11. RAMP 9: 54° LEFT-SIDE SLALOM ---
   builder.addSurfRampBrush('col_ramp_s4_1', {
