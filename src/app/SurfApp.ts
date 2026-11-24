@@ -9,7 +9,7 @@ import {
   MoveState,
 } from '../core/constants';
 import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
-import { GoldSrcPhysicsEngine } from '../physics/GoldSrcPhysicsEngine';
+import { GoldSrcPhysicsEngine, SourceRigidBody } from '../physics/GoldSrcPhysicsEngine';
 import { buildSurfSandbox01 } from '../maps/surfSandbox01';
 import { SurfAudioEngine } from '../audio/SurfAudioEngine';
 import { WorldRenderer } from '../render/WorldRenderer';
@@ -25,6 +25,7 @@ export class SurfApp {
   private readonly audio = new SurfAudioEngine();
   private readonly runTracker = new RunTracker();
   private readonly strafeSync = new StrafeSyncTracker(140);
+  private readonly rigidBodies: SourceRigidBody[] = [];
   private readonly physics: GoldSrcPhysicsEngine;
   private readonly renderer: WorldRenderer;
   private readonly viewmodel: ViewmodelRig;
@@ -83,6 +84,7 @@ export class SurfApp {
           );
         },
       },
+      this.rigidBodies,
     );
 
     this.input = new InputController(canvas, mapData.spawn, {
@@ -250,6 +252,7 @@ export class SurfApp {
       cvarLabel: `aa:${Math.round(vf[F32.CVAR_AIRACCEL])} mv:${Math.round(vf[F32.CVAR_MAXVEL])}`,
     });
 
+    this.renderer.syncRigidBodies(this.physics.getRigidBodies());
     this.renderer.render();
   };
 }

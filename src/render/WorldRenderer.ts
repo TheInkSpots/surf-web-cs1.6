@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { SURF_NORMAL_Z } from '../core/constants';
 import { gsToThree } from '../core/coordinates';
 import { ConvexBrush, TriggerVolume } from '../physics/BrushBuilder';
+import { SourceRigidBody } from '../physics/GoldSrcPhysicsEngine';
 import { WorldSign } from '../maps/surfSandbox01';
 import { makeDevGridTexture, makeHazardTexture } from './textures';
 
@@ -12,6 +13,10 @@ export class WorldRenderer {
   private readonly vmScene = new THREE.Scene();
   private readonly vmCamera: THREE.PerspectiveCamera;
   private readonly boosterTex: THREE.CanvasTexture;
+  private readonly rigidBodyMat: THREE.MeshStandardMaterial;
+  private readonly rigidBodyEdgeMat: THREE.LineBasicMaterial;
+  private readonly rigidBodyMeshes = new Map<string, THREE.Mesh>();
+  private readonly seenRigidBodyIds = new Set<string>();
 
   public readonly debugGroup = new THREE.Group();
   public baseFov = 90;
@@ -71,6 +76,24 @@ export class WorldRenderer {
       true,
     );
 
+    this.rigidBodyMat = new THREE.MeshStandardMaterial({
+      map: makeDevGridTexture(
+        '#3b2f1e',
+        '#f59e0b',
+        'rgba(251,191,36,0.22)',
+        '#fbbf24',
+        maxAniso,
+        'PHYS',
+      ),
+      roughness: 0.5,
+      metalness: 0.22,
+    });
+    this.rigidBodyEdgeMat = new THREE.LineBasicMaterial({
+      color: 0xfcd34d,
+      transparent: true,
+      opacity: 0.65,
+    });
+
     const mats: Record<string, THREE.MeshStandardMaterial> = {
       slate: new THREE.MeshStandardMaterial({
         map: makeDevGridTexture('#1e2634', '#475569', 'rgba(148,163,184,0.12)', '#64748b', maxAniso, '64'),
@@ -120,6 +143,46 @@ export class WorldRenderer {
 
   public setDebugVisible(visible: boolean): void {
     this.debugGroup.visible = visible;
+  }
+
+  public syncRigidBodies(bodies: readonly SourceRigidBody[]): void {
+    this.seenRigidBodyIds.clear();
+
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i];
+      this.seenRigidBodyIds.add(b.id);
+
+      let mesh = this.rigidBodyMeshes.get(b.id);
+      if (!mesh) {
+        // GoldSrc (hx, hy, hz) -> Three.js (X, Z, Y)
+        const geo = new THREE.BoxGeometry(b.hx * 2, b.hz * 2, b.hy * 2);
+        mesh = new THREE.Mesh(geo, this.rigidBodyMat);
+
+        const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), this.rigidBodyEdgeMat);
+        mesh.add(edges);
+
+        this.scene.add(mesh);
+        this.rigidBodyMeshes.set(b.id, mesh);
+      }
+
+      gsToThree(b.pos.x, b.pos.y, b.pos.z, mesh.position);
+      // Proper SO(3) basis map from GoldSrc (X, Y, Z) to Three.js (X, Z, -Y)
+      mesh.quaternion.set(b.quat.x, b.quat.z, -b.quat.y, b.quat.w);
+    }
+
+    // Remove meshes for any rigid bodies that were despawned
+    for (const [id, mesh] of this.rigidBodyMeshes.entries()) {
+      if (!this.seenRigidBodyIds.has(id)) {
+        this.scene.remove(mesh);
+        mesh.geometry.dispose();
+        for (const child of mesh.children) {
+          if (child instanceof THREE.LineSegments) {
+            child.geometry.dispose();
+          }
+        }
+        this.rigidBodyMeshes.delete(id);
+      }
+    }
   }
 
   public update(
