@@ -2,9 +2,17 @@ import * as THREE from 'three';
 import { SURF_NORMAL_Z } from '../core/constants';
 import { gsToThree } from '../core/coordinates';
 import { ConvexBrush, TriggerVolume } from '../physics/BrushBuilder';
-import { SourceRigidBody } from '../physics/GoldSrcPhysicsEngine';
+import { SourceRigidBody, Vec3 } from '../physics/GoldSrcPhysicsEngine';
 import { WorldSign } from '../maps/surfSandbox01';
 import { makeDevGridTexture, makeHazardTexture } from './textures';
+
+interface ExplosionFx {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  age: number;
+  duration: number;
+  maxRadius: number;
+}
 
 export class WorldRenderer {
   private readonly renderer: THREE.WebGLRenderer;
@@ -17,6 +25,8 @@ export class WorldRenderer {
   private readonly rigidBodyEdgeMat: THREE.LineBasicMaterial;
   private readonly rigidBodyMeshes = new Map<string, THREE.Mesh>();
   private readonly seenRigidBodyIds = new Set<string>();
+  private readonly explosionGeo = new THREE.SphereGeometry(1, 20, 14);
+  private readonly explosionEffects: ExplosionFx[] = [];
 
   public readonly debugGroup = new THREE.Group();
   public baseFov = 90;
@@ -43,10 +53,10 @@ export class WorldRenderer {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.08;
 
-    this.scene.fog = new THREE.FogExp2(0x0c1322, 0.000105);
+    this.scene.fog = new THREE.FogExp2(0x0c1322, 0.000085);
 
     const aspect = window.innerWidth / window.innerHeight;
-    this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 2, 26000);
+    this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 2, 32000);
     this.camera.up.set(0, 1, 0);
 
     this.vmCamera = new THREE.PerspectiveCamera(62, aspect, 0.05, 20);
@@ -145,6 +155,28 @@ export class WorldRenderer {
     this.debugGroup.visible = visible;
   }
 
+  public spawnExplosionEffect(origin: Vec3, radius: number): void {
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xf97316,
+      transparent: true,
+      opacity: 0.48,
+      wireframe: true,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(this.explosionGeo, mat);
+    gsToThree(origin.x, origin.y, origin.z, mesh.position);
+    mesh.scale.setScalar(12);
+    this.scene.add(mesh);
+
+    this.explosionEffects.push({
+      mesh,
+      mat,
+      age: 0,
+      duration: 0.36,
+      maxRadius: Math.max(120, radius * 0.55),
+    });
+  }
+
   public syncRigidBodies(bodies: readonly SourceRigidBody[]): void {
     this.seenRigidBodyIds.clear();
 
@@ -154,7 +186,6 @@ export class WorldRenderer {
 
       let mesh = this.rigidBodyMeshes.get(b.id);
       if (!mesh) {
-        // GoldSrc (hx, hy, hz) -> Three.js (X, Z, Y)
         const geo = new THREE.BoxGeometry(b.hx * 2, b.hz * 2, b.hy * 2);
         mesh = new THREE.Mesh(geo, this.rigidBodyMat);
 
@@ -166,11 +197,9 @@ export class WorldRenderer {
       }
 
       gsToThree(b.pos.x, b.pos.y, b.pos.z, mesh.position);
-      // Proper SO(3) basis map from GoldSrc (X, Y, Z) to Three.js (X, Z, -Y)
       mesh.quaternion.set(b.quat.x, b.quat.z, -b.quat.y, b.quat.w);
     }
 
-    // Remove meshes for any rigid bodies that were despawned
     for (const [id, mesh] of this.rigidBodyMeshes.entries()) {
       if (!this.seenRigidBodyIds.has(id)) {
         this.scene.remove(mesh);
@@ -196,6 +225,22 @@ export class WorldRenderer {
   ): void {
     this.boosterTex.offset.y -= frameDt * 1.45;
 
+    // Advance expanding shockwave spheres
+    for (let i = this.explosionEffects.length - 1; i >= 0; i--) {
+      const fx = this.explosionEffects[i];
+      fx.age += frameDt;
+      const t = fx.age / fx.duration;
+      if (t >= 1) {
+        this.scene.remove(fx.mesh);
+        fx.mat.dispose();
+        this.explosionEffects.splice(i, 1);
+      } else {
+        const eased = 1 - (1 - t) * (1 - t);
+        fx.mesh.scale.setScalar(12 + eased * fx.maxRadius);
+        fx.mat.opacity = (1 - t) * 0.48;
+      }
+    }
+
     const cosP = Math.cos(renderPitch);
     const fwdX = cosP * Math.cos(renderYaw);
     const fwdY = cosP * Math.sin(renderYaw);
@@ -206,7 +251,6 @@ export class WorldRenderer {
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camLook);
 
-    // Velocity-reactive Dynamic FOV (base -> +22° at 3000+ u/s)
     const fovBoost = THREE.MathUtils.clamp((spdXY - 450) / 2550, 0, 1) * 22.0;
     const targetFov = this.baseFov + fovBoost;
     if (Math.abs(this.currentFov - targetFov) > 0.02) {
@@ -234,7 +278,7 @@ export class WorldRenderer {
   };
 
   private buildSkyDome(): void {
-    const skyGeo = new THREE.SphereGeometry(18000, 32, 20);
+    const skyGeo = new THREE.SphereGeometry(24000, 32, 20);
     const skyMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
@@ -342,16 +386,16 @@ export class WorldRenderer {
       }
     }
 
-    // Hazard-striped fail floor visual below map (Z = -200)
-    const failGeo = new THREE.PlaneGeometry(18000, 13000);
+    // Expanded hazard-striped fail floor below the 4-stage course (Z = -200)
+    const failGeo = new THREE.PlaneGeometry(24000, 18000);
     failGeo.rotateX(-Math.PI / 2);
     const failMat = new THREE.MeshBasicMaterial({
       map: makeHazardTexture(),
       transparent: true,
-      opacity: 0.75,
+      opacity: 0.72,
     });
     const failMesh = new THREE.Mesh(failGeo, failMat);
-    failMesh.position.set(5200, -200, -1400);
+    failMesh.position.set(6500, -200, 250);
     this.scene.add(failMesh);
 
     // Diegetic trigger fields + Mapper Debug Trigger Volumes (F2)
@@ -399,6 +443,26 @@ export class WorldRenderer {
         );
         wire.position.copy(posThree);
         this.scene.add(wire);
+      } else if (trig.type === 'explosion') {
+        const blastField = new THREE.Mesh(
+          boxGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0xf97316,
+            transparent: true,
+            opacity: 0.14,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          }),
+        );
+        blastField.position.copy(posThree);
+        this.scene.add(blastField);
+
+        const wire = new THREE.LineSegments(
+          new THREE.EdgesGeometry(boxGeo),
+          new THREE.LineBasicMaterial({ color: 0xfb923c, transparent: true, opacity: 0.7 }),
+        );
+        wire.position.copy(posThree);
+        this.scene.add(wire);
       } else if (trig.type === 'end') {
         const endField = new THREE.Mesh(
           boxGeo,
@@ -418,6 +482,7 @@ export class WorldRenderer {
         start: 0x10b981,
         end: 0x4ade80,
         push: 0x22d3ee,
+        explosion: 0xf97316,
         teleport: 0xf43f5e,
       };
       const col = dbgColors[trig.type] ?? 0xffffff;
@@ -442,7 +507,7 @@ export class WorldRenderer {
       this.debugGroup.add(dbgEdges);
     }
 
-    // Distant parallax monolith pillars for spatial speed perception
+    // Distant parallax monolith pillars spanning Stages 1-4
     const pillarMat = new THREE.MeshStandardMaterial({ color: 0x131c2e, roughness: 0.9, metalness: 0.1 });
     const pillarCoords: Array<[number, number]> = [
       [900, 1200],
@@ -453,11 +518,16 @@ export class WorldRenderer {
       [5600, 1750],
       [8200, 500],
       [7400, 3200],
-      [10400, 2900],
+      [10400, 5100],
+      [13600, 3200],
+      [13900, -200],
+      [10800, -1400],
+      [13400, -3400],
+      [8200, -5600],
     ];
     for (const [px, py] of pillarCoords) {
-      const pMesh = new THREE.Mesh(new THREE.BoxGeometry(220, 2600, 220), pillarMat);
-      pMesh.position.copy(gsToThree(px, py, 400));
+      const pMesh = new THREE.Mesh(new THREE.BoxGeometry(220, 3000, 220), pillarMat);
+      pMesh.position.copy(gsToThree(px, py, 500));
       this.scene.add(pMesh);
     }
   }
@@ -465,24 +535,24 @@ export class WorldRenderer {
   private buildWorldSigns(signs: WorldSign[]): void {
     for (const s of signs) {
       const c = document.createElement('canvas');
-      c.width = 640;
+      c.width = 760;
       c.height = 112;
       const g = c.getContext('2d')!;
       g.fillStyle = 'rgba(9, 13, 21, 0.84)';
-      g.fillRect(6, 6, 628, 100);
+      g.fillRect(6, 6, 748, 100);
       g.strokeStyle = s.color;
       g.lineWidth = 5;
-      g.strokeRect(6, 6, 628, 100);
+      g.strokeRect(6, 6, 748, 100);
       g.fillStyle = s.color;
-      g.font = '800 32px JetBrains Mono, monospace';
+      g.font = '800 28px JetBrains Mono, monospace';
       g.textAlign = 'center';
       g.textBaseline = 'middle';
-      g.fillText(s.text, 320, 58);
+      g.fillText(s.text, 380, 58);
 
       const tex = new THREE.CanvasTexture(c);
       tex.colorSpace = THREE.SRGBColorSpace;
       const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
-      const geo = new THREE.PlaneGeometry(280 * s.scale, 49 * s.scale);
+      const geo = new THREE.PlaneGeometry(320 * s.scale, 49 * s.scale);
       const mesh = new THREE.Mesh(geo, mat);
       mesh.position.copy(gsToThree(s.x, s.y, s.z));
       mesh.rotation.y = s.yaw - Math.PI * 0.5;

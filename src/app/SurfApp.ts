@@ -9,7 +9,11 @@ import {
   MoveState,
 } from '../core/constants';
 import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
-import { GoldSrcPhysicsEngine, SourceRigidBody } from '../physics/GoldSrcPhysicsEngine';
+import {
+  createBoxRigidBody,
+  GoldSrcPhysicsEngine,
+  SourceRigidBody,
+} from '../physics/GoldSrcPhysicsEngine';
 import { buildSurfSandbox01 } from '../maps/surfSandbox01';
 import { SurfAudioEngine } from '../audio/SurfAudioEngine';
 import { WorldRenderer } from '../render/WorldRenderer';
@@ -25,7 +29,7 @@ export class SurfApp {
   private readonly audio = new SurfAudioEngine();
   private readonly runTracker = new RunTracker();
   private readonly strafeSync = new StrafeSyncTracker(140);
-  private readonly rigidBodies: SourceRigidBody[] = [];
+  private readonly createInitialRigidBodies: () => SourceRigidBody[];
   private readonly physics: GoldSrcPhysicsEngine;
   private readonly renderer: WorldRenderer;
   private readonly viewmodel: ViewmodelRig;
@@ -33,6 +37,7 @@ export class SurfApp {
   private readonly hud: HudController;
   private readonly menu: MenuController;
 
+  private spawnedPropCount = 0;
   private lastFrameTime = performance.now();
   private accumulator = 0;
   private simMsAvg = 0.08;
@@ -40,10 +45,17 @@ export class SurfApp {
 
   constructor(canvas: HTMLCanvasElement) {
     const mapData = buildSurfSandbox01();
+    this.createInitialRigidBodies = mapData.createRigidBodies;
 
     this.hud = new HudController(this.runTracker);
     this.viewmodel = new ViewmodelRig();
-    this.renderer = new WorldRenderer(canvas, mapData.brushes, mapData.triggers, mapData.signs, this.viewmodel.root);
+    this.renderer = new WorldRenderer(
+      canvas,
+      mapData.brushes,
+      mapData.triggers,
+      mapData.signs,
+      this.viewmodel.root,
+    );
 
     this.physics = new GoldSrcPhysicsEngine(
       this.abi,
@@ -56,6 +68,17 @@ export class SurfApp {
         onBoost: () => {
           this.audio.playBoost();
           this.hud.flashScreen('rgba(34, 211, 238, 0.35)');
+        },
+        onExplosion: (_triggerId, origin, radius) => {
+          this.audio.playBoost();
+          this.audio.playLand(620);
+          this.renderer.spawnExplosionEffect(origin, radius);
+          this.hud.flashScreen('rgba(249, 115, 22, 0.42)');
+        },
+        onRigidBodyHit: (_bodyId, impulseMag) => {
+          if (impulseMag > 2400) {
+            this.audio.playLand(Math.min(500, impulseMag * 0.06));
+          }
         },
         onTeleport: (isFail) => {
           this.runTracker.reset();
@@ -84,7 +107,7 @@ export class SurfApp {
           );
         },
       },
-      this.rigidBodies,
+      this.createInitialRigidBodies(),
     );
 
     this.input = new InputController(canvas, mapData.spawn, {
@@ -127,8 +150,78 @@ export class SurfApp {
       onMuteChange: (muted) => this.audio.setMuted(muted),
     });
 
+    window.addEventListener('keydown', this.handleSandboxHotkey);
+
     this.physics.teleportToSpawn(false);
     this.menu.syncAll();
+  }
+
+  /** Live VPhysics hotkeys while pointer-locked: G = spawn crate, F = blast, X = reset props */
+  private handleSandboxHotkey = (e: KeyboardEvent): void => {
+    if (!this.input.isPointerLocked || e.repeat) return;
+
+    if (e.code === 'KeyG') {
+      this.spawnCrateAhead();
+    } else if (e.code === 'KeyF') {
+      this.detonateBlastAhead();
+    } else if (e.code === 'KeyX') {
+      this.physics.setRigidBodies(this.createInitialRigidBodies());
+      this.hud.showToast('VPHYSICS PROPS RESET', 'rgba(251,191,36,0.65)');
+    }
+  };
+
+  private spawnCrateAhead(): void {
+    const vf = this.abi.f32;
+    const yaw = this.input.viewYaw;
+    const pitch = this.input.viewPitch;
+    const cosP = Math.cos(pitch);
+    const dirX = cosP * Math.cos(yaw);
+    const dirY = cosP * Math.sin(yaw);
+    const dirZ = Math.sin(pitch);
+
+    const spawnPos = {
+      x: vf[F32.POS_X] + dirX * 96,
+      y: vf[F32.POS_Y] + dirY * 96,
+      z: vf[F32.POS_Z] + vf[F32.VIEW_OFS_Z] + dirZ * 96,
+    };
+
+    const throwSpeed = 420;
+    const crate = createBoxRigidBody(
+      `spawned_crate_${++this.spawnedPropCount}`,
+      spawnPos,
+      { x: 22, y: 22, z: 22 },
+      34,
+      {
+        vel: {
+          x: vf[F32.VEL_X] + dirX * throwSpeed,
+          y: vf[F32.VEL_Y] + dirY * throwSpeed,
+          z: vf[F32.VEL_Z] + dirZ * throwSpeed + 90,
+        },
+        restitution: 0.42,
+      },
+    );
+
+    this.physics.addRigidBody(crate);
+    this.audio.playWeaponSwitch();
+  }
+
+  private detonateBlastAhead(): void {
+    const vf = this.abi.f32;
+    const yaw = this.input.viewYaw;
+    const pitch = this.input.viewPitch;
+    const cosP = Math.cos(pitch);
+    const dirX = cosP * Math.cos(yaw);
+    const dirY = cosP * Math.sin(yaw);
+    const dirZ = Math.sin(pitch);
+
+    // Detonate 120u along the view ray (aim down to rocket-jump or at crates to scatter them)
+    const origin = {
+      x: vf[F32.POS_X] + dirX * 120,
+      y: vf[F32.POS_Y] + dirY * 120,
+      z: vf[F32.POS_Z] + vf[F32.VIEW_OFS_Z] + dirZ * 120,
+    };
+
+    this.physics.applyExplosionImpulse(origin, 72000, 620, 1.25, 'hotkey_blast');
   }
 
   private getActiveWeaponSpeed(): number {

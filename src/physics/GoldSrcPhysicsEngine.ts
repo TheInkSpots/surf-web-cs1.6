@@ -81,6 +81,7 @@ export interface PhysicsCallbacks {
   onBoost?: (triggerId: string) => void;
   onTeleport?: (isFail: boolean) => void;
   onRigidBodyHit?: (bodyId: string, impulseMag: number) => void;
+  onExplosion?: (triggerId: string, origin: Vec3, radius: number) => void;
 }
 
 interface TraceResult {
@@ -94,6 +95,49 @@ interface TraceResult {
   startSolid: boolean;
   allSolid: boolean;
   brushId: string;
+}
+
+/** Create a box rigid body with exact cuboid principal inertia tensor I = (m/12) * (w^2 + h^2) */
+export function createBoxRigidBody(
+  id: string,
+  pos: Vec3,
+  halfExtents: Vec3,
+  mass: number,
+  opts: {
+    vel?: Vec3;
+    restitution?: number;
+    gravityScale?: number;
+    surfaceFriction?: number;
+  } = {},
+): SourceRigidBody {
+  const sx = halfExtents.x * 2;
+  const sy = halfExtents.y * 2;
+  const sz = halfExtents.z * 2;
+  const inv12 = mass / 12;
+
+  return {
+    id,
+    pos: { x: f32(pos.x), y: f32(pos.y), z: f32(pos.z) },
+    vel: {
+      x: f32(opts.vel?.x ?? 0),
+      y: f32(opts.vel?.y ?? 0),
+      z: f32(opts.vel?.z ?? 0),
+    },
+    quat: { w: f32(1), x: f32(0), y: f32(0), z: f32(0) },
+    angVel: { x: f32(0), y: f32(0), z: f32(0) },
+    inertiaLocal: {
+      x: f32(inv12 * (sy * sy + sz * sz)),
+      y: f32(inv12 * (sx * sx + sz * sz)),
+      z: f32(inv12 * (sx * sx + sy * sy)),
+    },
+    hx: f32(halfExtents.x),
+    hy: f32(halfExtents.y),
+    hz: f32(halfExtents.z),
+    mass: f32(mass),
+    restitution: f32(opts.restitution ?? 0.35),
+    gravityScale: f32(opts.gravityScale ?? 1.0),
+    surfaceFriction: opts.surfaceFriction,
+  };
 }
 
 function normalizeQuat(q: Quat): Quat {
@@ -149,7 +193,6 @@ function dotVec3(a: Vec3, b: Vec3): number {
 
 /** Compute world inertia tensor I = R * I_local * R^T and its inverse I^-1 */
 function computeWorldInertia(rot: Mat3, inertiaLocal: Vec3): { inertia: Mat3; invInertia: Mat3 } {
-  // Scale columns of R by diagonal inertiaLocal to get R * I_local
   const s0x = rot[0] * inertiaLocal.x;
   const s0y = rot[3] * inertiaLocal.x;
   const s0z = rot[6] * inertiaLocal.x;
@@ -162,7 +205,6 @@ function computeWorldInertia(rot: Mat3, inertiaLocal: Vec3): { inertia: Mat3; in
   const s2y = rot[5] * inertiaLocal.z;
   const s2z = rot[8] * inertiaLocal.z;
 
-  // (R * I_local) * R^T
   const i00 = f32(s0x * rot[0] + s1x * rot[1] + s2x * rot[2]);
   const i01 = f32(s0x * rot[3] + s1x * rot[4] + s2x * rot[5]);
   const i02 = f32(s0x * rot[6] + s1x * rot[7] + s2x * rot[8]);
@@ -189,10 +231,7 @@ function computeWorldInertia(rot: Mat3, inertiaLocal: Vec3): { inertia: Mat3; in
 
   const det = i00 * c00 + i01 * c01 + i02 * c02;
   if (Math.abs(det) < 1e-8) {
-    return {
-      inertia,
-      invInertia: [0, 0, 0, 0, 0, 0, 0, 0, 0],
-    };
+    return { inertia, invInertia: [0, 0, 0, 0, 0, 0, 0, 0, 0] };
   }
   const invDet = 1 / det;
 
@@ -209,12 +248,12 @@ export class GoldSrcPhysicsEngine {
   private readonly abi: PhysicsMemoryAbi;
   private readonly brushes: ConvexBrush[];
   private readonly triggers: TriggerVolume[];
-  private readonly rigidBodies: SourceRigidBody[];
+  private rigidBodies: SourceRigidBody[];
   private readonly spawn: SpawnPoint;
   private readonly callbacks: PhysicsCallbacks;
   private readonly sourceConfig: Required<SourcePhysicsConfig>;
 
-  private readonly pushCooldowns = new Map<string, number>();
+  private readonly triggerCooldowns = new Map<string, number>();
   private readonly clipOut = new Float32Array(3);
   private readonly planesX = new Float32Array(MAX_CLIP_PLANES);
   private readonly planesY = new Float32Array(MAX_CLIP_PLANES);
@@ -272,12 +311,17 @@ export class GoldSrcPhysicsEngine {
     this.rigidBodies.push(body);
   }
 
+  public setRigidBodies(bodies: SourceRigidBody[]): void {
+    this.rigidBodies = bodies;
+  }
+
   /** Radial explosion impulse scaled by blast radius R and phys_pushscale */
   public applyExplosionImpulse(
     origin: Vec3,
     maxDamage: number,
     radius: number,
     pushScaleOverride?: number,
+    sourceId = 'manual_blast',
   ): void {
     if (radius <= 0) return;
     const kPush = pushScaleOverride ?? this.sourceConfig.physPushScale;
@@ -298,7 +342,7 @@ export class GoldSrcPhysicsEngine {
       this.abi.i32[I32.FLAGS] &= ~FL_ONGROUND;
     }
 
-    // Rigid-body impulses
+    // Rigid-body linear + slight eccentric tumble impulses
     for (let i = 0; i < this.rigidBodies.length; i++) {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
@@ -308,14 +352,37 @@ export class GoldSrcPhysicsEngine {
       const dist = Math.hypot(dx, dy, dz);
       if (dist > 1e-5 && dist < radius) {
         const mag = maxDamage * Math.max(0, 1 - dist / radius) * kPush;
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const nz = dz / dist;
         const dv = mag / b.mass;
-        b.vel.x = f32(b.vel.x + dv * (dx / dist));
-        b.vel.y = f32(b.vel.y + dv * (dy / dist));
-        b.vel.z = f32(b.vel.z + dv * (dz / dist));
+
+        b.vel.x = f32(b.vel.x + dv * nx);
+        b.vel.y = f32(b.vel.y + dv * ny);
+        b.vel.z = f32(b.vel.z + dv * nz);
+
+        // Apply slight off-center torque from blast shockwave hitting lower edge
+        const rot = quatToMat3(b.quat);
+        const { invInertia } = computeWorldInertia(rot, b.inertiaLocal);
+        const lever: Vec3 = {
+          x: f32(-nx * b.hx * 0.4),
+          y: f32(-ny * b.hy * 0.4),
+          z: f32(-b.hz * 0.5),
+        };
+        const impulseVec: Vec3 = {
+          x: f32(nx * mag * 0.35),
+          y: f32(ny * mag * 0.35),
+          z: f32(nz * mag * 0.35),
+        };
+        const dOmega = mulMat3Vec3(invInertia, crossVec3(lever, impulseVec));
+        b.angVel.x = f32(b.angVel.x + dOmega.x);
+        b.angVel.y = f32(b.angVel.y + dOmega.y);
+        b.angVel.z = f32(b.angVel.z + dOmega.z);
       }
     }
 
     this.checkVelocity();
+    this.callbacks.onExplosion?.(sourceId, origin, radius);
   }
 
   public getHullHalfZ(): number {
@@ -342,7 +409,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.PREV_VIEW_OFS_Z] = HULL_STAND.eyeZ;
     vi[I32.FLAGS] = FL_ONGROUND;
     vi[I32.MOVESTATE] = MoveState.GROUND;
-    this.pushCooldowns.clear();
+    this.triggerCooldowns.clear();
     this.callbacks.onTeleport?.(isFail);
   }
 
@@ -355,22 +422,20 @@ export class GoldSrcPhysicsEngine {
     const sr = Math.sin(roll);
     const cr = Math.cos(roll);
 
-    const forward: Vec3 = {
-      x: f32(cp * cy),
-      y: f32(cp * sy),
-      z: f32(-sp),
+    return {
+      forward: {
+        x: f32(cp * cy),
+        y: f32(cp * sy),
+        z: f32(-sp),
+      },
+      right: {
+        x: f32(-sr * sp * cy + cr * sy),
+        y: f32(-sr * sp * sy - cr * cy),
+        z: f32(-sr * cp),
+      },
     };
-
-    const right: Vec3 = {
-      x: f32(-sr * sp * cy + cr * sy),
-      y: f32(-sr * sp * sy - cr * cy),
-      z: f32(-sr * cp),
-    };
-
-    return { forward, right };
   }
 
-  /** Half-step gravity helper (StartGravity / FinishGravity) */
   private applyHalfGravity(gravity: number, gravityScale = 1.0): void {
     const vf = this.abi.f32;
     vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] - 0.5 * gravityScale * gravity * FIXED_DT);
@@ -379,7 +444,6 @@ export class GoldSrcPhysicsEngine {
   public simulateTick(): void {
     const { f32: vf, i32: vi } = this.abi;
 
-    // Save previous transform for high-refresh-rate render interpolation
     vf[F32.PREV_X] = vf[F32.POS_X];
     vf[F32.PREV_Y] = vf[F32.POS_Y];
     vf[F32.PREV_Z] = vf[F32.POS_Z];
@@ -478,9 +542,10 @@ export class GoldSrcPhysicsEngine {
       }
     }
 
-    // 8. VPhysics rigid bodies & player-prop collision resolution
+    // 8. VPhysics rigid bodies: world traces, prop-prop stacking & player-prop impulses
     if (this.rigidBodies.length > 0) {
       this.stepRigidBodies();
+      this.resolveRigidBodyPairCollisions();
       this.resolvePlayerRigidBodyCollisions();
     }
 
@@ -498,7 +563,7 @@ export class GoldSrcPhysicsEngine {
       vi[I32.MOVESTATE] = MoveState.AIR;
     }
 
-    // 10. Check triggers (start, end, push boosters, fail teleporter)
+    // 10. Check triggers (start, end, push, explosion, teleport)
     this.checkTriggers();
 
     vi[I32.PREV_BUTTONS] = buttons;
@@ -527,7 +592,7 @@ export class GoldSrcPhysicsEngine {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
 
-      // Semi-implicit Euler linear velocity & position
+      // Semi-implicit Euler linear velocity
       b.vel.x = f32(b.vel.x * linKeep);
       b.vel.y = f32(b.vel.y * linKeep);
       b.vel.z = f32(b.vel.z * linKeep - gravity * b.gravityScale * FIXED_DT);
@@ -536,7 +601,7 @@ export class GoldSrcPhysicsEngine {
       const targetY = f32(b.pos.y + b.vel.y * FIXED_DT);
       const targetZ = f32(b.pos.z + b.vel.z * FIXED_DT);
 
-      // Semi-implicit Euler angular velocity & quaternion integration (tau_ext = 0 here)
+      // Semi-implicit Euler angular velocity & quaternion integration
       const rot = quatToMat3(b.quat);
       const { inertia, invInertia } = computeWorldInertia(rot, b.inertiaLocal);
       const iOmega = mulMat3Vec3(inertia, b.angVel);
@@ -551,7 +616,6 @@ export class GoldSrcPhysicsEngine {
       b.angVel.y = f32(b.angVel.y * angKeep + angAccel.y * FIXED_DT);
       b.angVel.z = f32(b.angVel.z * angKeep + angAccel.z * FIXED_DT);
 
-      // q_{t+dt} = normalize(q_t + 0.5 * [0, omega_{t+dt}] * q_t * dt)
       const qw = b.quat.w;
       const qx = b.quat.x;
       const qy = b.quat.y;
@@ -587,16 +651,15 @@ export class GoldSrcPhysicsEngine {
           b.vel.y = f32(b.vel.y - n.y * vn * bounce);
           b.vel.z = f32(b.vel.z - n.z * vn * bounce);
 
-          // Tangential friction on contact
           const mu = b.surfaceFriction ?? this.sourceConfig.surfaceFriction;
-          const damp = f32(Math.max(0, 1.0 - 0.12 * mu));
+          const damp = f32(Math.max(0, 1.0 - 0.14 * mu));
           b.vel.x = f32(b.vel.x * damp);
           b.vel.y = f32(b.vel.y * damp);
-          b.angVel.x = f32(b.angVel.x * 0.85);
-          b.angVel.y = f32(b.angVel.y * 0.85);
-          b.angVel.z = f32(b.angVel.z * 0.85);
+          b.angVel.x = f32(b.angVel.x * 0.86);
+          b.angVel.y = f32(b.angVel.y * 0.86);
+          b.angVel.z = f32(b.angVel.z * 0.86);
 
-          if (n.z >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 12) {
+          if (n.z >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 16) {
             b.vel.z = f32(0);
           }
         }
@@ -604,7 +667,114 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** Resolve AABB overlap and rigid-body impulse with lever arms r_A, r_B and inertia I */
+  /** Resolve rigid-body vs rigid-body stacking & collision impulses with full 2-body inertia */
+  private resolveRigidBodyPairCollisions(): void {
+    const count = this.rigidBodies.length;
+    for (let i = 0; i < count; i++) {
+      const a = this.rigidBodies[i];
+      if (a.mass <= 0) continue;
+      const invMassA = 1 / a.mass;
+
+      for (let j = i + 1; j < count; j++) {
+        const b = this.rigidBodies[j];
+        if (b.mass <= 0) continue;
+
+        const dx = b.pos.x - a.pos.x;
+        const dy = b.pos.y - a.pos.y;
+        const dz = b.pos.z - a.pos.z;
+
+        const overlapX = a.hx + b.hx - Math.abs(dx);
+        const overlapY = a.hy + b.hy - Math.abs(dy);
+        const overlapZ = a.hz + b.hz - Math.abs(dz);
+
+        if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
+
+        // Normal n points from A to B
+        let nx = 0;
+        let ny = 0;
+        let nz = 0;
+        let pen = 0;
+
+        if (overlapX < overlapY && overlapX < overlapZ) {
+          pen = overlapX;
+          nx = dx >= 0 ? 1 : -1;
+        } else if (overlapY < overlapZ) {
+          pen = overlapY;
+          ny = dy >= 0 ? 1 : -1;
+        } else {
+          pen = overlapZ;
+          nz = dz >= 0 ? 1 : -1;
+        }
+
+        const n: Vec3 = { x: f32(nx), y: f32(ny), z: f32(nz) };
+        const invMassB = 1 / b.mass;
+        const totalInvMass = invMassA + invMassB;
+        const aShare = invMassA / totalInvMass;
+        const bShare = invMassB / totalInvMass;
+
+        a.pos.x = f32(a.pos.x - n.x * pen * aShare);
+        a.pos.y = f32(a.pos.y - n.y * pen * aShare);
+        a.pos.z = f32(a.pos.z - n.z * pen * aShare);
+
+        b.pos.x = f32(b.pos.x + n.x * pen * bShare);
+        b.pos.y = f32(b.pos.y + n.y * pen * bShare);
+        b.pos.z = f32(b.pos.z + n.z * pen * bShare);
+
+        // Overlap volume center as contact point p
+        const contact: Vec3 = {
+          x: f32((Math.max(a.pos.x - a.hx, b.pos.x - b.hx) + Math.min(a.pos.x + a.hx, b.pos.x + b.hx)) * 0.5),
+          y: f32((Math.max(a.pos.y - a.hy, b.pos.y - b.hy) + Math.min(a.pos.y + a.hy, b.pos.y + b.hy)) * 0.5),
+          z: f32((Math.max(a.pos.z - a.hz, b.pos.z - b.hz) + Math.min(a.pos.z + a.hz, b.pos.z + b.hz)) * 0.5),
+        };
+        const rA: Vec3 = { x: f32(contact.x - a.pos.x), y: f32(contact.y - a.pos.y), z: f32(contact.z - a.pos.z) };
+        const rB: Vec3 = { x: f32(contact.x - b.pos.x), y: f32(contact.y - b.pos.y), z: f32(contact.z - b.pos.z) };
+
+        const { invInertia: invIA } = computeWorldInertia(quatToMat3(a.quat), a.inertiaLocal);
+        const { invInertia: invIB } = computeWorldInertia(quatToMat3(b.quat), b.inertiaLocal);
+
+        const wA = crossVec3(a.angVel, rA);
+        const wB = crossVec3(b.angVel, rB);
+        const vRel: Vec3 = {
+          x: f32((b.vel.x + wB.x) - (a.vel.x + wA.x)),
+          y: f32((b.vel.y + wB.y) - (a.vel.y + wA.y)),
+          z: f32((b.vel.z + wB.z) - (a.vel.z + wA.z)),
+        };
+
+        const vRelDotN = dotVec3(vRel, n);
+        if (vRelDotN >= 0) continue;
+
+        const angTermA = dotVec3(crossVec3(mulMat3Vec3(invIA, crossVec3(rA, n)), rA), n);
+        const angTermB = dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, n)), rB), n);
+
+        const e = Math.min(a.restitution, b.restitution);
+        const denom = invMassA + invMassB + angTermA + angTermB;
+        if (denom <= 1e-8) continue;
+
+        const imp = f32((-(1 + e) * vRelDotN) / denom);
+        const jn: Vec3 = { x: f32(imp * n.x), y: f32(imp * n.y), z: f32(imp * n.z) };
+
+        a.vel.x = f32(a.vel.x - jn.x * invMassA);
+        a.vel.y = f32(a.vel.y - jn.y * invMassA);
+        a.vel.z = f32(a.vel.z - jn.z * invMassA);
+
+        b.vel.x = f32(b.vel.x + jn.x * invMassB);
+        b.vel.y = f32(b.vel.y + jn.y * invMassB);
+        b.vel.z = f32(b.vel.z + jn.z * invMassB);
+
+        const dOmegaA = mulMat3Vec3(invIA, crossVec3(rA, jn));
+        a.angVel.x = f32(a.angVel.x - dOmegaA.x);
+        a.angVel.y = f32(a.angVel.y - dOmegaA.y);
+        a.angVel.z = f32(a.angVel.z - dOmegaA.z);
+
+        const dOmegaB = mulMat3Vec3(invIB, crossVec3(rB, jn));
+        b.angVel.x = f32(b.angVel.x + dOmegaB.x);
+        b.angVel.y = f32(b.angVel.y + dOmegaB.y);
+        b.angVel.z = f32(b.angVel.z + dOmegaB.z);
+      }
+    }
+  }
+
+  /** Resolve AABB overlap and impulse transfer between player hull (A) and rigid body (B) */
   private resolvePlayerRigidBodyCollisions(): void {
     const vf = this.abi.f32;
     const phx = HULL_STAND.hx;
@@ -620,9 +790,10 @@ export class GoldSrcPhysicsEngine {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
 
-      const dx = pPos.x - b.pos.x;
-      const dy = pPos.y - b.pos.y;
-      const dz = pPos.z - b.pos.z;
+      // Vector from Player (A) to Body (B)
+      const dx = b.pos.x - pPos.x;
+      const dy = b.pos.y - pPos.y;
+      const dz = b.pos.z - pPos.z;
 
       const overlapX = phx + b.hx - Math.abs(dx);
       const overlapY = phy + b.hy - Math.abs(dy);
@@ -630,6 +801,7 @@ export class GoldSrcPhysicsEngine {
 
       if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
 
+      // Normal n points from A (player) to B (body)
       let nx = 0;
       let ny = 0;
       let nz = 0;
@@ -652,25 +824,20 @@ export class GoldSrcPhysicsEngine {
       const pShare = pInvMass / totalInvMass;
       const bShare = bInvMass / totalInvMass;
 
-      // Positional separation
-      pPos.x = f32(pPos.x + n.x * pen * pShare);
-      pPos.y = f32(pPos.y + n.y * pen * pShare);
-      pPos.z = f32(pPos.z + n.z * pen * pShare);
+      // Positional separation: A moves along -n, B moves along +n
+      pPos.x = f32(pPos.x - n.x * pen * pShare);
+      pPos.y = f32(pPos.y - n.y * pen * pShare);
+      pPos.z = f32(pPos.z - n.z * pen * pShare);
 
-      b.pos.x = f32(b.pos.x - n.x * pen * bShare);
-      b.pos.y = f32(b.pos.y - n.y * pen * bShare);
-      b.pos.z = f32(b.pos.z - n.z * pen * bShare);
+      b.pos.x = f32(b.pos.x + n.x * pen * bShare);
+      b.pos.y = f32(b.pos.y + n.y * pen * bShare);
+      b.pos.z = f32(b.pos.z + n.z * pen * bShare);
 
-      // Contact point p at mid-overlap along normal, lever arms r_A (player) and r_B (body)
+      // Overlap box center as contact point p
       const contact: Vec3 = {
-        x: f32(b.pos.x + n.x * (b.hx * Math.abs(n.x) + pen * 0.5)),
-        y: f32(b.pos.y + n.y * (b.hy * Math.abs(n.y) + pen * 0.5)),
-        z: f32(b.pos.z + n.z * (b.hz * Math.abs(n.z) + pen * 0.5)),
-      };
-      const rA: Vec3 = {
-        x: f32(contact.x - pPos.x),
-        y: f32(contact.y - pPos.y),
-        z: f32(contact.z - pPos.z),
+        x: f32((Math.max(pPos.x - phx, b.pos.x - b.hx) + Math.min(pPos.x + phx, b.pos.x + b.hx)) * 0.5),
+        y: f32((Math.max(pPos.y - phy, b.pos.y - b.hy) + Math.min(pPos.y + phy, b.pos.y + b.hy)) * 0.5),
+        z: f32((Math.max(pPos.z - phz, b.pos.z - b.hz) + Math.min(pPos.z + phz, b.pos.z + b.hz)) * 0.5),
       };
       const rB: Vec3 = {
         x: f32(contact.x - b.pos.x),
@@ -678,29 +845,20 @@ export class GoldSrcPhysicsEngine {
         z: f32(contact.z - b.pos.z),
       };
 
-      const rotB = quatToMat3(b.quat);
-      const { invInertia: invIB } = computeWorldInertia(rotB, b.inertiaLocal);
+      const { invInertia: invIB } = computeWorldInertia(quatToMat3(b.quat), b.inertiaLocal);
 
-      // v_rel = (v_B + omega_B x r_B) - (v_A + omega_A x r_A), with omega_A = 0
+      // v_rel = (v_B + omega_B x r_B) - v_A
       const omegaCrossRB = crossVec3(b.angVel, rB);
-      const vBAtContact: Vec3 = {
-        x: f32(b.vel.x + omegaCrossRB.x),
-        y: f32(b.vel.y + omegaCrossRB.y),
-        z: f32(b.vel.z + omegaCrossRB.z),
-      };
       const vRel: Vec3 = {
-        x: f32(vBAtContact.x - pVel.x),
-        y: f32(vBAtContact.y - pVel.y),
-        z: f32(vBAtContact.z - pVel.z),
+        x: f32((b.vel.x + omegaCrossRB.x) - pVel.x),
+        y: f32((b.vel.y + omegaCrossRB.y) - pVel.y),
+        z: f32((b.vel.z + omegaCrossRB.z) - pVel.z),
       };
 
       const vRelDotN = dotVec3(vRel, n);
-      if (vRelDotN > 0) continue;
+      if (vRelDotN >= 0) continue;
 
-      const rBCrossN = crossVec3(rB, n);
-      const invIBTimesCross = mulMat3Vec3(invIB, rBCrossN);
-      const angTermB = dotVec3(crossVec3(invIBTimesCross, rB), n);
-
+      const angTermB = dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, n)), rB), n);
       const e = Math.max(b.restitution, this.sourceConfig.svBounce);
       const denom = pInvMass + bInvMass + angTermB;
       if (denom <= 1e-8) continue;
@@ -708,15 +866,15 @@ export class GoldSrcPhysicsEngine {
       const j = f32((-(1 + e) * vRelDotN) / denom);
       const jn: Vec3 = { x: f32(j * n.x), y: f32(j * n.y), z: f32(j * n.z) };
 
-      // Player A (index 0 in v_rel = v_B - v_A): v_A' = v_A - (j / m_A) * n
-      pVel.x = f32(pVel.x - (j * pInvMass) * n.x);
-      pVel.y = f32(pVel.y - (j * pInvMass) * n.y);
-      pVel.z = f32(pVel.z - (j * pInvMass) * n.z);
+      // Player A: v_A' = v_A - (j / m_A) * n
+      pVel.x = f32(pVel.x - jn.x * pInvMass);
+      pVel.y = f32(pVel.y - jn.y * pInvMass);
+      pVel.z = f32(pVel.z - jn.z * pInvMass);
 
       // Rigid body B: v_B' = v_B + (j / m_B) * n, omega_B' = omega_B + I_B^-1 * (r_B x j*n)
-      b.vel.x = f32(b.vel.x + (j * bInvMass) * n.x);
-      b.vel.y = f32(b.vel.y + (j * bInvMass) * n.y);
-      b.vel.z = f32(b.vel.z + (j * bInvMass) * n.z);
+      b.vel.x = f32(b.vel.x + jn.x * bInvMass);
+      b.vel.y = f32(b.vel.y + jn.y * bInvMass);
+      b.vel.z = f32(b.vel.z + jn.z * bInvMass);
 
       const dOmegaB = mulMat3Vec3(invIB, crossVec3(rB, jn));
       b.angVel.x = f32(b.angVel.x + dOmegaB.x);
@@ -997,10 +1155,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = f32(vz);
   }
 
-  /**
-   * FlyMove: multi-plane iterative sliding (up to 4 bumps)
-   * with crease cross-product resolution when sliding against 2 planes simultaneously.
-   */
+  /** Multi-plane iterative sliding (up to 4 bumps) with crease cross-product resolution */
   private flyMove(): number {
     const vf = this.abi.f32;
     const hz = this.getHullHalfZ();
@@ -1289,7 +1444,6 @@ export class GoldSrcPhysicsEngine {
       return;
     }
 
-    // Path A: slide
     const origVX = vf[F32.VEL_X];
     const origVY = vf[F32.VEL_Y];
     const origVZ = vf[F32.VEL_Z];
@@ -1302,7 +1456,6 @@ export class GoldSrcPhysicsEngine {
     const downVZ = vf[F32.VEL_Z];
     const downDistSq = (downX - startX) ** 2 + (downY - startY) ** 2;
 
-    // Reset to start for Path B: step up -> move -> step down
     vf[F32.POS_X] = startX;
     vf[F32.POS_Y] = startY;
     vf[F32.POS_Z] = startZ;
@@ -1408,10 +1561,25 @@ export class GoldSrcPhysicsEngine {
       } else if (t.type === 'teleport') {
         this.teleportToSpawn(true);
         return;
+      } else if (t.type === 'explosion') {
+        const cooldown = (t.meta?.cooldownTicks as number | undefined) ?? 40;
+        const lastTick = this.triggerCooldowns.get(t.id) ?? -999;
+        if (tick - lastTick >= cooldown) {
+          this.triggerCooldowns.set(t.id, tick);
+          const origin: Vec3 = {
+            x: f32((t.meta?.originX as number | undefined) ?? (t.minX + t.maxX) * 0.5),
+            y: f32((t.meta?.originY as number | undefined) ?? (t.minY + t.maxY) * 0.5),
+            z: f32((t.meta?.originZ as number | undefined) ?? (t.minZ + t.maxZ) * 0.5),
+          };
+          const maxDamage = (t.meta?.maxDamage as number | undefined) ?? 80000;
+          const radius = (t.meta?.radius as number | undefined) ?? 900;
+          const pushScale = (t.meta?.pushScale as number | undefined) ?? this.sourceConfig.physPushScale;
+          this.applyExplosionImpulse(origin, maxDamage, radius, pushScale, t.id);
+        }
       } else if (t.type === 'push') {
-        const lastTick = this.pushCooldowns.get(t.id) ?? -999;
+        const lastTick = this.triggerCooldowns.get(t.id) ?? -999;
         if (tick - lastTick >= 22) {
-          this.pushCooldowns.set(t.id, tick);
+          this.triggerCooldowns.set(t.id, tick);
           const dirX = t.meta.dirX ?? 1;
           const dirY = t.meta.dirY ?? 0;
           const dirZ = t.meta.dirZ ?? 0.5;
