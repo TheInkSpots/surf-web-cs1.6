@@ -225,7 +225,6 @@ export class WorldRenderer {
   ): void {
     this.boosterTex.offset.y -= frameDt * 1.45;
 
-    // Advance expanding shockwave spheres
     for (let i = this.explosionEffects.length - 1; i >= 0; i--) {
       const fx = this.explosionEffects[i];
       fx.age += frameDt;
@@ -423,6 +422,26 @@ export class WorldRenderer {
         );
         gate.position.copy(posThree);
         this.scene.add(gate);
+      } else if (trig.type === 'checkpoint') {
+        const cpField = new THREE.Mesh(
+          boxGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0xa855f7,
+            transparent: true,
+            opacity: 0.08,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          }),
+        );
+        cpField.position.copy(posThree);
+        this.scene.add(cpField);
+
+        const wire = new THREE.LineSegments(
+          new THREE.EdgesGeometry(boxGeo),
+          new THREE.LineBasicMaterial({ color: 0xc084fc, transparent: true, opacity: 0.4 }),
+        );
+        wire.position.copy(posThree);
+        this.scene.add(wire);
       } else if (trig.type === 'push') {
         const boostField = new THREE.Mesh(
           boxGeo,
@@ -480,6 +499,7 @@ export class WorldRenderer {
 
       const dbgColors: Record<string, number> = {
         start: 0x10b981,
+        checkpoint: 0xa855f7,
         end: 0x4ade80,
         push: 0x22d3ee,
         explosion: 0xf97316,

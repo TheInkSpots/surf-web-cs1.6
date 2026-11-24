@@ -26,6 +26,19 @@ export interface SpawnPoint {
   pitch: number;
 }
 
+export interface CheckpointState {
+  index: number;
+  label: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  velX?: number;
+  velY?: number;
+  velZ?: number;
+}
+
 export interface SourcePhysicsConfig {
   sourceMaxVelocity?: number;
   svBounce?: number;
@@ -82,6 +95,7 @@ export interface PhysicsCallbacks {
   onTeleport?: (isFail: boolean) => void;
   onRigidBodyHit?: (bodyId: string, impulseMag: number) => void;
   onExplosion?: (triggerId: string, origin: Vec3, radius: number) => void;
+  onCheckpoint?: (cp: CheckpointState) => void;
 }
 
 interface TraceResult {
@@ -259,7 +273,7 @@ export class GoldSrcPhysicsEngine {
   private readonly planesY = new Float32Array(MAX_CLIP_PLANES);
   private readonly planesZ = new Float32Array(MAX_CLIP_PLANES);
 
-  // Source CGameMovement basevelocity (conveyors / pushers)
+  // Source CGameMovement basevelocity (conveyors / surfaces)
   private baseVelX = f32(0);
   private baseVelY = f32(0);
   private baseVelZ = f32(0);
@@ -315,6 +329,46 @@ export class GoldSrcPhysicsEngine {
     this.rigidBodies = bodies;
   }
 
+  /** Capture current player position, view angles, and velocity for practice save-states */
+  public captureCheckpointState(index = 0, label = 'CUSTOM SAVE-STATE'): CheckpointState {
+    const vf = this.abi.f32;
+    return {
+      index,
+      label,
+      x: vf[F32.POS_X],
+      y: vf[F32.POS_Y],
+      z: vf[F32.POS_Z],
+      yaw: vf[F32.CMD_YAW],
+      pitch: vf[F32.CMD_PITCH],
+      velX: vf[F32.VEL_X],
+      velY: vf[F32.VEL_Y],
+      velZ: vf[F32.VEL_Z],
+    };
+  }
+
+  /** Teleport player to a stage checkpoint or saved practice state */
+  public teleportToCheckpoint(cp: CheckpointState): void {
+    const { f32: vf, i32: vi } = this.abi;
+    vf[F32.POS_X] = f32(cp.x);
+    vf[F32.POS_Y] = f32(cp.y);
+    vf[F32.POS_Z] = f32(cp.z);
+    vf[F32.PREV_X] = f32(cp.x);
+    vf[F32.PREV_Y] = f32(cp.y);
+    vf[F32.PREV_Z] = f32(cp.z);
+    vf[F32.VEL_X] = f32(cp.velX ?? 0);
+    vf[F32.VEL_Y] = f32(cp.velY ?? 0);
+    vf[F32.VEL_Z] = f32(cp.velZ ?? 0);
+    this.baseVelX = f32(0);
+    this.baseVelY = f32(0);
+    this.baseVelZ = f32(0);
+    vf[F32.YAW] = f32(cp.yaw);
+    vf[F32.PITCH] = f32(cp.pitch);
+    vi[I32.FLAGS] &= ~FL_ONGROUND;
+    vi[I32.MOVESTATE] = MoveState.AIR;
+    this.triggerCooldowns.clear();
+    this.checkVelocity();
+  }
+
   /** Radial explosion impulse scaled by blast radius R and phys_pushscale */
   public applyExplosionImpulse(
     origin: Vec3,
@@ -361,7 +415,6 @@ export class GoldSrcPhysicsEngine {
         b.vel.y = f32(b.vel.y + dv * ny);
         b.vel.z = f32(b.vel.z + dv * nz);
 
-        // Apply slight off-center torque from blast shockwave hitting lower edge
         const rot = quatToMat3(b.quat);
         const { invInertia } = computeWorldInertia(rot, b.inertiaLocal);
         const lever: Vec3 = {
@@ -563,7 +616,7 @@ export class GoldSrcPhysicsEngine {
       vi[I32.MOVESTATE] = MoveState.AIR;
     }
 
-    // 10. Check triggers (start, end, push, explosion, teleport)
+    // 10. Check triggers (start, checkpoint, end, push, explosion, teleport)
     this.checkTriggers();
 
     vi[I32.PREV_BUTTONS] = buttons;
@@ -592,7 +645,6 @@ export class GoldSrcPhysicsEngine {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
 
-      // Semi-implicit Euler linear velocity
       b.vel.x = f32(b.vel.x * linKeep);
       b.vel.y = f32(b.vel.y * linKeep);
       b.vel.z = f32(b.vel.z * linKeep - gravity * b.gravityScale * FIXED_DT);
@@ -601,7 +653,6 @@ export class GoldSrcPhysicsEngine {
       const targetY = f32(b.pos.y + b.vel.y * FIXED_DT);
       const targetZ = f32(b.pos.z + b.vel.z * FIXED_DT);
 
-      // Semi-implicit Euler angular velocity & quaternion integration
       const rot = quatToMat3(b.quat);
       const { inertia, invInertia } = computeWorldInertia(rot, b.inertiaLocal);
       const iOmega = mulMat3Vec3(inertia, b.angVel);
@@ -689,7 +740,6 @@ export class GoldSrcPhysicsEngine {
 
         if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
 
-        // Normal n points from A to B
         let nx = 0;
         let ny = 0;
         let nz = 0;
@@ -720,7 +770,6 @@ export class GoldSrcPhysicsEngine {
         b.pos.y = f32(b.pos.y + n.y * pen * bShare);
         b.pos.z = f32(b.pos.z + n.z * pen * bShare);
 
-        // Overlap volume center as contact point p
         const contact: Vec3 = {
           x: f32((Math.max(a.pos.x - a.hx, b.pos.x - b.hx) + Math.min(a.pos.x + a.hx, b.pos.x + b.hx)) * 0.5),
           y: f32((Math.max(a.pos.y - a.hy, b.pos.y - b.hy) + Math.min(a.pos.y + a.hy, b.pos.y + b.hy)) * 0.5),
@@ -790,7 +839,6 @@ export class GoldSrcPhysicsEngine {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
 
-      // Vector from Player (A) to Body (B)
       const dx = b.pos.x - pPos.x;
       const dy = b.pos.y - pPos.y;
       const dz = b.pos.z - pPos.z;
@@ -801,7 +849,6 @@ export class GoldSrcPhysicsEngine {
 
       if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
 
-      // Normal n points from A (player) to B (body)
       let nx = 0;
       let ny = 0;
       let nz = 0;
@@ -824,7 +871,6 @@ export class GoldSrcPhysicsEngine {
       const pShare = pInvMass / totalInvMass;
       const bShare = bInvMass / totalInvMass;
 
-      // Positional separation: A moves along -n, B moves along +n
       pPos.x = f32(pPos.x - n.x * pen * pShare);
       pPos.y = f32(pPos.y - n.y * pen * pShare);
       pPos.z = f32(pPos.z - n.z * pen * pShare);
@@ -833,7 +879,6 @@ export class GoldSrcPhysicsEngine {
       b.pos.y = f32(b.pos.y + n.y * pen * bShare);
       b.pos.z = f32(b.pos.z + n.z * pen * bShare);
 
-      // Overlap box center as contact point p
       const contact: Vec3 = {
         x: f32((Math.max(pPos.x - phx, b.pos.x - b.hx) + Math.min(pPos.x + phx, b.pos.x + b.hx)) * 0.5),
         y: f32((Math.max(pPos.y - phy, b.pos.y - b.hy) + Math.min(pPos.y + phy, b.pos.y + b.hy)) * 0.5),
@@ -847,7 +892,6 @@ export class GoldSrcPhysicsEngine {
 
       const { invInertia: invIB } = computeWorldInertia(quatToMat3(b.quat), b.inertiaLocal);
 
-      // v_rel = (v_B + omega_B x r_B) - v_A
       const omegaCrossRB = crossVec3(b.angVel, rB);
       const vRel: Vec3 = {
         x: f32((b.vel.x + omegaCrossRB.x) - pVel.x),
@@ -866,12 +910,10 @@ export class GoldSrcPhysicsEngine {
       const j = f32((-(1 + e) * vRelDotN) / denom);
       const jn: Vec3 = { x: f32(j * n.x), y: f32(j * n.y), z: f32(j * n.z) };
 
-      // Player A: v_A' = v_A - (j / m_A) * n
       pVel.x = f32(pVel.x - jn.x * pInvMass);
       pVel.y = f32(pVel.y - jn.y * pInvMass);
       pVel.z = f32(pVel.z - jn.z * pInvMass);
 
-      // Rigid body B: v_B' = v_B + (j / m_B) * n, omega_B' = omega_B + I_B^-1 * (r_B x j*n)
       b.vel.x = f32(b.vel.x + jn.x * bInvMass);
       b.vel.y = f32(b.vel.y + jn.y * bInvMass);
       b.vel.z = f32(b.vel.z + jn.z * bInvMass);
@@ -1556,6 +1598,20 @@ export class GoldSrcPhysicsEngine {
 
       if (t.type === 'start') {
         this.callbacks.onStartRun?.();
+      } else if (t.type === 'checkpoint') {
+        const index = (t.meta?.index as number | undefined) ?? 1;
+        this.callbacks.onCheckpoint?.({
+          index,
+          label: (t.meta?.label as string | undefined) ?? `STAGE ${index}`,
+          x: (t.meta?.respawnX as number | undefined) ?? (t.minX + t.maxX) * 0.5,
+          y: (t.meta?.respawnY as number | undefined) ?? (t.minY + t.maxY) * 0.5,
+          z: (t.meta?.respawnZ as number | undefined) ?? t.minZ + 38,
+          yaw: (t.meta?.respawnYaw as number | undefined) ?? vf[F32.CMD_YAW],
+          pitch: (t.meta?.respawnPitch as number | undefined) ?? 0,
+          velX: (t.meta?.respawnVelX as number | undefined) ?? 0,
+          velY: (t.meta?.respawnVelY as number | undefined) ?? 0,
+          velZ: (t.meta?.respawnVelZ as number | undefined) ?? 0,
+        });
       } else if (t.type === 'end') {
         this.callbacks.onFinishRun?.();
       } else if (t.type === 'teleport') {
@@ -1577,16 +1633,16 @@ export class GoldSrcPhysicsEngine {
           this.applyExplosionImpulse(origin, maxDamage, radius, pushScale, t.id);
         }
       } else if (t.type === 'push') {
-        const cooldown = (t.meta.cooldownTicks as number | undefined) ?? 22;
+        const cooldown = (t.meta?.cooldownTicks as number | undefined) ?? 22;
         const lastTick = this.triggerCooldowns.get(t.id) ?? -999;
         if (tick - lastTick >= cooldown) {
           this.triggerCooldowns.set(t.id, tick);
           const dirX = t.meta.dirX ?? 1;
           const dirY = t.meta.dirY ?? 0;
-          const dirZ = t.meta.dirZ ?? 0.42;
-          const addSpeed = t.meta.addSpeed ?? 650;
-          const minSpeedXY = t.meta.minSpeedXY ?? 1950;
-          const minVelZ = t.meta.minVelZ ?? 680;
+          const dirZ = t.meta.dirZ ?? 0.36;
+          const addSpeed = t.meta.addSpeed ?? 400;
+          const minSpeedXY = t.meta.minSpeedXY ?? 1450;
+          const minVelZ = t.meta.minVelZ ?? 560;
 
           vf[F32.VEL_X] = f32(vf[F32.VEL_X] + dirX * addSpeed);
           vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + dirY * addSpeed);
@@ -1607,9 +1663,6 @@ export class GoldSrcPhysicsEngine {
           this.callbacks.onBoost?.(t.id);
         }
       }
-
-
-
     }
   }
 }

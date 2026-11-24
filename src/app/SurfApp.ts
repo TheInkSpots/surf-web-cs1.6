@@ -10,6 +10,7 @@ import {
 } from '../core/constants';
 import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
 import {
+  CheckpointState,
   createBoxRigidBody,
   GoldSrcPhysicsEngine,
   SourceRigidBody,
@@ -36,6 +37,11 @@ export class SurfApp {
   private readonly input: InputController;
   private readonly hud: HudController;
   private readonly menu: MenuController;
+
+  private activeCheckpoint: CheckpointState | null = null;
+  private customCheckpoint: CheckpointState | null = null;
+  private readonly visitedCheckpoints = new Set<number>();
+  private runStartTick = 0;
 
   private spawnedPropCount = 0;
   private lastFrameTime = performance.now();
@@ -80,17 +86,39 @@ export class SurfApp {
             this.audio.playLand(Math.min(500, impulseMag * 0.06));
           }
         },
+        onCheckpoint: (cp) => {
+          if (this.visitedCheckpoints.has(cp.index)) return;
+          this.visitedCheckpoints.add(cp.index);
+          this.activeCheckpoint = cp;
+
+          const elapsedSec =
+            this.runTracker.state === 'RUNNING'
+              ? (this.abi.i32[I32.TICK] - this.runStartTick) * FIXED_DT
+              : 0;
+          const timeSuffix = elapsedSec > 0 ? `  •  ${RunTracker.formatTime(elapsedSec)}` : '';
+          this.audio.playStartBeep();
+          this.hud.flashScreen('rgba(168, 85, 247, 0.25)');
+          this.hud.showToast(
+            `${cp.label}${timeSuffix}  (Press B to Respawn Here)`,
+            'rgba(168,85,247,0.75)',
+          );
+        },
         onTeleport: (isFail) => {
           this.runTracker.reset();
           if (isFail) {
             this.audio.playTeleport();
             this.hud.flashScreen('rgba(251, 113, 133, 0.42)');
-            this.hud.showToast('FAIL ZONE — TELEPORTED TO SPAWN', 'rgba(251,113,133,0.6)');
+            const cpHint = this.activeCheckpoint
+              ? `  •  Press B for ${this.activeCheckpoint.label}`
+              : '';
+            this.hud.showToast(`FAIL ZONE — TELEPORTED TO SPAWN${cpHint}`, 'rgba(251,113,133,0.65)');
           }
         },
         onStartRun: () => {
           if (this.runTracker.state !== 'RUNNING') {
-            this.runTracker.start(this.abi.i32[I32.TICK]);
+            this.runStartTick = this.abi.i32[I32.TICK];
+            this.visitedCheckpoints.clear();
+            this.runTracker.start(this.runStartTick);
             this.audio.playStartBeep();
             this.hud.showToast('RUN STARTED — GO!', 'rgba(52,211,153,0.6)');
           }
@@ -114,6 +142,8 @@ export class SurfApp {
       onUnlockRequest: () => this.audio.unlock(),
       onSelectWeapon: (slot) => this.selectWeapon(slot),
       onResetRun: () => {
+        this.activeCheckpoint = null;
+        this.visitedCheckpoints.clear();
         this.physics.teleportToSpawn(false);
         this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
         this.hud.showToast('RUN RESET', 'rgba(245,158,11,0.6)');
@@ -132,6 +162,8 @@ export class SurfApp {
     this.menu = new MenuController(this.abi, {
       onPlay: () => this.input.requestLock(),
       onRestart: () => {
+        this.activeCheckpoint = null;
+        this.visitedCheckpoints.clear();
         this.physics.teleportToSpawn(false);
         this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
         this.input.requestLock();
@@ -156,11 +188,42 @@ export class SurfApp {
     this.menu.syncAll();
   }
 
-  /** Live VPhysics hotkeys while pointer-locked: G = spawn crate, F = blast, X = reset props */
+  /**
+   * Live Sandbox Hotkeys (while pointer-locked):
+   *   B = Respawn at active stage checkpoint (Stages 2–4)
+   *   C = Save custom practice checkpoint
+   *   V = Load custom practice checkpoint (preserves velocity)
+   *   G = Spawn VPhysics crate ahead
+   *   F = Detonate radial blast ahead
+   *   X = Reset VPhysics props
+   */
   private handleSandboxHotkey = (e: KeyboardEvent): void => {
     if (!this.input.isPointerLocked || e.repeat) return;
 
-    if (e.code === 'KeyG') {
+    if (e.code === 'KeyB') {
+      if (!this.activeCheckpoint) {
+        this.hud.showToast('NO STAGE CHECKPOINT REACHED YET', 'rgba(148,163,184,0.6)');
+        return;
+      }
+      this.physics.teleportToCheckpoint(this.activeCheckpoint);
+      this.input.resetView(this.activeCheckpoint.yaw, this.activeCheckpoint.pitch);
+      this.audio.playTeleport();
+      this.hud.flashScreen('rgba(168, 85, 247, 0.32)');
+      this.hud.showToast(`RESPAWNED AT ${this.activeCheckpoint.label}`, 'rgba(168,85,247,0.75)');
+    } else if (e.code === 'KeyC') {
+      this.customCheckpoint = this.physics.captureCheckpointState(99, 'PRACTICE SAVE');
+      this.audio.playStartBeep();
+      this.hud.showToast('PRACTICE CHECKPOINT SAVED (Press V to Load)', 'rgba(56,189,248,0.7)');
+    } else if (e.code === 'KeyV') {
+      if (!this.customCheckpoint) {
+        this.hud.showToast('NO PRACTICE SAVE (Press C First)', 'rgba(148,163,184,0.6)');
+        return;
+      }
+      this.physics.teleportToCheckpoint(this.customCheckpoint);
+      this.input.resetView(this.customCheckpoint.yaw, this.customCheckpoint.pitch);
+      this.audio.playTeleport();
+      this.hud.showToast('LOADED PRACTICE CHECKPOINT', 'rgba(56,189,248,0.7)');
+    } else if (e.code === 'KeyG') {
       this.spawnCrateAhead();
     } else if (e.code === 'KeyF') {
       this.detonateBlastAhead();
@@ -214,7 +277,6 @@ export class SurfApp {
     const dirY = cosP * Math.sin(yaw);
     const dirZ = Math.sin(pitch);
 
-    // Detonate 120u along the view ray (aim down to rocket-jump or at crates to scatter them)
     const origin = {
       x: vf[F32.POS_X] + dirX * 120,
       y: vf[F32.POS_Y] + dirY * 120,

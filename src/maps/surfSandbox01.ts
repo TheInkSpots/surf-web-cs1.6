@@ -50,7 +50,7 @@ export function buildSurfSandbox01(): MapBuildResult {
     y: 0,
     z: 1265,
     yaw: Math.PI,
-    text: 'START GATE  •  4-STAGE COURSE  (G: CRATE | F: BLAST)',
+    text: 'START GATE  •  4-STAGE COURSE  (B: CP | G: CRATE | F: BLAST)',
     color: '#34d399',
     scale: 1.0,
   });
@@ -131,7 +131,7 @@ export function buildSurfSandbox01(): MapBuildResult {
   });
 
   // =========================================================================
-  // STAGE 2: DUAL-ANGLE SPLIT, MID-AIR BLAST GATE & SKY LAUNCH
+  // STAGE 2: CHECKPOINT 2, DUAL-ANGLE SPLIT & SKY LAUNCH
   // =========================================================================
 
   const d45 = Math.SQRT1_2;
@@ -139,6 +139,20 @@ export function buildSurfSandbox01(): MapBuildResult {
   const splitOriginY = 1270;
   const splitLen = 1320;
   const splitOffset = 350;
+
+  // Stage 2 Checkpoint Trigger (spans exit of curved bank into Dual Split entry)
+  builder.addTrigger('trig_cp_2', 'checkpoint', 6660, 900, 120, 7280, 1580, 780, {
+    index: 2,
+    label: 'STAGE 2 — DUAL SPLIT',
+    respawnX: 6920,
+    respawnY: 1365,
+    respawnZ: 365,
+    respawnYaw: Math.PI * 0.25,
+    respawnPitch: -0.05,
+    respawnVelX: 660,
+    respawnVelY: 660,
+    respawnVelZ: 0,
+  });
 
   // Side A (Left Branch): 48° Smooth Glide Ramp
   const sAx = splitOriginX - d45 * splitOffset;
@@ -217,7 +231,7 @@ export function buildSurfSandbox01(): MapBuildResult {
   });
 
   // =========================================================================
-  // STAGE 3: HIGH-ALTITUDE APEX SWEEP, ARCHWAY DIVE & BLAST CANYON
+  // STAGE 3: CHECKPOINT 3, HIGH-ALTITUDE APEX SWEEP & BLAST CANYON
   // =========================================================================
 
   const s3DeckX = b2x + d45 * 1120;
@@ -232,6 +246,31 @@ export function buildSurfSandbox01(): MapBuildResult {
     740,
     'slate',
   );
+
+  // Stage 3 Checkpoint Trigger (covers sky deck and fly-over air corridor into Ramp 6)
+  builder.addTrigger(
+    'trig_cp_3',
+    'checkpoint',
+    s3DeckX - 360,
+    s3DeckY - 360,
+    680,
+    s3DeckX + 460,
+    s3DeckY + 460,
+    1180,
+    {
+      index: 3,
+      label: 'STAGE 3 — HIGH APEX',
+      respawnX: s3DeckX,
+      respawnY: s3DeckY,
+      respawnZ: 778,
+      respawnYaw: 0.38,
+      respawnPitch: -0.05,
+      respawnVelX: 0,
+      respawnVelY: 0,
+      respawnVelZ: 0,
+    },
+  );
+
   signs.push({
     x: s3DeckX,
     y: s3DeckY,
@@ -328,8 +367,22 @@ export function buildSurfSandbox01(): MapBuildResult {
   });
 
   // =========================================================================
-  // STAGE 4: SOUTH SLALOM, 62° HYPER-WALL & CITADEL FINISH
+  // STAGE 4: CHECKPOINT 4, SOUTH SLALOM, 62° HYPER-WALL & CITADEL FINISH
   // =========================================================================
+
+  // Stage 4 Checkpoint Trigger (covers flight into Ramp 9 South Slalom)
+  builder.addTrigger('trig_cp_4', 'checkpoint', 12120, 680, 180, 12960, 1320, 920, {
+    index: 4,
+    label: 'STAGE 4 — SOUTH SLALOM',
+    respawnX: 12420,
+    respawnY: 860,
+    respawnZ: 430,
+    respawnYaw: -1.836,
+    respawnPitch: -0.05,
+    respawnVelX: -230,
+    respawnVelY: -850,
+    respawnVelZ: 0,
+  });
 
   // --- 11. RAMP 9: 54° LEFT-SIDE SLALOM ---
   builder.addSurfRampBrush('col_ramp_s4_1', {
