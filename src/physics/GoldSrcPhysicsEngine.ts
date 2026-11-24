@@ -26,6 +26,29 @@ export interface SpawnPoint {
   pitch: number;
 }
 
+export interface SourcePhysicsConfig {
+  sourceMaxVelocity?: number;
+  svBounce?: number;
+  playerMass?: number;
+  linearDamping?: number;
+}
+
+export interface RigidBody {
+  id: string;
+  posX: number;
+  posY: number;
+  posZ: number;
+  velX: number;
+  velY: number;
+  velZ: number;
+  hx: number;
+  hy: number;
+  hz: number;
+  mass: number;
+  restitution: number;
+  gravityScale: number;
+}
+
 export interface PhysicsCallbacks {
   onLand?: (impactSpeed: number) => void;
   onJump?: () => void;
@@ -33,6 +56,7 @@ export interface PhysicsCallbacks {
   onFinishRun?: () => void;
   onBoost?: (triggerId: string) => void;
   onTeleport?: (isFail: boolean) => void;
+  onRigidBodyHit?: (bodyId: string, impulseMag: number) => void;
 }
 
 interface TraceResult {
@@ -52,14 +76,21 @@ export class GoldSrcPhysicsEngine {
   private readonly abi: PhysicsMemoryAbi;
   private readonly brushes: ConvexBrush[];
   private readonly triggers: TriggerVolume[];
+  private readonly rigidBodies: RigidBody[];
   private readonly spawn: SpawnPoint;
   private readonly callbacks: PhysicsCallbacks;
+  private readonly sourceConfig: Required<SourcePhysicsConfig>;
 
   private readonly pushCooldowns = new Map<string, number>();
   private readonly clipOut = new Float32Array(3);
   private readonly planesX = new Float32Array(MAX_CLIP_PLANES);
   private readonly planesY = new Float32Array(MAX_CLIP_PLANES);
   private readonly planesZ = new Float32Array(MAX_CLIP_PLANES);
+
+  // Source CGameMovement basevelocity (conveyors / pushers)
+  private baseVelX = f32(0);
+  private baseVelY = f32(0);
+  private baseVelZ = f32(0);
 
   private readonly traceScratch: TraceResult = {
     fraction: f32(1.0),
@@ -80,12 +111,29 @@ export class GoldSrcPhysicsEngine {
     triggers: TriggerVolume[],
     spawn: SpawnPoint,
     callbacks: PhysicsCallbacks = {},
+    rigidBodies: RigidBody[] = [],
+    sourceConfig: SourcePhysicsConfig = {},
   ) {
     this.abi = abi;
     this.brushes = brushes;
     this.triggers = triggers;
+    this.rigidBodies = rigidBodies;
     this.spawn = spawn;
     this.callbacks = callbacks;
+    this.sourceConfig = {
+      sourceMaxVelocity: sourceConfig.sourceMaxVelocity ?? 3500,
+      svBounce: sourceConfig.svBounce ?? 0,
+      playerMass: sourceConfig.playerMass ?? 85,
+      linearDamping: sourceConfig.linearDamping ?? 0.02,
+    };
+  }
+
+  public getRigidBodies(): readonly RigidBody[] {
+    return this.rigidBodies;
+  }
+
+  public addRigidBody(body: RigidBody): void {
+    this.rigidBodies.push(body);
   }
 
   public getHullHalfZ(): number {
@@ -103,6 +151,9 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_X] = f32(0);
     vf[F32.VEL_Y] = f32(0);
     vf[F32.VEL_Z] = f32(0);
+    this.baseVelX = f32(0);
+    this.baseVelY = f32(0);
+    this.baseVelZ = f32(0);
     vf[F32.YAW] = f32(this.spawn.yaw);
     vf[F32.PITCH] = f32(this.spawn.pitch);
     vf[F32.VIEW_OFS_Z] = HULL_STAND.eyeZ;
@@ -143,15 +194,22 @@ export class GoldSrcPhysicsEngine {
 
     if (freshJump && (vi[I32.FLAGS] & FL_ONGROUND)) {
       vi[I32.FLAGS] &= ~FL_ONGROUND;
-      // Exact GoldSrc jump impulse: sqrt(2 * sv_gravity * 45) ≈ 268.328 u/s
+      // Jump impulse: sqrt(2 * gravity * 45) ≈ 268.328 u/s
       vf[F32.VEL_Z] = f32(Math.sqrt(2.0 * vf[F32.CVAR_GRAVITY] * 45.0));
       this.callbacks.onJump?.();
     }
 
-    // 4. First half of GoldSrc gravity step (only while airborne)
+    // 4. First half of gravity step (only while airborne)
     const isGroundedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     if (!isGroundedNow) {
       vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] - 0.5 * vf[F32.CVAR_GRAVITY] * FIXED_DT);
+    }
+
+    // Apply Source basevelocity before movement sweep
+    if (this.baseVelX !== 0 || this.baseVelY !== 0 || this.baseVelZ !== 0) {
+      vf[F32.VEL_X] = f32(vf[F32.VEL_X] + this.baseVelX);
+      vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + this.baseVelY);
+      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + this.baseVelZ);
     }
 
     // 5. Compute horizontal wish vector from view yaw & WASD move axes
@@ -186,7 +244,17 @@ export class GoldSrcPhysicsEngine {
       flyBlocked = this.airMove(wishX, wishY, wishspeed);
     }
 
-    // 7. Second half of GoldSrc gravity step
+    // Strip transient basevelocity after movement step
+    if (this.baseVelX !== 0 || this.baseVelY !== 0 || this.baseVelZ !== 0) {
+      vf[F32.VEL_X] = f32(vf[F32.VEL_X] - this.baseVelX);
+      vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] - this.baseVelY);
+      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] - this.baseVelZ);
+      this.baseVelX = f32(0);
+      this.baseVelY = f32(0);
+      this.baseVelZ = f32(0);
+    }
+
+    // 7. Second half of gravity step
     this.categorizePosition();
     const landedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     if (!landedNow) {
@@ -198,9 +266,15 @@ export class GoldSrcPhysicsEngine {
       }
     }
 
+    // 8. Source VPhysics-style rigid bodies & player-prop collision resolution
+    if (this.rigidBodies.length > 0) {
+      this.stepRigidBodies();
+      this.resolvePlayerRigidBodyCollisions();
+    }
+
     this.checkVelocity();
 
-    // 8. Determine telemetry state (GROUND / SURF / AIR)
+    // 9. Determine telemetry state (GROUND / SURF / AIR)
     if (landedNow) {
       vi[I32.MOVESTATE] = MoveState.GROUND;
     } else if (
@@ -212,14 +286,151 @@ export class GoldSrcPhysicsEngine {
       vi[I32.MOVESTATE] = MoveState.AIR;
     }
 
-    // 9. Check triggers (start, end, push boosters, fail teleporter)
+    // 10. Check triggers (start, end, push boosters, fail teleporter)
     this.checkTriggers();
 
     vi[I32.PREV_BUTTONS] = buttons;
   }
 
+  /** Step VPhysics-style rigid bodies against world convex brushes */
+  private stepRigidBodies(): void {
+    const gravity = this.abi.f32[F32.CVAR_GRAVITY];
+    const dampingFactor = f32(Math.max(0, 1.0 - this.sourceConfig.linearDamping * FIXED_DT));
+    const traceOut: TraceResult = {
+      fraction: f32(1.0),
+      endX: f32(0),
+      endY: f32(0),
+      endZ: f32(0),
+      normalX: f32(0),
+      normalY: f32(0),
+      normalZ: f32(0),
+      startSolid: false,
+      allSolid: false,
+      brushId: '',
+    };
+
+    for (let i = 0; i < this.rigidBodies.length; i++) {
+      const b = this.rigidBodies[i];
+      if (b.mass <= 0) continue;
+
+      b.velZ = f32(b.velZ - gravity * b.gravityScale * FIXED_DT);
+      b.velX = f32(b.velX * dampingFactor);
+      b.velY = f32(b.velY * dampingFactor);
+      b.velZ = f32(b.velZ * dampingFactor);
+
+      const targetX = f32(b.posX + b.velX * FIXED_DT);
+      const targetY = f32(b.posY + b.velY * FIXED_DT);
+      const targetZ = f32(b.posZ + b.velZ * FIXED_DT);
+
+      this.traceWorld(b.posX, b.posY, b.posZ, targetX, targetY, targetZ, b.hx, b.hy, b.hz, traceOut);
+
+      b.posX = traceOut.endX;
+      b.posY = traceOut.endY;
+      b.posZ = traceOut.endZ;
+
+      if (traceOut.fraction < 1.0) {
+        const vn = f32(
+          b.velX * traceOut.normalX + b.velY * traceOut.normalY + b.velZ * traceOut.normalZ,
+        );
+        if (vn < 0) {
+          const bounce = f32(1.0 + Math.max(b.restitution, this.sourceConfig.svBounce));
+          b.velX = f32(b.velX - traceOut.normalX * vn * bounce);
+          b.velY = f32(b.velY - traceOut.normalY * vn * bounce);
+          b.velZ = f32(b.velZ - traceOut.normalZ * vn * bounce);
+
+          // Ground contact friction for rigid bodies
+          if (traceOut.normalZ >= SURF_NORMAL_Z) {
+            b.velX = f32(b.velX * 0.92);
+            b.velY = f32(b.velY * 0.92);
+            if (Math.abs(b.velZ) < 12) b.velZ = f32(0);
+          }
+        }
+      }
+    }
+  }
+
+  /** Resolve AABB overlap and impulse transfer between player hull and rigid bodies */
+  private resolvePlayerRigidBodyCollisions(): void {
+    const vf = this.abi.f32;
+    const phx = HULL_STAND.hx;
+    const phy = HULL_STAND.hy;
+    const phz = this.getHullHalfZ();
+
+    const pMass = Math.max(1, this.sourceConfig.playerMass);
+    const pInvMass = 1 / pMass;
+
+    for (let i = 0; i < this.rigidBodies.length; i++) {
+      const b = this.rigidBodies[i];
+      if (b.mass <= 0) continue;
+
+      const dx = vf[F32.POS_X] - b.posX;
+      const dy = vf[F32.POS_Y] - b.posY;
+      const dz = vf[F32.POS_Z] - b.posZ;
+
+      const overlapX = phx + b.hx - Math.abs(dx);
+      const overlapY = phy + b.hy - Math.abs(dy);
+      const overlapZ = phz + b.hz - Math.abs(dz);
+
+      if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
+
+      let nx = 0;
+      let ny = 0;
+      let nz = 0;
+      let pen = 0;
+
+      if (overlapX < overlapY && overlapX < overlapZ) {
+        pen = overlapX;
+        nx = dx >= 0 ? 1 : -1;
+      } else if (overlapY < overlapZ) {
+        pen = overlapY;
+        ny = dy >= 0 ? 1 : -1;
+      } else {
+        pen = overlapZ;
+        nz = dz >= 0 ? 1 : -1;
+      }
+
+      const bInvMass = 1 / b.mass;
+      const totalInvMass = pInvMass + bInvMass;
+      const pShare = pInvMass / totalInvMass;
+      const bShare = bInvMass / totalInvMass;
+
+      // Positional separation along minimum penetration axis
+      vf[F32.POS_X] = f32(vf[F32.POS_X] + nx * pen * pShare);
+      vf[F32.POS_Y] = f32(vf[F32.POS_Y] + ny * pen * pShare);
+      vf[F32.POS_Z] = f32(vf[F32.POS_Z] + nz * pen * pShare);
+
+      b.posX = f32(b.posX - nx * pen * bShare);
+      b.posY = f32(b.posY - ny * pen * bShare);
+      b.posZ = f32(b.posZ - nz * pen * bShare);
+
+      // Relative velocity along contact normal (normal points from body toward player)
+      const rvx = vf[F32.VEL_X] - b.velX;
+      const rvy = vf[F32.VEL_Y] - b.velY;
+      const rvz = vf[F32.VEL_Z] - b.velZ;
+      const velAlongNormal = rvx * nx + rvy * ny + rvz * nz;
+
+      if (velAlongNormal > 0) continue;
+
+      const e = Math.max(b.restitution, this.sourceConfig.svBounce);
+      const j = (-(1 + e) * velAlongNormal) / totalInvMass;
+      const ix = j * nx;
+      const iy = j * ny;
+      const iz = j * nz;
+
+      vf[F32.VEL_X] = f32(vf[F32.VEL_X] + ix * pInvMass);
+      vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + iy * pInvMass);
+      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + iz * pInvMass);
+
+      b.velX = f32(b.velX - ix * bInvMass);
+      b.velY = f32(b.velY - iy * bInvMass);
+      b.velZ = f32(b.velZ - iz * bInvMass);
+
+      this.callbacks.onRigidBodyHit?.(b.id, Math.abs(j));
+    }
+  }
+
   /**
-   * Exact GoldSrc/Quake ClipBoxToBrush using Minkowski plane expansion:
+   * GoldSrc/Quake ClipBoxToBrush using Minkowski plane expansion:
    *   offset = |nx|*hx + |ny|*hy + |nz|*hz
    */
   private clipBoxToBrush(
@@ -252,13 +463,10 @@ export class GoldSrcPhysicsEngine {
       if (d1 > 0) startsOut = true;
       if (d2 > 0) getsOut = true;
 
-      // Completely in front of this plane -> no intersection with convex brush
       if (d1 > 0 && (d2 >= DIST_EPSILON || d2 >= d1)) return;
-      // Completely behind this plane
       if (d1 <= 0 && d2 <= 0) continue;
 
       if (d1 > d2) {
-        // Entering brush
         let f = f32((d1 - DIST_EPSILON) / (d1 - d2));
         if (f < 0) f = f32(0);
         if (f > enterFrac) {
@@ -266,7 +474,6 @@ export class GoldSrcPhysicsEngine {
           clipPlane = p;
         }
       } else {
-        // Leaving brush
         let f = f32((d1 + DIST_EPSILON) / (d1 - d2));
         if (f > 1) f = f32(1);
         if (f < leaveFrac) {
@@ -291,7 +498,7 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** Trace swept player AABB against all world convex brushes */
+  /** Trace swept AABB against all world convex brushes */
   private traceWorld(
     sX: number,
     sY: number,
@@ -341,7 +548,7 @@ export class GoldSrcPhysicsEngine {
     return out;
   }
 
-  /** GoldSrc PM_ClipVelocity: projects incoming velocity cleanly along collision plane */
+  /** PM_ClipVelocity: projects incoming velocity along collision plane with bounce support */
   private clipVelocity(
     inX: number,
     inY: number,
@@ -372,15 +579,15 @@ export class GoldSrcPhysicsEngine {
     this.clipOut[2] = oz;
   }
 
-  /** GoldSrc PM_CheckVelocity: clamp each component and total speed to sv_maxvelocity */
+  /** CheckVelocity: clamp each component and total speed to maxvelocity */
   private checkVelocity(): void {
     const vf = this.abi.f32;
-    const maxv = vf[F32.CVAR_MAXVEL];
+    const maxv = Math.max(vf[F32.CVAR_MAXVEL], this.sourceConfig.sourceMaxVelocity);
 
     for (let i = 0; i < 3; i++) {
       let v = vf[F32.VEL_X + i];
       if (!Number.isFinite(v)) v = f32(0);
-      if (v > maxv) v = maxv;
+      if (v > maxv) v = f32(maxv);
       else if (v < -maxv) v = f32(-maxv);
       vf[F32.VEL_X + i] = f32(v);
     }
@@ -394,7 +601,7 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** GoldSrc PM_AirAccelerate: wishspeed clamped to 30.0 u/s for projection */
+  /** AirAccelerate: wishspeed capped at 30.0 u/s for projection */
   private airAccelerate(
     wishX: number,
     wishY: number,
@@ -418,7 +625,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + accelspeed * wishZ);
   }
 
-  /** GoldSrc PM_Accelerate (Ground only) */
+  /** Accelerate (Ground only) */
   private accelerate(
     wishX: number,
     wishY: number,
@@ -441,7 +648,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + accelspeed * wishZ);
   }
 
-  /** GoldSrc PM_Friction (with edgefriction = 2 drop-off detection, Ground only) */
+  /** Friction with leading-edge drop-off detection (Ground only) */
   private friction(): void {
     const vf = this.abi.f32;
     const vx = vf[F32.VEL_X];
@@ -453,7 +660,6 @@ export class GoldSrcPhysicsEngine {
     let friction = vf[F32.CVAR_FRICTION];
     const hz = this.getHullHalfZ();
 
-    // Check leading edge drop-off for edgefriction
     const leadX = f32(vf[F32.POS_X] + (vx / speed) * 16.0);
     const leadY = f32(vf[F32.POS_Y] + (vy / speed) * 16.0);
     const leadZ = f32(vf[F32.POS_Z] - hz + 1.0);
@@ -486,7 +692,7 @@ export class GoldSrcPhysicsEngine {
   }
 
   /**
-   * GoldSrc PM_FlyMove: multi-plane iterative sliding (up to 4 bumps)
+   * FlyMove: multi-plane iterative sliding (up to 4 bumps)
    * with crease cross-product resolution when sliding against 2 planes simultaneously.
    */
   private flyMove(): number {
@@ -540,12 +746,12 @@ export class GoldSrcPhysicsEngine {
       if (tr.fraction === 1.0) break;
 
       if (tr.normalZ >= SURF_NORMAL_Z) {
-        blocked |= 1; // walkable floor
+        blocked |= 1;
       } else if (tr.normalZ > 0.05) {
-        blocked |= 4; // surfable angled ramp (0.05 < nz < 0.7)
+        blocked |= 4;
         surfHitNz = tr.normalZ;
       } else {
-        blocked |= 2; // vertical wall / ceiling
+        blocked |= 2;
       }
 
       timeLeft = f32(timeLeft - timeLeft * tr.fraction);
@@ -579,6 +785,11 @@ export class GoldSrcPhysicsEngine {
       this.planesZ[numPlanes] = tr.normalZ;
       numPlanes++;
 
+      const overbounce =
+        this.sourceConfig.svBounce > 0 && tr.normalZ < SURF_NORMAL_Z
+          ? f32(1.0 + this.sourceConfig.svBounce)
+          : f32(1.0);
+
       let i = 0;
       for (; i < numPlanes; i++) {
         this.clipVelocity(
@@ -588,7 +799,7 @@ export class GoldSrcPhysicsEngine {
           this.planesX[i],
           this.planesY[i],
           this.planesZ[i],
-          f32(1.0),
+          overbounce,
         );
         let j = 0;
         for (; j < numPlanes; j++) {
@@ -648,7 +859,7 @@ export class GoldSrcPhysicsEngine {
     return blocked;
   }
 
-  /** GoldSrc PM_CategorizePosition: sets/clears FL_ONGROUND and detects surf ramps */
+  /** CategorizePosition: sets/clears FL_ONGROUND and detects surf ramps */
   private categorizePosition(): void {
     const { f32: vf, i32: vi } = this.abi;
     const hz = this.getHullHalfZ();
@@ -677,7 +888,7 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** GoldSrc Duck / Uncrouch with standing 72u headroom check & mid-air crouch-jump */
+  /** Duck / Uncrouch with standing headroom check & mid-air crouch-jump */
   private duck(): void {
     const { f32: vf, i32: vi } = this.abi;
     const wantDuck = (vi[I32.BUTTONS] & IN_DUCK) !== 0;
@@ -731,7 +942,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VIEW_OFS_Z] = f32(vf[F32.VIEW_OFS_Z] + (targetEye - vf[F32.VIEW_OFS_Z]) * 0.28);
   }
 
-  /** GoldSrc PM_WalkMove with 18u step-up handling */
+  /** WalkMove with step-up handling */
   private walkMove(wishX: number, wishY: number, wishspeed: number): void {
     const vf = this.abi.f32;
     vf[F32.VEL_Z] = f32(0);
@@ -833,7 +1044,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = downVZ;
   }
 
-  /** GoldSrc PM_AirMove: computes horizontal wishdir & runs airAccelerate + flyMove */
+  /** AirMove: computes horizontal wishdir & runs airAccelerate + flyMove */
   private airMove(wishX: number, wishY: number, wishspeed: number): number {
     this.airAccelerate(wishX, wishY, f32(0), wishspeed, this.abi.f32[F32.CVAR_AIRACCEL]);
     this.checkVelocity();
@@ -883,18 +1094,23 @@ export class GoldSrcPhysicsEngine {
           const minSpeedXY = t.meta.minSpeedXY ?? 1500;
           const minVelZ = t.meta.minVelZ ?? 600;
 
-          vf[F32.VEL_X] = f32(vf[F32.VEL_X] + dirX * addSpeed);
-          vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + dirY * addSpeed);
-          const curXY = Math.hypot(vf[F32.VEL_X], vf[F32.VEL_Y]);
-          if (curXY < minSpeedXY) {
+          // Route pusher impulse through Source basevelocity for clean movement integration
+          this.baseVelX = f32(this.baseVelX + dirX * addSpeed);
+          this.baseVelY = f32(this.baseVelY + dirY * addSpeed);
+
+          const projectedXY = Math.hypot(vf[F32.VEL_X] + this.baseVelX, vf[F32.VEL_Y] + this.baseVelY);
+          if (projectedXY < minSpeedXY) {
             const dirLen = Math.hypot(dirX, dirY) || 1;
-            vf[F32.VEL_X] = f32((dirX / dirLen) * minSpeedXY);
-            vf[F32.VEL_Y] = f32((dirY / dirLen) * minSpeedXY);
+            const targetX = f32((dirX / dirLen) * minSpeedXY);
+            const targetY = f32((dirY / dirLen) * minSpeedXY);
+            this.baseVelX = f32(targetX - vf[F32.VEL_X]);
+            this.baseVelY = f32(targetY - vf[F32.VEL_Y]);
           }
-          const nextZ = Math.max(vf[F32.VEL_Z] + dirZ * addSpeed, minVelZ);
-          vf[F32.VEL_Z] = f32(nextZ);
+
+          const nextZ = Math.max(vf[F32.VEL_Z] + this.baseVelZ + dirZ * addSpeed, minVelZ);
+          this.baseVelZ = f32(nextZ - vf[F32.VEL_Z]);
+
           vi[I32.FLAGS] &= ~FL_ONGROUND;
-          this.checkVelocity();
           this.callbacks.onBoost?.(t.id);
         }
       }
