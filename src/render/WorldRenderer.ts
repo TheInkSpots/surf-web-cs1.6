@@ -1,3 +1,4 @@
+// src/render/WorldRenderer.ts
 import * as THREE from 'three';
 import { SURF_NORMAL_Z } from '../core/constants';
 import { gsToThree } from '../core/coordinates';
@@ -14,6 +15,29 @@ interface ExplosionFx {
   maxRadius: number;
 }
 
+interface TracerFx {
+  line: THREE.Line;
+  mat: THREE.LineBasicMaterial;
+  age: number;
+  duration: number;
+}
+
+interface ParticleFx {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  vel: THREE.Vector3;
+  age: number;
+  duration: number;
+  gravity: number;
+}
+
+interface DecalFx {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  age: number;
+  duration: number;
+}
+
 export class WorldRenderer {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
@@ -23,14 +47,22 @@ export class WorldRenderer {
   private readonly boosterTex: THREE.CanvasTexture;
   private readonly rigidBodyMat: THREE.MeshStandardMaterial;
   private readonly rigidBodyEdgeMat: THREE.LineBasicMaterial;
-  private readonly rigidBodyMeshes = new Map<string, THREE.Mesh>();
+  private readonly rigidBodyMeshes = new Map<string, THREE.Object3D>();
   private readonly seenRigidBodyIds = new Set<string>();
+
   private readonly explosionGeo = new THREE.SphereGeometry(1, 20, 14);
+  private readonly particleGeo = new THREE.BoxGeometry(2.8, 2.8, 2.8);
+  private readonly decalGeo = new THREE.CircleGeometry(5.5, 10);
+
   private readonly explosionEffects: ExplosionFx[] = [];
+  private readonly tracerEffects: TracerFx[] = [];
+  private readonly particleEffects: ParticleFx[] = [];
+  private readonly decals: DecalFx[] = [];
 
   public readonly debugGroup = new THREE.Group();
   public baseFov = 90;
 
+  private scopeZoomLevel: 0 | 1 | 2 = 0;
   private currentFov = 90;
   private readonly camPos = new THREE.Vector3();
   private readonly camLook = new THREE.Vector3();
@@ -66,7 +98,6 @@ export class WorldRenderer {
     this.vmScene.add(vmKeyLight);
     this.vmScene.add(vmRoot);
 
-    // Map lighting
     this.scene.add(new THREE.HemisphereLight(0x93c5fd, 0x1e293b, 0.85));
     const sunLight = new THREE.DirectionalLight(0xfffbeb, 1.35);
     sunLight.position.set(2800, 4600, 1900);
@@ -155,6 +186,10 @@ export class WorldRenderer {
     this.debugGroup.visible = visible;
   }
 
+  public setScopeZoom(level: 0 | 1 | 2): void {
+    this.scopeZoomLevel = level;
+  }
+
   public spawnExplosionEffect(origin: Vec3, radius: number): void {
     const mat = new THREE.MeshBasicMaterial({
       color: 0xf97316,
@@ -177,6 +212,183 @@ export class WorldRenderer {
     });
   }
 
+  public spawnBulletTracer(start: Vec3, end: Vec3, color = 0xfef08a): void {
+    const p1 = gsToThree(start.x, start.y, start.z);
+    const p2 = gsToThree(end.x, end.y, end.z);
+    const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+    const mat = new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+    });
+    const line = new THREE.Line(geo, mat);
+    this.scene.add(line);
+    this.tracerEffects.push({ line, mat, age: 0, duration: 0.09 });
+  }
+
+  public spawnImpactEffect(
+    point: Vec3,
+    normal: Vec3,
+    material: 'world' | 'prop' | 'blood' | 'weapon',
+  ): void {
+    const hitPos = gsToThree(point.x, point.y, point.z);
+    const hitNorm = new THREE.Vector3(normal.x, normal.z, -normal.y).normalize();
+
+    // 1. Sparks or blood splatter particles
+    const isBlood = material === 'blood';
+    const count = isBlood ? 14 : 8;
+    const baseColor = isBlood ? 0xdc2626 : material === 'prop' ? 0xfbbf24 : 0xfef08a;
+
+    for (let i = 0; i < count; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: isBlood && i % 3 === 0 ? 0x7f1d1d : baseColor,
+        transparent: true,
+        opacity: 0.95,
+      });
+      const mesh = new THREE.Mesh(this.particleGeo, mat);
+      mesh.position.copy(hitPos).addScaledVector(hitNorm, 2);
+      mesh.scale.setScalar(isBlood ? 1.1 + Math.random() * 1.1 : 0.65 + Math.random() * 0.6);
+
+      const speed = isBlood ? 110 + Math.random() * 210 : 140 + Math.random() * 260;
+      const spread = new THREE.Vector3(
+        (Math.random() - 0.5) * 1.4,
+        (Math.random() - 0.5) * 1.4,
+        (Math.random() - 0.5) * 1.4,
+      );
+      const vel = hitNorm.clone().add(spread).normalize().multiplyScalar(speed);
+      vel.y += isBlood ? 45 : 70;
+
+      this.scene.add(mesh);
+      this.particleEffects.push({
+        mesh,
+        mat,
+        vel,
+        age: 0,
+        duration: isBlood ? 0.55 + Math.random() * 0.35 : 0.24 + Math.random() * 0.16,
+        gravity: isBlood ? 620 : 780,
+      });
+    }
+
+    // 2. Surface decal on world brushes or blood mark
+    if (material === 'world' || isBlood) {
+      const decalMat = new THREE.MeshBasicMaterial({
+        color: isBlood ? 0x991b1b : 0x0f172a,
+        transparent: true,
+        opacity: isBlood ? 0.82 : 0.78,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const decal = new THREE.Mesh(this.decalGeo, decalMat);
+      decal.position.copy(hitPos).addScaledVector(hitNorm, 0.8);
+      decal.lookAt(hitPos.clone().add(hitNorm));
+      decal.scale.setScalar(isBlood ? 1.8 + Math.random() * 0.9 : 0.65 + Math.random() * 0.35);
+      this.scene.add(decal);
+      this.decals.push({ mesh: decal, mat: decalMat, age: 0, duration: 16 });
+
+      // Cap active decals
+      if (this.decals.length > 64) {
+        const old = this.decals.shift()!;
+        this.scene.remove(old.mesh);
+        old.mat.dispose();
+      }
+    }
+  }
+
+  private createRigidBodyVisual(b: SourceRigidBody): THREE.Object3D {
+    if (b.kind === 'weapon' && b.weaponData) {
+      const group = new THREE.Group();
+      const isScout = b.weaponData.slot === 1;
+      const metal = new THREE.MeshStandardMaterial({
+        color: 0x334155,
+        roughness: 0.35,
+        metalness: 0.75,
+        emissive: 0x0f172a,
+      });
+      const accent = new THREE.MeshStandardMaterial({
+        color: isScout ? 0x4d5f47 : 0x1e293b,
+        roughness: 0.6,
+        metalness: 0.2,
+      });
+
+      if (isScout) {
+        const stock = new THREE.Mesh(new THREE.BoxGeometry(34, 7, 6), accent);
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.8, 36, 10), metal);
+        barrel.rotation.z = Math.PI * 0.5;
+        barrel.position.set(16, 2.5, 0);
+        const scope = new THREE.Mesh(new THREE.CylinderGeometry(2.1, 2.1, 16, 10), metal);
+        scope.rotation.z = Math.PI * 0.5;
+        scope.position.set(2, 6.2, 0);
+        group.add(stock, barrel, scope);
+      } else {
+        const slide = new THREE.Mesh(new THREE.BoxGeometry(16, 4.5, 3.6), metal);
+        slide.position.set(0, 2, 0);
+        const grip = new THREE.Mesh(new THREE.BoxGeometry(4.5, 8.5, 3.2), accent);
+        grip.position.set(-4.5, -3, 0);
+        group.add(slide, grip);
+        if (b.weaponData.silenced) {
+          const sup = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 11, 10), accent);
+          sup.rotation.z = Math.PI * 0.5;
+          sup.position.set(13, 2, 0);
+          group.add(sup);
+        }
+      }
+
+      // Subtle glowing ring to spot dropped weapons easily
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(isScout ? 16 : 11, isScout ? 18 : 13, 20),
+        new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.45,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
+      ring.rotation.x = -Math.PI * 0.5;
+      ring.position.y = -b.hz + 1;
+      group.add(ring);
+      return group;
+    }
+
+    if (b.kind === 'target') {
+      const group = new THREE.Group();
+      const torsoMat = new THREE.MeshStandardMaterial({
+        color: 0x991b1b,
+        roughness: 0.55,
+        metalness: 0.1,
+      });
+      const headMat = new THREE.MeshStandardMaterial({
+        color: 0xfca5a5,
+        roughness: 0.5,
+        metalness: 0.08,
+      });
+      const torso = new THREE.Mesh(new THREE.BoxGeometry(b.hx * 1.85, b.hz * 1.4, b.hy * 1.25), torsoMat);
+      torso.name = 'targetTorso';
+      torso.position.y = -b.hz * 0.15;
+
+      const head = new THREE.Mesh(new THREE.BoxGeometry(14, 15, 14), headMat);
+      head.position.y = b.hz * 0.72;
+
+      const bullseye = new THREE.Mesh(
+        new THREE.RingGeometry(4, 9, 16),
+        new THREE.MeshBasicMaterial({ color: 0xfef08a, side: THREE.DoubleSide }),
+      );
+      bullseye.position.set(0, 4, b.hy * 0.64);
+      const bullseyeBack = bullseye.clone();
+      bullseyeBack.position.z = -b.hy * 0.64;
+
+      group.add(torso, head, bullseye, bullseyeBack);
+      return group;
+    }
+
+    const geo = new THREE.BoxGeometry(b.hx * 2, b.hz * 2, b.hy * 2);
+    const mesh = new THREE.Mesh(geo, this.rigidBodyMat);
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), this.rigidBodyEdgeMat);
+    mesh.add(edges);
+    return mesh;
+  }
+
   public syncRigidBodies(bodies: readonly SourceRigidBody[]): void {
     this.seenRigidBodyIds.clear();
 
@@ -184,31 +396,41 @@ export class WorldRenderer {
       const b = bodies[i];
       this.seenRigidBodyIds.add(b.id);
 
-      let mesh = this.rigidBodyMeshes.get(b.id);
-      if (!mesh) {
-        const geo = new THREE.BoxGeometry(b.hx * 2, b.hz * 2, b.hy * 2);
-        mesh = new THREE.Mesh(geo, this.rigidBodyMat);
-
-        const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), this.rigidBodyEdgeMat);
-        mesh.add(edges);
-
-        this.scene.add(mesh);
-        this.rigidBodyMeshes.set(b.id, mesh);
+      let obj = this.rigidBodyMeshes.get(b.id);
+      if (!obj) {
+        obj = this.createRigidBodyVisual(b);
+        this.scene.add(obj);
+        this.rigidBodyMeshes.set(b.id, obj);
       }
 
-      gsToThree(b.pos.x, b.pos.y, b.pos.z, mesh.position);
-      mesh.quaternion.set(b.quat.x, b.quat.z, -b.quat.y, b.quat.w);
+      gsToThree(b.pos.x, b.pos.y, b.pos.z, obj.position);
+      obj.quaternion.set(b.quat.x, b.quat.z, -b.quat.y, b.quat.w);
+
+      // Tint bleeding target dummies darker red as HP drops
+      if (b.kind === 'target' && typeof b.hp === 'number' && typeof b.maxHp === 'number') {
+        const torso = obj.getObjectByName('targetTorso') as THREE.Mesh | undefined;
+        if (torso && torso.material instanceof THREE.MeshStandardMaterial) {
+          const ratio = Math.max(0, b.hp / Math.max(1, b.maxHp));
+          torso.material.color.setRGB(0.45 + 0.45 * ratio, 0.08 * ratio, 0.08 * ratio);
+        }
+      }
     }
 
-    for (const [id, mesh] of this.rigidBodyMeshes.entries()) {
+    for (const [id, obj] of this.rigidBodyMeshes.entries()) {
       if (!this.seenRigidBodyIds.has(id)) {
-        this.scene.remove(mesh);
-        mesh.geometry.dispose();
-        for (const child of mesh.children) {
-          if (child instanceof THREE.LineSegments) {
+        this.scene.remove(obj);
+        obj.traverse((child) => {
+          if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
             child.geometry.dispose();
+            if (child.material !== this.rigidBodyMat && child.material !== this.rigidBodyEdgeMat) {
+              if (Array.isArray(child.material)) {
+                child.material.forEach((m) => m.dispose());
+              } else {
+                child.material.dispose();
+              }
+            }
           }
-        }
+        });
         this.rigidBodyMeshes.delete(id);
       }
     }
@@ -240,6 +462,47 @@ export class WorldRenderer {
       }
     }
 
+    for (let i = this.tracerEffects.length - 1; i >= 0; i--) {
+      const tr = this.tracerEffects[i];
+      tr.age += frameDt;
+      const t = tr.age / tr.duration;
+      if (t >= 1) {
+        this.scene.remove(tr.line);
+        tr.line.geometry.dispose();
+        tr.mat.dispose();
+        this.tracerEffects.splice(i, 1);
+      } else {
+        tr.mat.opacity = (1 - t) * 0.85;
+      }
+    }
+
+    for (let i = this.particleEffects.length - 1; i >= 0; i--) {
+      const p = this.particleEffects[i];
+      p.age += frameDt;
+      const t = p.age / p.duration;
+      if (t >= 1) {
+        this.scene.remove(p.mesh);
+        p.mat.dispose();
+        this.particleEffects.splice(i, 1);
+      } else {
+        p.vel.y -= p.gravity * frameDt;
+        p.mesh.position.addScaledVector(p.vel, frameDt);
+        p.mat.opacity = 1 - t;
+      }
+    }
+
+    for (let i = this.decals.length - 1; i >= 0; i--) {
+      const d = this.decals[i];
+      d.age += frameDt;
+      if (d.age >= d.duration) {
+        this.scene.remove(d.mesh);
+        d.mat.dispose();
+        this.decals.splice(i, 1);
+      } else if (d.age > d.duration - 2) {
+        d.mat.opacity = Math.max(0, ((d.duration - d.age) / 2) * 0.8);
+      }
+    }
+
     const cosP = Math.cos(renderPitch);
     const fwdX = cosP * Math.cos(renderYaw);
     const fwdY = cosP * Math.sin(renderYaw);
@@ -250,10 +513,19 @@ export class WorldRenderer {
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camLook);
 
-    const fovBoost = THREE.MathUtils.clamp((spdXY - 450) / 2550, 0, 1) * 22.0;
-    const targetFov = this.baseFov + fovBoost;
+    let targetFov: number;
+    if (this.scopeZoomLevel === 1) {
+      targetFov = 38;
+    } else if (this.scopeZoomLevel === 2) {
+      targetFov = 16;
+    } else {
+      const fovBoost = THREE.MathUtils.clamp((spdXY - 450) / 2550, 0, 1) * 22.0;
+      targetFov = this.baseFov + fovBoost;
+    }
+
     if (Math.abs(this.currentFov - targetFov) > 0.02) {
-      this.currentFov = THREE.MathUtils.lerp(this.currentFov, targetFov, Math.min(1, frameDt * 7.5));
+      const rate = this.scopeZoomLevel > 0 ? 22 : 7.5;
+      this.currentFov = THREE.MathUtils.lerp(this.currentFov, targetFov, Math.min(1, frameDt * rate));
       this.camera.fov = this.currentFov;
       this.camera.updateProjectionMatrix();
     }
@@ -385,7 +657,6 @@ export class WorldRenderer {
       }
     }
 
-    // Expanded hazard-striped fail floor below the 4-stage course (Z = -200)
     const failGeo = new THREE.PlaneGeometry(24000, 18000);
     failGeo.rotateX(-Math.PI / 2);
     const failMat = new THREE.MeshBasicMaterial({
@@ -397,7 +668,6 @@ export class WorldRenderer {
     failMesh.position.set(6500, -200, 250);
     this.scene.add(failMesh);
 
-    // Diegetic trigger fields + Mapper Debug Trigger Volumes (F2)
     for (const trig of triggers) {
       const sx = trig.maxX - trig.minX;
       const sy = trig.maxY - trig.minY;
@@ -527,7 +797,6 @@ export class WorldRenderer {
       this.debugGroup.add(dbgEdges);
     }
 
-    // Distant parallax monolith pillars spanning Stages 1-4
     const pillarMat = new THREE.MeshStandardMaterial({ color: 0x131c2e, roughness: 0.9, metalness: 0.1 });
     const pillarCoords: Array<[number, number]> = [
       [900, 1200],

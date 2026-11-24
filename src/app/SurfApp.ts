@@ -13,16 +13,22 @@ import {
   CheckpointState,
   createBoxRigidBody,
   GoldSrcPhysicsEngine,
+  IN_ATTACK,
+  IN_ATTACK2,
+  IN_RELOAD,
+  IN_USE,
   SourceRigidBody,
 } from '../physics/GoldSrcPhysicsEngine';
-import { buildSurfSandbox01 } from '../maps/surfSandbox01';
+import { buildSurfSandbox02 } from '../maps/surfSandbox02';
 import { SurfAudioEngine } from '../audio/SurfAudioEngine';
 import { WorldRenderer } from '../render/WorldRenderer';
 import { ViewmodelRig } from '../render/ViewmodelRig';
 import { InputController } from '../gameplay/InputController';
 import { RunTracker } from '../gameplay/RunTracker';
 import { StrafeSyncTracker } from '../gameplay/StrafeSyncTracker';
+import { WeaponSystem } from '../gameplay/WeaponSystem';
 import { HudController } from '../ui/HudController';
+import { CombatHudOverlay } from '../ui/CombatHudOverlay';
 import { MenuController } from '../ui/MenuController';
 
 export class SurfApp {
@@ -35,7 +41,9 @@ export class SurfApp {
   private readonly renderer: WorldRenderer;
   private readonly viewmodel: ViewmodelRig;
   private readonly input: InputController;
+  private readonly weapons: WeaponSystem;
   private readonly hud: HudController;
+  private readonly combatHud: CombatHudOverlay;
   private readonly menu: MenuController;
 
   private activeCheckpoint: CheckpointState | null = null;
@@ -49,10 +57,11 @@ export class SurfApp {
   private idleClock = 0;
 
   constructor(canvas: HTMLCanvasElement) {
-    const mapData = buildSurfSandbox01();
+    const mapData = buildSurfSandbox02();
     this.createInitialRigidBodies = mapData.createRigidBodies;
 
     this.hud = new HudController(this.runTracker);
+    this.combatHud = new CombatHudOverlay();
     this.viewmodel = new ViewmodelRig();
     this.renderer = new WorldRenderer(
       canvas,
@@ -75,15 +84,43 @@ export class SurfApp {
           this.hud.flashScreen('rgba(34, 211, 238, 0.35)');
         },
         onExplosion: (_triggerId, origin, radius) => {
-          this.audio.playBoost();
-          this.audio.playLand(620);
+          this.audio.playExplosion(origin, radius);
           this.renderer.spawnExplosionEffect(origin, radius);
           this.hud.flashScreen('rgba(249, 115, 22, 0.42)');
         },
-        onRigidBodyHit: (_bodyId, impulseMag) => {
-          if (impulseMag > 2400) {
-            this.audio.playLand(Math.min(500, impulseMag * 0.06));
+        onRigidBodyHit: (_bodyId, impulseMag, pos, kind) => {
+          if (impulseMag > 650) {
+            this.audio.playRigidBodyClatter(pos, impulseMag, kind);
           }
+        },
+        onRigidBodyDestroyed: (body, hitPoint) => {
+          const isTarget = body.kind === 'target';
+          this.renderer.spawnImpactEffect(hitPoint, { x: 0, y: 0, z: 1 }, isTarget ? 'blood' : 'prop');
+          this.audio.playImpact(hitPoint, isTarget ? 'blood' : 'prop', 3200);
+          if (isTarget) {
+            this.hud.showToast(
+              `TARGET ELIMINATED (${body.bloodLostMl ?? 0} mL BLOOD LOST)`,
+              'rgba(239, 68, 68, 0.85)',
+            );
+          } else {
+            this.hud.showToast('CRATE DESTROYED', 'rgba(251, 191, 36, 0.8)');
+          }
+        },
+        onPlayerDamage: (amount, source, bloodLostMl) => {
+          this.audio.playPlayerHurt(amount);
+          this.hud.flashScreen('rgba(220, 38, 38, 0.48)');
+          this.hud.showToast(
+            `-${amount} HP  •  -${bloodLostMl} mL BLOOD (${source.toUpperCase()})`,
+            'rgba(239, 68, 68, 0.85)',
+          );
+        },
+        onPlayerDeath: (source) => {
+          this.audio.playPlayerDeath();
+          this.hud.flashScreen('rgba(153, 27, 27, 0.72)');
+          this.hud.showToast(
+            `KILLED BY ${source.toUpperCase()} — PRESS R TO RESPAWN`,
+            'rgba(220, 38, 38, 0.92)',
+          );
         },
         onCheckpoint: (cp) => {
           if (this.visitedCheckpoints.has(cp.index)) return;
@@ -91,7 +128,6 @@ export class SurfApp {
           this.activeCheckpoint = cp;
 
           const split = this.runTracker.recordCheckpoint(cp.index, cp.label, this.abi.i32[I32.TICK]);
-
           const deltaStr =
             split.deltaSec !== null ? `  [${RunTracker.formatDelta(split.deltaSec)}]` : '';
           const goldStr = split.isNewBestSegment ? ' ★ GOLD SEG!' : '';
@@ -112,13 +148,12 @@ export class SurfApp {
             this.audio.playTeleport();
             this.hud.flashScreen('rgba(251, 113, 133, 0.42)');
 
-            // Automatically respawn at the last reached stage checkpoint if available
             if (this.activeCheckpoint) {
               this.runTracker.invalidateRankedRun();
               this.physics.teleportToCheckpoint(this.activeCheckpoint);
               this.input.resetView(this.activeCheckpoint.yaw, this.activeCheckpoint.pitch);
               this.hud.showToast(
-                `FAIL ZONE — RESPAWNED AT ${this.activeCheckpoint.label}  (R: Full Reset)`,
+                `FAIL ZONE — RESPAWNED AT ${this.activeCheckpoint.label}  (Shift+R: Full Reset)`,
                 'rgba(168, 85, 247, 0.8)',
               );
               return;
@@ -154,7 +189,7 @@ export class SurfApp {
               ? ' (CHECKPOINT RUN)'
               : '';
           this.hud.showToast(
-            `FINISHED IN ${RunTracker.formatTime(result.finishSec)}${deltaStr}${pbNote}  (Press R for Full Run)`,
+            `FINISHED IN ${RunTracker.formatTime(result.finishSec)}${deltaStr}${pbNote}  (Backspace for Full Reset)`,
             'rgba(16,185,129,0.75)',
           );
         },
@@ -164,14 +199,27 @@ export class SurfApp {
 
     this.input = new InputController(canvas, mapData.spawn, {
       onUnlockRequest: () => this.audio.unlock(),
-      onSelectWeapon: (slot) => this.selectWeapon(slot),
-      onResetRun: () => {
-        this.activeCheckpoint = null;
-        this.visitedCheckpoints.clear();
-        this.physics.teleportToSpawn(false);
-        this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
-        this.hud.showToast('FULL RUN RESET', 'rgba(245,158,11,0.6)');
+      onSelectWeapon: (slot) => this.weapons.selectSlot(slot),
+      onQuickSwitch: () => this.weapons.quickSwitch(),
+      onDropWeapon: () => this.weapons.dropActiveWeapon(),
+      onPickupWeapon: () => {
+        if (!this.weapons.tryPickupLookedWeapon()) {
+          this.hud.showToast('AIM AT A GROUND WEAPON TO PICK UP', 'rgba(148,163,184,0.65)');
+        }
       },
+      onAttack1Press: () => this.weapons.handlePrimaryPress(performance.now() * 0.001),
+      onAttack2Press: () => this.weapons.handleSecondaryPress(performance.now() * 0.001),
+      onReloadOrReset: () => {
+        if (this.physics.getVitals().dead) {
+          this.fullReset(mapData.spawn);
+          return;
+        }
+        const startedReload = this.weapons.tryReload(performance.now() * 0.001);
+        if (!startedReload && this.weapons.getActiveSlot() === 3) {
+          this.fullReset(mapData.spawn);
+        }
+      },
+      onResetRun: () => this.fullReset(mapData.spawn),
       onToggleDebug: () => {
         const next = !this.renderer.debugGroup.visible;
         this.renderer.setDebugVisible(next);
@@ -183,17 +231,32 @@ export class SurfApp {
       },
     });
 
+    this.weapons = new WeaponSystem(
+      this.abi,
+      this.physics,
+      this.audio,
+      this.viewmodel,
+      this.renderer,
+      this.input,
+      {
+        onToast: (msg, color) => this.hud.showToast(msg, color),
+        onHitMarker: (isBlood, isKill) => this.combatHud.triggerHitMarker(isBlood, isKill),
+        onActiveSlotChanged: (slot) => this.hud.setActiveWeaponSlot(slot),
+      },
+    );
+
     this.menu = new MenuController(this.abi, {
       onPlay: () => this.input.requestLock(),
       onRestart: () => {
-        this.activeCheckpoint = null;
-        this.visitedCheckpoints.clear();
-        this.physics.teleportToSpawn(false);
-        this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
+        this.fullReset(mapData.spawn);
         this.input.requestLock();
       },
-      onSensitivityChange: (sens) => { this.input.sensitivity = sens; },
-      onBaseFovChange: (fov) => { this.renderer.baseFov = fov; },
+      onSensitivityChange: (sens) => {
+        this.input.sensitivity = sens;
+      },
+      onBaseFovChange: (fov) => {
+        this.renderer.baseFov = fov;
+      },
       onScout260Change: (enabled) => this.hud.setScoutSpeedLabel(enabled),
       onStrafeHudChange: (visible) => this.hud.setStrafeHudVisible(visible),
       onDebugChange: (enabled) => {
@@ -212,14 +275,25 @@ export class SurfApp {
     this.menu.syncAll();
   }
 
+  private fullReset(spawn: { yaw: number; pitch: number }): void {
+    this.activeCheckpoint = null;
+    this.visitedCheckpoints.clear();
+    this.physics.restoreVitals();
+    this.physics.setRigidBodies(this.createInitialRigidBodies());
+    this.physics.teleportToSpawn(false);
+    this.weapons.resetLoadout();
+    this.input.resetView(spawn.yaw, spawn.pitch);
+    this.hud.showToast('FULL RUN & LOADOUT RESET', 'rgba(245,158,11,0.65)');
+  }
+
   /**
    * Live Sandbox Hotkeys (while pointer-locked):
-   *   B = Manual respawn at active stage checkpoint (Stages 2–4)
+   *   B = Respawn at active stage checkpoint
    *   C = Save custom practice checkpoint
    *   V = Load custom practice checkpoint (preserves velocity)
-   *   G = Spawn VPhysics crate ahead
+   *   T = Spawn VPhysics crate ahead
    *   F = Detonate radial blast ahead
-   *   X = Reset VPhysics props
+   *   X = Reset VPhysics props, targets & ground weapons
    */
   private handleSandboxHotkey = (e: KeyboardEvent): void => {
     if (!this.input.isPointerLocked || e.repeat) return;
@@ -230,6 +304,7 @@ export class SurfApp {
         return;
       }
       this.runTracker.invalidateRankedRun();
+      this.physics.restoreVitals();
       this.physics.teleportToCheckpoint(this.activeCheckpoint);
       this.input.resetView(this.activeCheckpoint.yaw, this.activeCheckpoint.pitch);
       this.audio.playTeleport();
@@ -245,17 +320,18 @@ export class SurfApp {
         return;
       }
       this.runTracker.invalidateRankedRun();
+      this.physics.restoreVitals();
       this.physics.teleportToCheckpoint(this.customCheckpoint);
       this.input.resetView(this.customCheckpoint.yaw, this.customCheckpoint.pitch);
       this.audio.playTeleport();
       this.hud.showToast('LOADED PRACTICE CHECKPOINT (Unranked)', 'rgba(56,189,248,0.7)');
-    } else if (e.code === 'KeyG') {
+    } else if (e.code === 'KeyT') {
       this.spawnCrateAhead();
     } else if (e.code === 'KeyF') {
       this.detonateBlastAhead();
     } else if (e.code === 'KeyX') {
       this.physics.setRigidBodies(this.createInitialRigidBodies());
-      this.hud.showToast('VPHYSICS PROPS RESET', 'rgba(251,191,36,0.65)');
+      this.hud.showToast('PROPS, TARGETS & GROUND WEAPONS RESET', 'rgba(251,191,36,0.65)');
     }
   };
 
@@ -281,6 +357,7 @@ export class SurfApp {
       { x: 22, y: 22, z: 22 },
       34,
       {
+        hp: 80,
         vel: {
           x: vf[F32.VEL_X] + dirX * throwSpeed,
           y: vf[F32.VEL_Y] + dirY * throwSpeed,
@@ -304,34 +381,18 @@ export class SurfApp {
     const dirZ = Math.sin(pitch);
 
     const origin = {
-      x: vf[F32.POS_X] + dirX * 120,
-      y: vf[F32.POS_Y] + dirY * 120,
-      z: vf[F32.POS_Z] + vf[F32.VIEW_OFS_Z] + dirZ * 120,
+      x: vf[F32.POS_X] + dirX * 140,
+      y: vf[F32.POS_Y] + dirY * 140,
+      z: vf[F32.POS_Z] + vf[F32.VIEW_OFS_Z] + dirZ * 140,
     };
 
     this.physics.applyExplosionImpulse(origin, 72000, 620, 1.25, 'hotkey_blast');
   }
 
-  private getActiveWeaponSpeed(): number {
-    const { i32: vi } = this.abi;
-    if (vi[I32.WEAPON] === 1 && vi[I32.LEGACY_SCOUT] === 1) return f32(260.0);
-    return f32(250.0);
-  }
-
-  private selectWeapon(slot: number): void {
-    const { i32: vi } = this.abi;
-    if (slot < 1 || slot > 3 || vi[I32.WEAPON] === slot) return;
-    vi[I32.WEAPON] = slot;
-    this.viewmodel.triggerDeploy();
-    this.viewmodel.setActiveSlot(slot);
-    this.hud.setActiveWeaponSlot(slot);
-    this.audio.playWeaponSwitch();
-  }
-
   private stepPhysicsTick(): void {
     const { f32: vf, i32: vi } = this.abi;
     const keys = this.input.keys;
-    const maxSpd = this.getActiveWeaponSpeed();
+    const maxSpd = this.weapons.getMoveSpeed();
 
     let fmove = 0;
     let smove = 0;
@@ -343,6 +404,10 @@ export class SurfApp {
     let buttons = 0;
     if (keys.jump || this.input.consumeScrollJump()) buttons |= IN_JUMP;
     if (keys.duck) buttons |= IN_DUCK;
+    if (keys.attack1) buttons |= IN_ATTACK;
+    if (keys.attack2) buttons |= IN_ATTACK2;
+    if (keys.reload) buttons |= IN_RELOAD;
+    if (keys.use) buttons |= IN_USE;
 
     vf[F32.CMD_FMOVE] = f32(fmove);
     vf[F32.CMD_SMOVE] = f32(smove);
@@ -373,6 +438,7 @@ export class SurfApp {
     requestAnimationFrame(this.frame);
 
     const frameDt = Math.min(0.05, (now - this.lastFrameTime) * 0.001);
+    const nowSec = now * 0.001;
     this.lastFrameTime = now;
     this.idleClock += frameDt;
 
@@ -386,6 +452,7 @@ export class SurfApp {
         substeps++;
       }
       if (substeps === 6) this.accumulator = 0;
+      this.weapons.update(nowSec);
     } else {
       this.accumulator = 0;
     }
@@ -416,8 +483,16 @@ export class SurfApp {
       this.input.vmSwayX,
       this.input.vmSwayY,
     );
+
+    this.audio.updateListener({
+      pos: { x: rx, y: ry, z: rz + rEye },
+      vel: { x: vf[F32.VEL_X], y: vf[F32.VEL_Y], z: vf[F32.VEL_Z] },
+      yaw: renderYaw,
+      pitch: renderPitch,
+    });
+    this.audio.updateContinuous(spd3D, vi[I32.MOVESTATE] === MoveState.SURF, !locked, vf[F32.SURF_NZ]);
+
     this.renderer.update(frameDt, rx, ry, rz + rEye, renderYaw, renderPitch, spdXY);
-    this.audio.updateContinuous(spd3D, vi[I32.MOVESTATE] === MoveState.SURF, !locked);
 
     this.hud.update({
       now,
@@ -432,6 +507,8 @@ export class SurfApp {
       keys: this.input.keys,
       cvarLabel: `aa:${Math.round(vf[F32.CVAR_AIRACCEL])} mv:${Math.round(vf[F32.CVAR_MAXVEL])}`,
     });
+
+    this.combatHud.update(frameDt, this.physics.getVitals(), this.weapons.getHudSnapshot(nowSec));
 
     this.renderer.syncRigidBodies(this.physics.getRigidBodies());
     this.renderer.render();

@@ -1,0 +1,3544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CS 1.6 Surf — Phase 1 Offline Movement Sandbox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-glass: rgba(10, 14, 22, 0.82);
+      --bg-panel: rgba(15, 21, 33, 0.78);
+      --border-glass: rgba(148, 163, 184, 0.18);
+      --accent-amber: #f59e0b;
+      --accent-cyan: #22d3ee;
+      --accent-emerald: #10b981;
+      --accent-magenta: #e879f9;
+      --accent-coral: #fb7185;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #070a10;
+      color: var(--text-main);
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+
+    #viewport {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: crosshair;
+    }
+
+    /* Screen feedback flashes (teleport / boost / finish) */
+    #screen-flash {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.25s ease-out;
+      z-index: 5;
+    }
+
+    /* ==================== HUD LAYER ==================== */
+    #hud {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    /* Classic crisp CS 1.6 crosshair */
+    #crosshair {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 24px;
+      height: 24px;
+    }
+    .ch-line {
+      position: absolute;
+      background: rgba(74, 222, 128, 0.92);
+      box-shadow: 0 0 2px rgba(0, 0, 0, 0.95);
+    }
+    .ch-top    { width: 2px; height: 6px; left: 11px; top: 2px; }
+    .ch-bottom { width: 2px; height: 6px; left: 11px; bottom: 2px; }
+    .ch-left   { width: 6px; height: 2px; top: 11px; left: 2px; }
+    .ch-right  { width: 6px; height: 2px; top: 11px; right: 2px; }
+    .ch-dot    { width: 2px; height: 2px; top: 11px; left: 11px; background: rgba(255, 255, 255, 0.85); }
+
+    /* Top-Center Run Timer & Splits */
+    #timer-panel {
+      position: absolute;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .timer-card {
+      background: rgba(9, 13, 21, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      backdrop-filter: blur(8px);
+      border-radius: 12px;
+      padding: 7px 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+    .timer-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.09em;
+      padding: 3px 8px;
+      border-radius: 6px;
+      text-transform: uppercase;
+      background: rgba(148, 163, 184, 0.16);
+      color: #cbd5e1;
+    }
+    .timer-badge.running {
+      background: rgba(34, 211, 238, 0.18);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(34, 211, 238, 0.35);
+    }
+    .timer-badge.finished {
+      background: rgba(16, 185, 129, 0.22);
+      color: var(--accent-emerald);
+      border: 1px solid rgba(16, 185, 129, 0.45);
+    }
+    #run-time {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+      color: #f8fafc;
+      min-width: 126px;
+      text-align: center;
+      text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    }
+    #run-delta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      font-weight: 700;
+      min-width: 68px;
+      text-align: right;
+    }
+    .delta-ahead { color: #34d399; }
+    .delta-behind { color: #fb7185; }
+    .delta-neutral { color: #64748b; }
+
+    .pb-strip {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #94a3b8;
+      background: rgba(9, 13, 21, 0.58);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      border-radius: 8px;
+      padding: 3px 12px;
+    }
+    .pb-strip strong { color: #fbbf24; }
+    .top3-sep { color: rgba(148, 163, 184, 0.35); }
+
+    /* Top-Left Zone & Status Banner */
+    #top-left-status {
+      position: absolute;
+      top: 14px;
+      left: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .status-pill {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 10px;
+      border-radius: 8px;
+      background: rgba(9, 13, 21, 0.68);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      color: #cbd5e1;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      width: fit-content;
+    }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent-emerald);
+      box-shadow: 0 0 8px var(--accent-emerald);
+    }
+    #debug-pill {
+      display: none;
+      border-color: rgba(245, 158, 11, 0.45);
+      color: #fbbf24;
+      background: rgba(120, 53, 15, 0.45);
+    }
+    #debug-pill.active { display: inline-flex; }
+
+    /* Center Toast Banner (Finish / PB / Preset / Boost) */
+    #event-toast {
+      position: absolute;
+      top: 112px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-8px);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      padding: 8px 18px;
+      border-radius: 10px;
+      background: rgba(9, 13, 21, 0.86);
+      border: 1px solid rgba(34, 211, 238, 0.4);
+      color: #f8fafc;
+      opacity: 0;
+      transition: opacity 0.22s ease, transform 0.22s ease;
+      white-space: nowrap;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+    }
+    #event-toast.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* Center-Lower Speedometer & Strafe Sync */
+    #speed-cluster {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Live Keycaps + Strafe Sync Bar */
+    #strafe-overlay {
+      display: flex;
+      align-items: flex-end;
+      gap: 14px;
+      background: rgba(9, 13, 21, 0.62);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 8px 14px;
+    }
+    #strafe-overlay.hidden { display: none; }
+
+    .key-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 28px);
+      grid-template-rows: repeat(2, 24px);
+      gap: 4px;
+    }
+    .keycap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 6px;
+      background: rgba(30, 41, 59, 0.65);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      color: #64748b;
+      transition: background 0.05s, color 0.05s, border-color 0.05s, transform 0.05s;
+    }
+    .keycap.active {
+      background: rgba(34, 211, 238, 0.28);
+      border-color: var(--accent-cyan);
+      color: #ffffff;
+      box-shadow: 0 0 10px rgba(34, 211, 238, 0.35);
+      transform: translateY(1px);
+    }
+    .keycap.warn-w.active {
+      background: rgba(251, 113, 133, 0.3);
+      border-color: var(--accent-coral);
+      color: #fff1f2;
+      box-shadow: 0 0 10px rgba(251, 113, 133, 0.35);
+    }
+    .key-aux {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .keycap-wide {
+      width: 52px;
+      height: 24px;
+      font-size: 10px;
+    }
+
+    .sync-box {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 112px;
+    }
+    .sync-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: #94a3b8;
+    }
+    #sync-pct {
+      font-size: 14px;
+      font-weight: 800;
+      color: #34d399;
+    }
+    .sync-track {
+      position: relative;
+      height: 6px;
+      border-radius: 99px;
+      background: rgba(30, 41, 59, 0.9);
+      overflow: hidden;
+    }
+    #sync-bar {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 0%;
+      border-radius: 99px;
+      background: linear-gradient(90deg, #fb7185, #fbbf24, #34d399);
+      transition: width 0.08s linear;
+    }
+    .yaw-meter {
+      position: relative;
+      height: 4px;
+      border-radius: 99px;
+      background: rgba(30, 41, 59, 0.9);
+    }
+    .yaw-center {
+      position: absolute;
+      left: 50%;
+      top: -1px;
+      bottom: -1px;
+      width: 2px;
+      background: rgba(148, 163, 184, 0.45);
+      transform: translateX(-50%);
+    }
+    #yaw-pip {
+      position: absolute;
+      top: -2px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+      left: 50%;
+      transform: translateX(-50%);
+      box-shadow: 0 0 8px var(--accent-cyan);
+    }
+
+    /* Digital Speedometer Card */
+    .speed-card {
+      background: rgba(9, 13, 21, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      backdrop-filter: blur(8px);
+      border-radius: 14px;
+      padding: 8px 22px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 218px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42);
+    }
+    .speed-main-row {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+    #speed-xy {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 42px;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -0.02em;
+      color: #f8fafc;
+      transition: color 0.14s ease, text-shadow 0.14s ease;
+    }
+    .speed-unit {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      color: #94a3b8;
+    }
+    #speed-gain {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 800;
+      width: 44px;
+      text-align: left;
+    }
+    .speed-sub-row {
+      margin-top: 4px;
+      display: flex;
+      gap: 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .speed-sub-row span strong {
+      color: #e2e8f0;
+    }
+
+    /* Bottom-Left Weapon Selector */
+    #weapon-hud {
+      position: absolute;
+      bottom: 20px;
+      left: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .weapon-slot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 5px 10px;
+      border-radius: 8px;
+      background: rgba(9, 13, 21, 0.56);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      color: #94a3b8;
+      min-width: 174px;
+      transition: all 0.12s ease;
+    }
+    .weapon-slot.active {
+      background: rgba(245, 158, 11, 0.18);
+      border-color: rgba(245, 158, 11, 0.65);
+      color: #fef3c7;
+      box-shadow: 0 0 14px rgba(245, 158, 11, 0.18);
+    }
+    .weapon-key {
+      font-weight: 800;
+      color: var(--accent-amber);
+      margin-right: 4px;
+    }
+    .weapon-spd {
+      font-size: 10px;
+      opacity: 0.85;
+    }
+
+    /* Bottom-Right Classic CS 1.6 net_graph */
+    #net-graph {
+      position: absolute;
+      bottom: 18px;
+      right: 16px;
+      background: rgba(8, 11, 18, 0.74);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #a3e635;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      min-width: 248px;
+    }
+    .ng-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .ng-muted { color: #94a3b8; }
+    .ng-surf  { color: #22d3ee; font-weight: 800; }
+    .ng-air   { color: #fbbf24; font-weight: 800; }
+    .ng-gnd   { color: #4ade80; font-weight: 800; }
+
+    /* ==================== MENU / CVAR OVERLAY ==================== */
+    #menu-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: radial-gradient(circle at center, rgba(9, 13, 21, 0.48) 0%, rgba(5, 8, 14, 0.84) 100%);
+      backdrop-filter: blur(8px);
+      transition: opacity 0.18s ease;
+    }
+    #menu-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .menu-shell {
+      width: 100%;
+      max-width: 820px;
+      max-height: 92vh;
+      overflow-y: auto;
+      background: var(--bg-glass);
+      border: 1px solid var(--border-glass);
+      border-radius: 18px;
+      padding: 24px 26px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
+    }
+
+    .menu-header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+    }
+    .brand-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-tag {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: rgba(245, 158, 11, 0.18);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.35);
+    }
+    .menu-header h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    .menu-subtitle {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+
+    .cta-row {
+      margin-top: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+    #btn-play {
+      flex: 1;
+      min-width: 240px;
+      cursor: pointer;
+      border: none;
+      border-radius: 12px;
+      padding: 14px 22px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      color: #090d15;
+      background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 55%, #ea580c 100%);
+      box-shadow: 0 8px 24px rgba(245, 158, 11, 0.35);
+      transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+    }
+    #btn-play:hover {
+      transform: translateY(-1px);
+      filter: brightness(1.06);
+      box-shadow: 0 12px 28px rgba(245, 158, 11, 0.45);
+    }
+    #btn-play:active { transform: translateY(1px); }
+
+    #btn-restart-menu {
+      cursor: pointer;
+      border-radius: 12px;
+      padding: 14px 18px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      color: #e2e8f0;
+      background: rgba(30, 41, 59, 0.85);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      transition: background 0.12s ease;
+    }
+    #btn-restart-menu:hover { background: rgba(51, 65, 85, 0.9); }
+
+    #lock-hint {
+      width: 100%;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #fbbf24;
+      min-height: 15px;
+    }
+
+    .tip-banner {
+      margin-top: 12px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: rgba(34, 211, 238, 0.09);
+      border: 1px solid rgba(34, 211, 238, 0.28);
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: #e0f2fe;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .tip-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 800;
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: rgba(34, 211, 238, 0.22);
+      color: var(--accent-cyan);
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .menu-grid {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+      gap: 14px;
+    }
+
+    .panel-box {
+      background: var(--bg-panel);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 14px;
+      padding: 14px 16px;
+    }
+    .panel-title {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #94a3b8;
+      margin: 0 0 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    /* Preset Segmented Toggle */
+    .preset-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .preset-btn {
+      cursor: pointer;
+      padding: 9px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(15, 23, 42, 0.7);
+      color: #94a3b8;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 700;
+      text-align: center;
+      transition: all 0.14s ease;
+    }
+    .preset-btn small {
+      display: block;
+      font-size: 10px;
+      font-weight: 500;
+      opacity: 0.78;
+      margin-top: 2px;
+    }
+    .preset-btn.active {
+      background: rgba(245, 158, 11, 0.2);
+      border-color: var(--accent-amber);
+      color: #fef3c7;
+    }
+
+    /* Sliders */
+    .slider-row {
+      margin-bottom: 11px;
+    }
+    .slider-row:last-child { margin-bottom: 0; }
+    .slider-meta {
+      display: flex;
+      justify-content: space-between;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11.5px;
+      margin-bottom: 4px;
+    }
+    .slider-meta label { color: #cbd5e1; }
+    .slider-val { color: var(--accent-cyan); font-weight: 700; }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent-amber);
+      cursor: pointer;
+      height: 5px;
+    }
+
+    /* Toggle switches */
+    .toggle-list {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+    }
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-size: 12.5px;
+      color: #e2e8f0;
+      cursor: pointer;
+    }
+    .toggle-row small {
+      display: block;
+      font-size: 10.5px;
+      color: #94a3b8;
+    }
+    .toggle-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent-cyan);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    /* Hotkeys Footer */
+    .hotkey-bar {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(148, 163, 184, 0.14);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .hk kbd {
+      background: rgba(30, 41, 59, 0.95);
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      border-radius: 5px;
+      padding: 2px 6px;
+      color: #f8fafc;
+      font-weight: 700;
+      margin-right: 4px;
+    }
+
+    @media (max-width: 640px) {
+      #net-graph { display: none; }
+      #weapon-hud { bottom: 110px; left: 10px; }
+      .speed-card { min-width: 170px; padding: 6px 14px; }
+      #speed-xy { font-size: 34px; }
+      .menu-shell { padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- WebGL2 Three.js Canvas -->
+  <canvas id="viewport"></canvas>
+
+  <!-- Visual Feedback Overlay (Boost / Teleport / Finish) -->
+  <div id="screen-flash"></div>
+
+  <!-- Live Gameplay HUD -->
+  <div id="hud">
+    <!-- Top-Left Sandbox Status -->
+    <div id="top-left-status">
+      <div class="status-pill">
+        <span class="dot"></span>
+        <span>surf_sandbox_01 • 100Hz WASM ABI</span>
+      </div>
+      <div id="debug-pill" class="status-pill">
+        <span>DEBUG WIREFRAMES ACTIVE [F2]</span>
+      </div>
+    </div>
+
+    <!-- Top-Center Run Timer & Personal Bests -->
+    <div id="timer-panel">
+      <div class="timer-card">
+        <span id="timer-state" class="timer-badge">READY</span>
+        <span id="run-time">00:00.00</span>
+        <span id="run-delta" class="delta-neutral">--.--</span>
+      </div>
+      <div class="pb-strip">
+        <span>PB: <strong id="pb-display">--:--.--</strong></span>
+        <span class="top3-sep">|</span>
+        <span id="top3-display">TOP 3: --</span>
+      </div>
+    </div>
+
+    <!-- Event Toast Notification -->
+    <div id="event-toast"></div>
+
+    <!-- Classic CS 1.6 Crosshair -->
+    <div id="crosshair" aria-hidden="true">
+      <div class="ch-line ch-top"></div>
+      <div class="ch-line ch-bottom"></div>
+      <div class="ch-line ch-left"></div>
+      <div class="ch-line ch-right"></div>
+      <div class="ch-line ch-dot"></div>
+    </div>
+
+    <!-- Bottom-Left Weapon Speed Slots -->
+    <div id="weapon-hud">
+      <div class="weapon-slot active" data-slot="1">
+        <span><span class="weapon-key">[1]</span>SCOUT</span>
+        <span class="weapon-spd" id="spd-slot-1">250 u/s</span>
+      </div>
+      <div class="weapon-slot" data-slot="2">
+        <span><span class="weapon-key">[2]</span>USP .45</span>
+        <span class="weapon-spd">250 u/s</span>
+      </div>
+      <div class="weapon-slot" data-slot="3">
+        <span><span class="weapon-key">[3]</span>KNIFE</span>
+        <span class="weapon-spd">250 u/s</span>
+      </div>
+    </div>
+
+    <!-- Center-Lower Speedometer & Strafe Sync -->
+    <div id="speed-cluster">
+      <div id="strafe-overlay">
+        <div class="key-grid">
+          <div></div>
+          <div class="keycap warn-w" id="key-w">W</div>
+          <div></div>
+          <div class="keycap" id="key-a">A</div>
+          <div class="keycap" id="key-s">S</div>
+          <div class="keycap" id="key-d">D</div>
+        </div>
+        <div class="key-aux">
+          <div class="keycap keycap-wide" id="key-jump">JUMP</div>
+          <div class="keycap keycap-wide" id="key-duck">DUCK</div>
+        </div>
+        <div class="sync-box">
+          <div class="sync-header">
+            <span>STRAFE SYNC</span>
+            <span id="sync-pct">0%</span>
+          </div>
+          <div class="sync-track"><div id="sync-bar"></div></div>
+          <div class="yaw-meter">
+            <div class="yaw-center"></div>
+            <div id="yaw-pip"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="speed-card">
+        <div class="speed-main-row">
+          <span id="speed-xy">0</span>
+          <span class="speed-unit">u/s</span>
+          <span id="speed-gain"></span>
+        </div>
+        <div class="speed-sub-row">
+          <span>3D <strong id="speed-3d">0</strong></span>
+          <span>PEAK <strong id="speed-peak">0</strong></span>
+          <span>Z <strong id="speed-z">0</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom-Right Classic net_graph -->
+    <div id="net-graph">
+      <div class="ng-row">
+        <span>fps: <strong id="ng-fps">0</strong></span>
+        <span>tick: <strong>100 Hz</strong></span>
+      </div>
+      <div class="ng-row">
+        <span>sim: <strong id="ng-sim">0.00</strong> ms</span>
+        <span class="ng-muted">lerp: 0.0ms (WASM ABI)</span>
+      </div>
+      <div class="ng-row">
+        <span>state: <span id="ng-state" class="ng-gnd">GROUND</span></span>
+        <span>hull: <strong id="ng-hull">72u</strong></span>
+      </div>
+      <div class="ng-row">
+        <span>sync: <strong id="ng-sync">0%</strong></span>
+        <span class="ng-muted" id="ng-cvars">aa:100 mv:3500</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pause / Settings / CVar Overlay -->
+  <div id="menu-overlay">
+    <div class="menu-shell">
+      <div class="menu-header">
+        <div>
+          <div class="brand-title">
+            <span class="brand-tag">PHASE 1 SANDBOX</span>
+            <h1>CS 1.6 Surf — GoldSrc 100Hz Physics Core</h1>
+          </div>
+          <div class="menu-subtitle">
+            Deterministic Float32 Linear Memory ABI • Swept AABB Convex Brushes • Procedural Dev-Grid Map
+          </div>
+        </div>
+      </div>
+
+      <div class="cta-row">
+        <button id="btn-play" type="button">CLICK TO SURF (POINTER LOCK)</button>
+        <button id="btn-restart-menu" type="button">RESET RUN [R]</button>
+        <div id="lock-hint"></div>
+      </div>
+
+      <div class="tip-banner">
+        <span class="tip-badge">SURF TIP</span>
+        <span>
+          Hold <strong>D</strong> on left-side ramps, <strong>A</strong> on right-side ramps, and <strong>never hold W in mid-air!</strong>
+          Match your mouse yaw smoothly to the ramp angle to accelerate past 2500+ u/s. Turn left at spawn to test the 30°/46°/52°/60° calibration wedges &amp; 48u crouch tunnel.
+        </span>
+      </div>
+
+      <div class="menu-grid">
+        <!-- Server Physics CVars -->
+        <div class="panel-box">
+          <div class="panel-title">
+            <span>Server Physics CVars</span>
+            <span id="preset-indicator" style="color: #fbbf24;">DEFAULT</span>
+          </div>
+
+          <div class="preset-group">
+            <button type="button" class="preset-btn active" id="preset-default">
+              DEFAULT SURF
+              <small>aa 100 • maxvel 3500</small>
+            </button>
+            <button type="button" class="preset-btn" id="preset-hardcore">
+              HARDCORE PRESET
+              <small>aa 150 • maxvel 4500</small>
+            </button>
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-airaccel">sv_airaccelerate</label>
+              <span class="slider-val" id="val-airaccel">100</span>
+            </div>
+            <input type="range" id="sl-airaccel" min="10" max="250" step="5" value="100" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-maxvel">sv_maxvelocity</label>
+              <span class="slider-val" id="val-maxvel">3500</span>
+            </div>
+            <input type="range" id="sl-maxvel" min="1500" max="6000" step="100" value="3500" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-gravity">sv_gravity</label>
+              <span class="slider-val" id="val-gravity">800</span>
+            </div>
+            <input type="range" id="sl-gravity" min="400" max="1200" step="20" value="800" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-sens">Mouse Sensitivity</label>
+              <span class="slider-val" id="val-sens">1.80</span>
+            </div>
+            <input type="range" id="sl-sens" min="0.4" max="5.0" step="0.05" value="1.80" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-fov">Base FOV (Scales +22° at 3000+ u/s)</label>
+              <span class="slider-val" id="val-fov">90°</span>
+            </div>
+            <input type="range" id="sl-fov" min="75" max="110" step="1" value="90" />
+          </div>
+        </div>
+
+        <!-- Gameplay & Telemetry Toggles -->
+        <div class="panel-box">
+          <div class="panel-title">
+            <span>Movement, Weapon &amp; HUD Options</span>
+          </div>
+
+          <div class="toggle-list">
+            <label class="toggle-row">
+              <span>
+                Auto-Bhop (Hold Space)
+                <small>Jump immediately on ground touch (Mouse Wheel also jumps)</small>
+              </span>
+              <input type="checkbox" id="tg-autobhop" checked />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Legacy Scout 260 u/s
+                <small>CS 1.6 classic Scout base ground speed (260 vs 250 u/s)</small>
+              </span>
+              <input type="checkbox" id="tg-scout260" />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Strafe Sync &amp; Keycap HUD
+                <small>Live yaw-to-strafe efficiency percentage &amp; key overlay</small>
+              </span>
+              <input type="checkbox" id="tg-strafe" checked />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Mapper Debug Wireframes [F2]
+                <small>Show trigger volumes (start/end/push/tp) &amp; convex hulls</small>
+              </span>
+              <input type="checkbox" id="tg-debug" />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Mute Procedural Audio
+                <small>Wind rush, ramp slide hum, booster whoosh, landing thuds</small>
+              </span>
+              <input type="checkbox" id="tg-mute" />
+            </label>
+          </div>
+
+          <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(148,163,184,0.12); font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: #94a3b8; line-height: 1.55;">
+            Fixed Hulls: <span style="color:#e2e8f0;">32×32×72u</span> (stand) / <span style="color:#e2e8f0;">32×32×36u</span> (duck)<br/>
+            Fixed Ground CVars: <span style="color:#e2e8f0;">accel=10 • fric=4 • stop=100 • edge=2</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hotkey-bar">
+        <span class="hk"><kbd>W A S D</kbd> Move / Strafe</span>
+        <span class="hk"><kbd>SPACE</kbd> / <kbd>WHEEL</kbd> Jump</span>
+        <span class="hk"><kbd>CTRL</kbd> / <kbd>C</kbd> Duck (36u Hull)</span>
+        <span class="hk"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> Weapons</span>
+        <span class="hk"><kbd>R</kbd> Restart Run</span>
+        <span class="hk"><kbd>F2</kbd> Debug Triggers</span>
+        <span class="hk"><kbd>TAB</kbd> / <kbd>ESC</kbd> Menu</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Application ES Module -->
+  <script type="module">
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+    /* ============================================================================
+     * 1. COORDINATE SYSTEM & GOLDSRC CONSTANTS
+     * ============================================================================
+     * Internal physics uses exact GoldSrc Z-Up right-handed coordinates:
+     *   +X = Forward (yaw = 0), +Y = Left (yaw = +90°), +Z = Up
+     * Mapped to Three.js Y-Up right-handed coordinates via orientation-preserving
+     * transform (det = +1):
+     *   threeX = gsX,  threeY = gsZ,  threeZ = -gsY
+     */
+    const f32 = Math.fround;
+    const FIXED_DT = f32(0.01);              // Deterministic 100 Hz tickrate
+    const DIST_EPSILON = f32(0.03125);       // 1/32 unit GoldSrc trace epsilon
+    const STOP_EPSILON = f32(0.1);
+    const MAX_CLIP_PLANES = 5;
+    const STEPSIZE = f32(18.0);              // GoldSrc walk step height
+    const SURF_NORMAL_Z = f32(0.7);          // Surfaces with nz < 0.7 (~45.57°) are non-walkable surf ramps
+    const AIR_WISH_CAP = f32(30.0);          // Classic GoldSrc air-strafe wishspeed cap
+
+    // Standing & Ducking player bounding hulls (half-extents & eye offsets from hull center)
+    const HULL_STAND_HX = f32(16.0), HULL_STAND_HY = f32(16.0), HULL_STAND_HZ = f32(36.0);
+    const HULL_DUCK_HX  = f32(16.0), HULL_DUCK_HY  = f32(16.0), HULL_DUCK_HZ  = f32(18.0);
+    const EYE_OFFSET_STAND = f32(28.0);      // 36 + 28 = 64u above feet
+    const EYE_OFFSET_DUCK  = f32(12.0);      // 18 + 12 = 30u above feet
+
+    // Player flags (GoldSrc bitmask)
+    const FL_ONGROUND = 1;
+    const FL_DUCKING  = 2;
+
+    // Button bitmask
+    const IN_JUMP = 1;
+    const IN_DUCK = 2;
+
+    // Movement state enum for HUD/audio
+    const STATE_GROUND = 0;
+    const STATE_AIR    = 1;
+    const STATE_SURF   = 2;
+
+    /** Convert GoldSrc (gx, gy, gz) to Three.js Vector3 (gx, gz, -gy) */
+    function gsToThree(gx, gy, gz, out = new THREE.Vector3()) {
+      return out.set(gx, gz, -gy);
+    }
+
+    /* ============================================================================
+     * 2. LINEAR MEMORY ABI (WebAssembly.Memory + TypedArray Struct Views)
+     * ============================================================================
+     * Mirrors the exact Phase 1 Rust/Wasm linear memory layout so input commands,
+     * player state, and CVars operate in zero-allocation Float32/Int32 views.
+     */
+    const wasmMemory = new WebAssembly.Memory({ initial: 2 }); // 128 KB linear memory
+    const memF32 = new Float32Array(wasmMemory.buffer, 0, 256);
+    const memI32 = new Int32Array(wasmMemory.buffer, 1024, 64);
+
+    // Float32 offsets in linear memory
+    const S_POS_X = 0, S_POS_Y = 1, S_POS_Z = 2;
+    const S_VEL_X = 3, S_VEL_Y = 4, S_VEL_Z = 5;
+    const S_PREV_X = 6, S_PREV_Y = 7, S_PREV_Z = 8;
+    const S_YAW = 9, S_PITCH = 10;
+    const S_VIEW_OFS_Z = 11, S_PREV_VIEW_OFS_Z = 12;
+    const S_SURF_NZ = 13;
+    // CVars in linear memory
+    const C_AIRACCEL = 32, C_MAXVEL = 33, C_GRAVITY = 34;
+    const C_ACCEL = 35, C_FRICTION = 36, C_STOPSPEED = 37, C_EDGEFRIC = 38;
+    // UserCmd in linear memory
+    const U_FMOVE = 48, U_SMOVE = 49, U_YAW = 50, U_PITCH = 51, U_MAXSPEED = 52;
+
+    // Int32 offsets in linear memory
+    const I_FLAGS = 0, I_BUTTONS = 1, I_PREV_BUTTONS = 2;
+    const I_MOVESTATE = 3, I_TICK = 4, I_WEAPON = 5;
+    const I_AUTOBHOP = 6, I_LEGACY_SCOUT = 7;
+
+    // Initialize default CVars
+    memF32[C_AIRACCEL]  = f32(100.0);
+    memF32[C_MAXVEL]    = f32(3500.0);
+    memF32[C_GRAVITY]   = f32(800.0);
+    memF32[C_ACCEL]     = f32(10.0);
+    memF32[C_FRICTION]  = f32(4.0);
+    memF32[C_STOPSPEED] = f32(100.0);
+    memF32[C_EDGEFRIC]  = f32(2.0);
+    memI32[I_WEAPON]    = 1;
+    memI32[I_AUTOBHOP]  = 1;
+    memI32[I_LEGACY_SCOUT] = 0;
+
+    /* ============================================================================
+     * 3. SYNCHRONIZED CONVEX BRUSH & TRIGGER SYSTEM
+     * ============================================================================
+     * Every solid brush stores exact outward-facing planes (nx, ny, nz, d) for
+     * swept AABB Minkowski collision AND polygon face lists for Three.js rendering.
+     */
+    const worldBrushes = [];
+    const worldTriggers = [];
+
+    /** Compute outward plane from 3 GoldSrc vertices, oriented away from centroid */
+    function makePlaneFromFace(verts, centroid) {
+      const a = verts[0], b = verts[1], c = verts[2];
+      const e1x = b[0] - a[0], e1y = b[1] - a[1], e1z = b[2] - a[2];
+      const e2x = c[0] - a[0], e2y = c[1] - a[1], e2z = c[2] - a[2];
+      let nx = e1y * e2z - e1z * e2y;
+      let ny = e1z * e2x - e1x * e2z;
+      let nz = e1x * e2y - e1y * e2x;
+      const len = Math.hypot(nx, ny, nz);
+      if (len < 1e-6) return null;
+      nx /= len; ny /= len; nz /= len;
+      let d = nx * a[0] + ny * a[1] + nz * a[2];
+
+      // Ensure outward normal: centroid must satisfy dot(n, centroid) < d
+      const cDot = nx * centroid[0] + ny * centroid[1] + nz * centroid[2];
+      let flipped = false;
+      if (cDot > d) {
+        nx = -nx; ny = -ny; nz = -nz; d = -d;
+        flipped = true;
+      }
+      return {
+        nx: f32(nx), ny: f32(ny), nz: f32(nz), d: f32(d),
+        verts: flipped ? [...verts].reverse() : verts
+      };
+    }
+
+    /** Build a convex brush from explicit polygon faces (each face = array of [x,y,z]) */
+    function addConvexBrush(id, faces, style = 'slate') {
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      let cx = 0, cy = 0, cz = 0, count = 0;
+
+      for (const f of faces) {
+        for (const v of f) {
+          if (v[0] < minX) minX = v[0];
+          if (v[1] < minY) minY = v[1];
+          if (v[2] < minZ) minZ = v[2];
+          if (v[0] > maxX) maxX = v[0];
+          if (v[1] > maxY) maxY = v[1];
+          if (v[2] > maxZ) maxZ = v[2];
+          cx += v[0]; cy += v[1]; cz += v[2];
+          count++;
+        }
+      }
+      const centroid = [cx / count, cy / count, cz / count];
+
+      const planes = [];
+      const renderFaces = [];
+      for (const f of faces) {
+        const p = makePlaneFromFace(f, centroid);
+        if (!p) continue;
+        planes.push({ nx: p.nx, ny: p.ny, nz: p.nz, d: p.d });
+        renderFaces.push(p);
+      }
+
+      const brush = {
+        id,
+        style,
+        minX: f32(minX), minY: f32(minY), minZ: f32(minZ),
+        maxX: f32(maxX), maxY: f32(maxY), maxZ: f32(maxZ),
+        planes,
+        renderFaces
+      };
+      worldBrushes.push(brush);
+      return brush;
+    }
+
+    /** Create an axis-aligned box brush */
+    function addBoxBrush(id, minX, minY, minZ, maxX, maxY, maxZ, style = 'slate') {
+      const p000 = [minX, minY, minZ];
+      const p100 = [maxX, minY, minZ];
+      const p110 = [maxX, maxY, minZ];
+      const p010 = [minX, maxY, minZ];
+      const p001 = [minX, minY, maxZ];
+      const p101 = [maxX, minY, maxZ];
+      const p111 = [maxX, maxY, maxZ];
+      const p011 = [minX, maxY, maxZ];
+
+      const faces = [
+        [p001, p101, p111, p011], // +Z top
+        [p000, p010, p110, p100], // -Z bottom
+        [p100, p110, p111, p101], // +X
+        [p000, p001, p011, p010], // -X
+        [p010, p011, p111, p110], // +Y
+        [p000, p100, p101, p001], // -Y
+      ];
+      return addConvexBrush(id, faces, style);
+    }
+
+    /**
+     * Create an oriented 3D surf ramp wedge/prism brush.
+     * Supports arbitrary heading, downhill ridge slope, exact inclination angle,
+     * and 'both' (double-sided surf wedge), 'left' (left-facing slope), or 'right'.
+     */
+    function addSurfRampBrush(id, opts) {
+      const {
+        start, end,
+        angleDeg = 52,
+        height = 300,
+        topWidth = 22,
+        sides = 'both',
+        style = 'ramp'
+      } = opts;
+
+      const dx = end[0] - start[0];
+      const dy = end[1] - start[1];
+      const horizLen = Math.hypot(dx, dy);
+      const dirX = dx / horizLen;
+      const dirY = dy / horizLen;
+      // Unit left vector in GoldSrc Z-up: (-dirY, dirX, 0); right = (dirY, -dirX, 0)
+      const leftX = -dirY;
+      const leftY = dirX;
+
+      const rad = (angleDeg * Math.PI) / 180;
+      const run = height / Math.tan(rad); // horizontal outward reach of slope
+      const halfTop = topWidth * 0.5;
+
+      const leftReach  = (sides === 'both' || sides === 'left')  ? halfTop + run : halfTop;
+      const rightReach = (sides === 'both' || sides === 'right') ? halfTop + run : halfTop;
+
+      // 8 vertices of trapezoidal prism (start cross-section s*, end cross-section e*)
+      const sTL = [start[0] + leftX * halfTop,     start[1] + leftY * halfTop,     start[2]];
+      const sTR = [start[0] - leftX * halfTop,     start[1] - leftY * halfTop,     start[2]];
+      const sBL = [start[0] + leftX * leftReach,   start[1] + leftY * leftReach,   start[2] - height];
+      const sBR = [start[0] - leftX * rightReach,  start[1] - leftY * rightReach,  start[2] - height];
+
+      const eTL = [end[0] + leftX * halfTop,       end[1] + leftY * halfTop,       end[2]];
+      const eTR = [end[0] - leftX * halfTop,       end[1] - leftY * halfTop,       end[2]];
+      const eBL = [end[0] + leftX * leftReach,     end[1] + leftY * leftReach,     end[2] - height];
+      const eBR = [end[0] - leftX * rightReach,    end[1] - leftY * rightReach,    end[2] - height];
+
+      const faces = [
+        [sTL, sTR, eTR, eTL], // Top spine
+        [sBL, eBL, eBR, sBR], // Bottom flat
+        [sTL, eTL, eBL, sBL], // Left sloped face (+left normal)
+        [sTR, sBR, eBR, eTR], // Right sloped face (-left normal)
+        [sTL, sBL, sBR, sTR], // Start cap
+        [eTL, eTR, eBR, eBL], // End cap
+      ];
+      return addConvexBrush(id, faces, style);
+    }
+
+    /** Register an AABB trigger volume (trig_start, trig_end, trig_push, trig_tp_fail) */
+    function addTrigger(id, type, minX, minY, minZ, maxX, maxY, maxZ, meta = {}) {
+      worldTriggers.push({
+        id, type,
+        minX: f32(minX), minY: f32(minY), minZ: f32(minZ),
+        maxX: f32(maxX), maxY: f32(maxY), maxZ: f32(maxZ),
+        meta
+      });
+    }
+
+    /* ============================================================================
+     * 4. BUILD THE CS 1.6 SURF TEST MAP (surf_sandbox_01)
+     * ============================================================================
+     */
+    const SPAWN_POS = { x: f32(-190), y: f32(0), z: f32(1038), yaw: f32(0), pitch: f32(-0.07) };
+    const worldSigns = []; // Floating world-space labels
+
+    function buildSurfMap() {
+      // --- 1. ELEVATED SPAWN PLATFORM ---
+      addBoxBrush('spawn_deck', -340, -230, 940, 10, 230, 1000, 'slate');
+      // Subtle low back rail & side trims on spawn
+      addBoxBrush('spawn_back_wall', -356, -230, 1000, -340, 230, 1072, 'slate');
+      addBoxBrush('spawn_right_rail', -340, -246, 1000, 10, -230, 1044, 'slate');
+
+      // Start Gate pillars & trig_start volume
+      addBoxBrush('start_pillar_l', -14, 210, 1000, 14, 234, 1210, 'finish');
+      addBoxBrush('start_pillar_r', -14, -234, 1000, 14, -210, 1210, 'finish');
+      addBoxBrush('start_header', -14, -234, 1210, 14, 234, 1236, 'finish');
+      addTrigger('trig_start', 'start', -18, -210, 1000, 32, 210, 1210);
+      worldSigns.push({ x: 0, y: 0, z: 1265, yaw: Math.PI, text: 'START GATE  •  DROP IN', color: '#34d399', scale: 1.0 });
+
+      // --- 2. RAMP 1: DROP-IN ENTRY WEDGE (50° double-sided) ---
+      addSurfRampBrush('col_ramp_1', {
+        start: [90, 0, 955],
+        end: [1420, 0, 745],
+        angleDeg: 50,
+        height: 330,
+        topWidth: 22,
+        sides: 'both',
+        style: 'ramp'
+      });
+      worldSigns.push({ x: 520, y: 0, z: 1030, yaw: Math.PI, text: 'RAMP 1  •  50° ENTRY', color: '#fbbf24', scale: 1.05 });
+
+      // --- 3. RAMP 2: OFFSET RIGHT-SIDE 54° SURF RAMP ---
+      addSurfRampBrush('col_ramp_2', {
+        start: [1700, -340, 760],
+        end: [3020, -340, 560],
+        angleDeg: 54,
+        height: 350,
+        topWidth: 22,
+        sides: 'both',
+        style: 'ramp'
+      });
+      worldSigns.push({ x: 2260, y: -340, z: 830, yaw: Math.PI, text: 'RAMP 2  •  54° TRANSFER', color: '#fbbf24', scale: 1.05 });
+
+      // --- 4. BOOSTER 1 (trig_push_1) + LAUNCH DECK ---
+      addBoxBrush('booster_1_pad', 3080, -580, 210, 3520, -100, 250, 'booster');
+      addTrigger('trig_push_1', 'push', 3080, -580, 250, 3540, -100, 760, {
+        mode: 'hybrid',
+        dirX: 0.92, dirY: 0.08, dirZ: 0.38,
+        addSpeed: 520,
+        minSpeedXY: 1550,
+        minVelZ: 640
+      });
+      worldSigns.push({ x: 3300, y: -340, z: 790, yaw: Math.PI, text: 'BOOSTER 1  •  TRIG_PUSH', color: '#22d3ee', scale: 1.1 });
+
+      // --- 5. CURVED 3-SEGMENT SURF BANK (52° -> 56° -> 58° sweeping left) ---
+      // Positioned so surfer rides the inner-left face (holding D) while rotating yaw smoothly left
+      addSurfRampBrush('col_ramp_curve_1', {
+        start: [4140, -360, 740],
+        end: [5120, -187, 635],
+        angleDeg: 52,
+        height: 390,
+        topWidth: 24,
+        sides: 'both',
+        style: 'ramp'
+      });
+      addSurfRampBrush('col_ramp_curve_2', {
+        start: [5080, -196, 635],
+        end: [5990, 248, 530],
+        angleDeg: 56,
+        height: 390,
+        topWidth: 24,
+        sides: 'both',
+        style: 'ramp'
+      });
+      addSurfRampBrush('col_ramp_curve_3', {
+        start: [5950, 226, 530],
+        end: [6720, 970, 425],
+        angleDeg: 58,
+        height: 390,
+        topWidth: 24,
+        sides: 'both',
+        style: 'ramp'
+      });
+      worldSigns.push({ x: 5420, y: 120, z: 810, yaw: Math.PI + 0.45, text: 'CURVED BANK  •  52° → 56° → 58°', color: '#fbbf24', scale: 1.25 });
+
+      // --- 6. SPLIT DUAL-ANGLE TEST RAMPS (48° GLIDE vs 60° STEEP) ---
+      // Axis along 45°: dir = (0.7071, 0.7071), left = (-0.7071, 0.7071)
+      const d45 = Math.SQRT1_2;
+      const splitOriginX = 7020, splitOriginY = 1270;
+      const splitLen = 1320;
+      const splitOffset = 350;
+
+      // Side A (Left Branch): 48° Smooth Glide Ramp
+      const sAx = splitOriginX - d45 * splitOffset;
+      const sAy = splitOriginY + d45 * splitOffset;
+      addSurfRampBrush('col_ramp_split_48', {
+        start: [sAx, sAy, 470],
+        end: [sAx + d45 * splitLen, sAy + d45 * splitLen, 320],
+        angleDeg: 48,
+        height: 360,
+        topWidth: 22,
+        sides: 'both',
+        style: 'ramp'
+      });
+      worldSigns.push({
+        x: sAx + d45 * 450, y: sAy + d45 * 450, z: 585,
+        yaw: Math.PI + Math.PI * 0.25,
+        text: '48° SMOOTH GLIDE', color: '#fbbf24', scale: 1.05
+      });
+
+      // Side B (Right Branch): 60° Steep Aggressive Speed Ramp
+      const sBx = splitOriginX + d45 * splitOffset;
+      const sBy = splitOriginY - d45 * splitOffset;
+      addSurfRampBrush('col_ramp_split_60', {
+        start: [sBx, sBy, 470],
+        end: [sBx + d45 * splitLen, sBy + d45 * splitLen, 320],
+        angleDeg: 60,
+        height: 390,
+        topWidth: 22,
+        sides: 'both',
+        style: 'steep'
+      });
+      worldSigns.push({
+        x: sBx + d45 * 450, y: sBy + d45 * 450, z: 585,
+        yaw: Math.PI + Math.PI * 0.25,
+        text: '60° STEEP SPEED', color: '#f97316', scale: 1.05
+      });
+
+      // --- 7. BOOSTER 2 (trig_push_2) -> ELEVATED FINISH PLATFORM ---
+      const b2x = splitOriginX + d45 * (splitLen + 360);
+      const b2y = splitOriginY + d45 * (splitLen + 360);
+      addBoxBrush('booster_2_pad', b2x - 360, b2y - 360, 40, b2x + 360, b2y + 360, 80, 'booster');
+      addTrigger('trig_push_2', 'push', b2x - 380, b2y - 380, 80, b2x + 380, b2y + 380, 620, {
+        mode: 'hybrid',
+        dirX: d45, dirY: d45, dirZ: 0.55,
+        addSpeed: 540,
+        minSpeedXY: 1650,
+        minVelZ: 820
+      });
+      worldSigns.push({
+        x: b2x, y: b2y, z: 660,
+        yaw: Math.PI + Math.PI * 0.25,
+        text: 'FINAL LAUNCH  •  TRIG_PUSH', color: '#22d3ee', scale: 1.15
+      });
+
+      // Elevated Finish Platform (trig_end)
+      const finX = b2x + d45 * 1420;
+      const finY = b2y + d45 * 1420;
+      const finZ = 660;
+      addBoxBrush('finish_platform', finX - 380, finY - 380, finZ - 60, finX + 380, finY + 380, finZ, 'finish');
+      // Corner beacon pillars on finish deck
+      addBoxBrush('fin_p1', finX - 360, finY - 360, finZ, finX - 332, finY - 332, finZ + 220, 'finish');
+      addBoxBrush('fin_p2', finX + 332, finY - 360, finZ, finX + 360, finY - 332, finZ + 220, 'finish');
+      addBoxBrush('fin_p3', finX - 360, finY + 332, finZ, finX - 332, finY + 360, finZ + 220, 'finish');
+      addBoxBrush('fin_p4', finX + 332, finY + 332, finZ, finX + 360, finY + 360, finZ + 220, 'finish');
+      addTrigger('trig_end', 'end', finX - 360, finY - 360, finZ, finX + 360, finY + 360, finZ + 380);
+      worldSigns.push({
+        x: finX, y: finY, z: finZ + 280,
+        yaw: Math.PI + Math.PI * 0.25,
+        text: 'FINISH ZONE  •  TRIG_END', color: '#34d399', scale: 1.35
+      });
+
+      // --- 8. SIDE CALIBRATION ZONE (LEFT OF SPAWN: 30°, 46°, 52°, 60° + 48u CROUCH TUNNEL) ---
+      addBoxBrush('calib_deck', -340, 230, 940, 440, 1280, 1000, 'slate');
+      worldSigns.push({ x: -60, y: 310, z: 1125, yaw: -Math.PI * 0.5, text: '← CALIBRATION LAB (SLOPES & HULLS)', color: '#38bdf8', scale: 0.85 });
+
+      // 4 Calibration Wedges along X = 110..380 at Y = 430, 650, 870, 1090
+      const calibSpecs = [
+        { y: 420,  deg: 30, style: 'walkable', label: '30° WALKABLE (nz=0.87)', color: '#2dd4bf' },
+        { y: 650,  deg: 46, style: 'ramp',     label: '46° THRESHOLD (nz=0.69)', color: '#fbbf24' },
+        { y: 880,  deg: 52, style: 'ramp',     label: '52° SURF WEDGE (nz=0.62)', color: '#fb923c' },
+        { y: 1110, deg: 60, style: 'steep',    label: '60° STEEP WEDGE (nz=0.50)', color: '#f87171' },
+      ];
+      calibSpecs.forEach((spec, idx) => {
+        const h = 110;
+        addSurfRampBrush(`col_calib_${spec.deg}`, {
+          start: [90, spec.y, 1000 + h],
+          end: [370, spec.y, 1000 + h],
+          angleDeg: spec.deg,
+          height: h,
+          topWidth: 16,
+          sides: 'both',
+          style: spec.style
+        });
+        worldSigns.push({
+          x: 230, y: spec.y, z: 1000 + h + 58,
+          yaw: Math.PI,
+          text: spec.label, color: spec.color, scale: 0.72
+        });
+      });
+
+      // 48u Crouch-Height Hull Calibration Tunnel (Standing 72u blocked, Ducking 36u passes!)
+      // Tunnel along Y = 640..940 at X = -270..-110, clearance Z = 1000..1048 (48u exact!)
+      addBoxBrush('crouch_wall_l', -288, 640, 1000, -264, 940, 1110, 'slate');
+      addBoxBrush('crouch_wall_r', -116, 640, 1000, -92,  940, 1110, 'slate');
+      addBoxBrush('crouch_roof',   -288, 640, 1048, -92,  940, 1110, 'ramp');
+      worldSigns.push({
+        x: -190, y: 635, z: 1152,
+        yaw: -Math.PI * 0.5,
+        text: '48u CROUCH TUNNEL (STAND 72u / DUCK 36u)', color: '#fbbf24', scale: 0.72
+      });
+
+      // --- 9. FAIL FLOOR TELEPORTER (trig_tp_fail) ---
+      addTrigger('trig_tp_fail', 'teleport', -2500, -3500, -600, 13000, 6500, -160, {
+        dest: SPAWN_POS
+      });
+    }
+
+    buildSurfMap();
+
+    /* ============================================================================
+     * 5. EXACT GOLDSRC SWEPT AABB COLLISION & PM_SHARED PHYSICS ENGINE
+     * ============================================================================
+     */
+    // Pre-allocated trace result object (zero GC during 100Hz ticks)
+    const _traceResult = {
+      fraction: f32(1.0),
+      endX: f32(0), endY: f32(0), endZ: f32(0),
+      normalX: f32(0), normalY: f32(0), normalZ: f32(0),
+      startSolid: false,
+      allSolid: false,
+      brushId: ''
+    };
+
+    /**
+     * Exact GoldSrc/Quake ClipBoxToBrush using Minkowski plane expansion:
+     *   offset = |nx|*hx + |ny|*hy + |nz|*hz
+     */
+    function clipBoxToBrush(brush, sX, sY, sZ, eX, eY, eZ, hx, hy, hz, trace) {
+      let enterFrac = f32(-1.0);
+      let leaveFrac = f32(1.0);
+      let clipPlane = null;
+      let startsOut = false;
+      let getsOut = false;
+
+      const planes = brush.planes;
+      for (let i = 0; i < planes.length; i++) {
+        const p = planes[i];
+        const offset = f32(Math.abs(p.nx) * hx + Math.abs(p.ny) * hy + Math.abs(p.nz) * hz);
+        const dist = f32(p.d + offset);
+        const d1 = f32(p.nx * sX + p.ny * sY + p.nz * sZ - dist);
+        const d2 = f32(p.nx * eX + p.ny * eY + p.nz * eZ - dist);
+
+        if (d1 > 0) startsOut = true;
+        if (d2 > 0) getsOut = true;
+
+        // Completely in front of this plane -> no intersection with convex brush
+        if (d1 > 0 && (d2 >= DIST_EPSILON || d2 >= d1)) return;
+        // Completely behind this plane
+        if (d1 <= 0 && d2 <= 0) continue;
+
+        if (d1 > d2) {
+          // Entering brush
+          let f = f32((d1 - DIST_EPSILON) / (d1 - d2));
+          if (f < 0) f = f32(0);
+          if (f > enterFrac) {
+            enterFrac = f;
+            clipPlane = p;
+          }
+        } else {
+          // Leaving brush
+          let f = f32((d1 + DIST_EPSILON) / (d1 - d2));
+          if (f > 1) f = f32(1);
+          if (f < leaveFrac) {
+            leaveFrac = f;
+          }
+        }
+      }
+
+      if (!startsOut) {
+        trace.startSolid = true;
+        if (!getsOut) trace.allSolid = true;
+        return;
+      }
+
+      if (enterFrac < leaveFrac && enterFrac > -1 && enterFrac < trace.fraction) {
+        if (enterFrac < 0) enterFrac = f32(0);
+        trace.fraction = enterFrac;
+        trace.normalX = clipPlane.nx;
+        trace.normalY = clipPlane.ny;
+        trace.normalZ = clipPlane.nz;
+        trace.brushId = brush.id;
+      }
+    }
+
+    /** Trace swept player AABB against all world convex brushes */
+    function traceWorld(sX, sY, sZ, eX, eY, eZ, hx, hy, hz, out = _traceResult) {
+      out.fraction = f32(1.0);
+      out.startSolid = false;
+      out.allSolid = false;
+      out.normalX = f32(0);
+      out.normalY = f32(0);
+      out.normalZ = f32(0);
+      out.brushId = '';
+
+      // Swept AABB broadphase bounds
+      const pad = f32(2.0);
+      const bMinX = Math.min(sX, eX) - hx - pad;
+      const bMinY = Math.min(sY, eY) - hy - pad;
+      const bMinZ = Math.min(sZ, eZ) - hz - pad;
+      const bMaxX = Math.max(sX, eX) + hx + pad;
+      const bMaxY = Math.max(sY, eY) + hy + pad;
+      const bMaxZ = Math.max(sZ, eZ) + hz + pad;
+
+      for (let i = 0; i < worldBrushes.length; i++) {
+        const br = worldBrushes[i];
+        if (
+          bMaxX < br.minX || bMinX > br.maxX ||
+          bMaxY < br.minY || bMinY > br.maxY ||
+          bMaxZ < br.minZ || bMinZ > br.maxZ
+        ) {
+          continue;
+        }
+        clipBoxToBrush(br, sX, sY, sZ, eX, eY, eZ, hx, hy, hz, out);
+      }
+
+      out.endX = f32(sX + (eX - sX) * out.fraction);
+      out.endY = f32(sY + (eY - sY) * out.fraction);
+      out.endZ = f32(sZ + (eZ - sZ) * out.fraction);
+      return out;
+    }
+
+    /** Return current player hull half-extents based on FL_DUCKING */
+    function getHullHalfZ() {
+      return (memI32[I_FLAGS] & FL_DUCKING) ? HULL_DUCK_HZ : HULL_STAND_HZ;
+    }
+
+    /** GoldSrc PM_ClipVelocity: projects incoming velocity cleanly along collision plane */
+    const _clipOut = new Float32Array(3);
+    function PM_ClipVelocity(inX, inY, inZ, nx, ny, nz, overbounce) {
+      const backoff = f32((inX * nx + inY * ny + inZ * nz) * overbounce);
+      let ox = f32(inX - nx * backoff);
+      let oy = f32(inY - ny * backoff);
+      let oz = f32(inZ - nz * backoff);
+
+      // Prevent microscopic drift back into plane from float rounding
+      const adjust = f32(ox * nx + oy * ny + oz * nz);
+      if (adjust < 0) {
+        ox = f32(ox - nx * adjust);
+        oy = f32(oy - ny * adjust);
+        oz = f32(oz - nz * adjust);
+      }
+
+      if (ox > -STOP_EPSILON && ox < STOP_EPSILON) ox = f32(0);
+      if (oy > -STOP_EPSILON && oy < STOP_EPSILON) oy = f32(0);
+      if (oz > -STOP_EPSILON && oz < STOP_EPSILON) oz = f32(0);
+
+      _clipOut[0] = ox;
+      _clipOut[1] = oy;
+      _clipOut[2] = oz;
+    }
+
+    /** GoldSrc PM_CheckVelocity: clamp each component and total speed to sv_maxvelocity */
+    function PM_CheckVelocity() {
+      const maxv = memF32[C_MAXVEL];
+      for (let i = 0; i < 3; i++) {
+        let v = memF32[S_VEL_X + i];
+        if (!Number.isFinite(v)) v = f32(0);
+        if (v > maxv) v = maxv;
+        else if (v < -maxv) v = f32(-maxv);
+        memF32[S_VEL_X + i] = f32(v);
+      }
+      const total = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y], memF32[S_VEL_Z]);
+      if (total > maxv && total > 0) {
+        const s = f32(maxv / total);
+        memF32[S_VEL_X] = f32(memF32[S_VEL_X] * s);
+        memF32[S_VEL_Y] = f32(memF32[S_VEL_Y] * s);
+        memF32[S_VEL_Z] = f32(memF32[S_VEL_Z] * s);
+      }
+    }
+
+    /** GoldSrc PM_AirAccelerate: wishspeed clamped to 30.0 u/s for projection */
+    function PM_AirAccelerate(wishX, wishY, wishZ, wishspeed, accel) {
+      const wishspd = wishspeed > AIR_WISH_CAP ? AIR_WISH_CAP : wishspeed;
+      const currentspeed = f32(
+        memF32[S_VEL_X] * wishX +
+        memF32[S_VEL_Y] * wishY +
+        memF32[S_VEL_Z] * wishZ
+      );
+      const addspeed = f32(wishspd - currentspeed);
+      if (addspeed <= 0) return;
+
+      let accelspeed = f32(accel * wishspeed * FIXED_DT);
+      if (accelspeed > addspeed) accelspeed = addspeed;
+
+      memF32[S_VEL_X] = f32(memF32[S_VEL_X] + accelspeed * wishX);
+      memF32[S_VEL_Y] = f32(memF32[S_VEL_Y] + accelspeed * wishY);
+      memF32[S_VEL_Z] = f32(memF32[S_VEL_Z] + accelspeed * wishZ);
+    }
+
+    /** GoldSrc PM_Accelerate (Ground only) */
+    function PM_Accelerate(wishX, wishY, wishZ, wishspeed, accel) {
+      const currentspeed = f32(
+        memF32[S_VEL_X] * wishX +
+        memF32[S_VEL_Y] * wishY +
+        memF32[S_VEL_Z] * wishZ
+      );
+      const addspeed = f32(wishspeed - currentspeed);
+      if (addspeed <= 0) return;
+
+      let accelspeed = f32(accel * FIXED_DT * wishspeed);
+      if (accelspeed > addspeed) accelspeed = addspeed;
+
+      memF32[S_VEL_X] = f32(memF32[S_VEL_X] + accelspeed * wishX);
+      memF32[S_VEL_Y] = f32(memF32[S_VEL_Y] + accelspeed * wishY);
+      memF32[S_VEL_Z] = f32(memF32[S_VEL_Z] + accelspeed * wishZ);
+    }
+
+    /** GoldSrc PM_Friction (with edgefriction = 2 drop-off detection, Ground only) */
+    function PM_Friction() {
+      const vx = memF32[S_VEL_X], vy = memF32[S_VEL_Y], vz = memF32[S_VEL_Z];
+      const speed = f32(Math.hypot(vx, vy, vz));
+      if (speed < 0.1) return;
+
+      let friction = memF32[C_FRICTION];
+      const hz = getHullHalfZ();
+
+      // Check leading edge drop-off for edgefriction
+      const leadX = f32(memF32[S_POS_X] + (vx / speed) * 16.0);
+      const leadY = f32(memF32[S_POS_Y] + (vy / speed) * 16.0);
+      const leadZ = f32(memF32[S_POS_Z] - hz + 1.0);
+      const edgeTrace = traceWorld(leadX, leadY, leadZ, leadX, leadY, f32(leadZ - 34.0), f32(1), f32(1), f32(1));
+      if (edgeTrace.fraction === 1.0) {
+        friction = f32(friction * memF32[C_EDGEFRIC]);
+      }
+
+      const stopspeed = memF32[C_STOPSPEED];
+      const control = speed < stopspeed ? stopspeed : speed;
+      const drop = f32(control * friction * FIXED_DT);
+
+      let newspeed = f32(speed - drop);
+      if (newspeed < 0) newspeed = f32(0);
+      newspeed = f32(newspeed / speed);
+
+      memF32[S_VEL_X] = f32(vx * newspeed);
+      memF32[S_VEL_Y] = f32(vy * newspeed);
+      memF32[S_VEL_Z] = f32(vz * newspeed);
+    }
+
+    // Reusable plane buffer for PM_FlyMove (up to 5 clip planes)
+    const _planesX = new Float32Array(MAX_CLIP_PLANES);
+    const _planesY = new Float32Array(MAX_CLIP_PLANES);
+    const _planesZ = new Float32Array(MAX_CLIP_PLANES);
+
+    /**
+     * GoldSrc PM_FlyMove: multi-plane iterative sliding (up to 4 bumps)
+     * with crease cross-product resolution when sliding against 2 planes simultaneously.
+     * Returns bitmask: bit 1 = hit floor/ramp, bit 2 = hit wall, bit 4 = hit surfable ramp.
+     */
+    function PM_FlyMove() {
+      const hz = getHullHalfZ();
+      const origX = memF32[S_VEL_X], origY = memF32[S_VEL_Y], origZ = memF32[S_VEL_Z];
+      const primalX = origX, primalY = origY, primalZ = origZ;
+      let curOrigX = origX, curOrigY = origY, curOrigZ = origZ;
+
+      let timeLeft = FIXED_DT;
+      let numPlanes = 0;
+      let blocked = 0;
+      let surfHitNz = f32(0);
+
+      for (let bump = 0; bump < 4; bump++) {
+        if (memF32[S_VEL_X] === 0 && memF32[S_VEL_Y] === 0 && memF32[S_VEL_Z] === 0) break;
+
+        const pX = memF32[S_POS_X], pY = memF32[S_POS_Y], pZ = memF32[S_POS_Z];
+        const eX = f32(pX + memF32[S_VEL_X] * timeLeft);
+        const eY = f32(pY + memF32[S_VEL_Y] * timeLeft);
+        const eZ = f32(pZ + memF32[S_VEL_Z] * timeLeft);
+
+        const tr = traceWorld(pX, pY, pZ, eX, eY, eZ, HULL_STAND_HX, HULL_STAND_HY, hz);
+
+        if (tr.allSolid) {
+          memF32[S_VEL_X] = f32(0);
+          memF32[S_VEL_Y] = f32(0);
+          memF32[S_VEL_Z] = f32(0);
+          return 4;
+        }
+
+        if (tr.fraction > 0) {
+          memF32[S_POS_X] = tr.endX;
+          memF32[S_POS_Y] = tr.endY;
+          memF32[S_POS_Z] = tr.endZ;
+          curOrigX = memF32[S_VEL_X];
+          curOrigY = memF32[S_VEL_Y];
+          curOrigZ = memF32[S_VEL_Z];
+          numPlanes = 0;
+        }
+
+        if (tr.fraction === 1.0) break; // Moved entire remaining distance
+
+        // Classify hit surface
+        if (tr.normalZ >= SURF_NORMAL_Z) {
+          blocked |= 1; // walkable floor
+        } else if (tr.normalZ > 0.05) {
+          blocked |= 4; // surfable angled ramp (0.05 < nz < 0.7)
+          surfHitNz = tr.normalZ;
+        } else {
+          blocked |= 2; // vertical wall / ceiling
+        }
+
+        timeLeft = f32(timeLeft - timeLeft * tr.fraction);
+
+        if (numPlanes >= MAX_CLIP_PLANES) {
+          memF32[S_VEL_X] = f32(0);
+          memF32[S_VEL_Y] = f32(0);
+          memF32[S_VEL_Z] = f32(0);
+          break;
+        }
+
+        // Guard against duplicate plane hits
+        let duplicate = false;
+        for (let i = 0; i < numPlanes; i++) {
+          if (_planesX[i] * tr.normalX + _planesY[i] * tr.normalY + _planesZ[i] * tr.normalZ > 0.99) {
+            memF32[S_VEL_X] = f32(memF32[S_VEL_X] + tr.normalX * 0.5);
+            memF32[S_VEL_Y] = f32(memF32[S_VEL_Y] + tr.normalY * 0.5);
+            memF32[S_VEL_Z] = f32(memF32[S_VEL_Z] + tr.normalZ * 0.5);
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) continue;
+
+        _planesX[numPlanes] = tr.normalX;
+        _planesY[numPlanes] = tr.normalY;
+        _planesZ[numPlanes] = tr.normalZ;
+        numPlanes++;
+
+        // Find velocity satisfying all touched planes
+        let i = 0;
+        for (; i < numPlanes; i++) {
+          PM_ClipVelocity(curOrigX, curOrigY, curOrigZ, _planesX[i], _planesY[i], _planesZ[i], f32(1.0));
+          let j = 0;
+          for (; j < numPlanes; j++) {
+            if (j === i) continue;
+            if (_clipOut[0] * _planesX[j] + _clipOut[1] * _planesY[j] + _clipOut[2] * _planesZ[j] < 0) {
+              break;
+            }
+          }
+          if (j === numPlanes) break;
+        }
+
+        if (i !== numPlanes) {
+          // Valid single-plane slide
+          memF32[S_VEL_X] = _clipOut[0];
+          memF32[S_VEL_Y] = _clipOut[1];
+          memF32[S_VEL_Z] = _clipOut[2];
+        } else {
+          // Crease resolution between 2 planes via cross product
+          if (numPlanes !== 2) {
+            memF32[S_VEL_X] = f32(0);
+            memF32[S_VEL_Y] = f32(0);
+            memF32[S_VEL_Z] = f32(0);
+            break;
+          }
+          let dirX = _planesY[0] * _planesZ[1] - _planesZ[0] * _planesY[1];
+          let dirY = _planesZ[0] * _planesX[1] - _planesX[0] * _planesZ[1];
+          let dirZ = _planesX[0] * _planesY[1] - _planesY[0] * _planesX[1];
+          const dLen = Math.hypot(dirX, dirY, dirZ);
+          if (dLen > 1e-5) {
+            dirX /= dLen; dirY /= dLen; dirZ /= dLen;
+            const d = f32(dirX * memF32[S_VEL_X] + dirY * memF32[S_VEL_Y] + dirZ * memF32[S_VEL_Z]);
+            memF32[S_VEL_X] = f32(dirX * d);
+            memF32[S_VEL_Y] = f32(dirY * d);
+            memF32[S_VEL_Z] = f32(dirZ * d);
+          } else {
+            memF32[S_VEL_X] = f32(0);
+            memF32[S_VEL_Y] = f32(0);
+            memF32[S_VEL_Z] = f32(0);
+            break;
+          }
+        }
+
+        // Prevent reversing direction against primal velocity in acute crevices
+        if (memF32[S_VEL_X] * primalX + memF32[S_VEL_Y] * primalY + memF32[S_VEL_Z] * primalZ <= 0) {
+          memF32[S_VEL_X] = f32(0);
+          memF32[S_VEL_Y] = f32(0);
+          memF32[S_VEL_Z] = f32(0);
+          break;
+        }
+      }
+
+      if (surfHitNz > 0) memF32[S_SURF_NZ] = surfHitNz;
+      return blocked;
+    }
+
+    /** GoldSrc PM_CategorizePosition: sets/clears FL_ONGROUND and detects surf ramps */
+    function PM_CategorizePosition() {
+      const hz = getHullHalfZ();
+      const pX = memF32[S_POS_X], pY = memF32[S_POS_Y], pZ = memF32[S_POS_Z];
+
+      // Moving upward fast -> cannot be grounded
+      if (memF32[S_VEL_Z] > 180.0) {
+        memI32[I_FLAGS] &= ~FL_ONGROUND;
+        return;
+      }
+
+      const tr = traceWorld(pX, pY, pZ, pX, pY, f32(pZ - 2.0), HULL_STAND_HX, HULL_STAND_HY, hz);
+      if (tr.fraction === 1.0 || tr.normalZ < SURF_NORMAL_Z) {
+        memI32[I_FLAGS] &= ~FL_ONGROUND;
+        if (tr.fraction < 1.0 && tr.normalZ > 0.05 && tr.normalZ < SURF_NORMAL_Z) {
+          memF32[S_SURF_NZ] = tr.normalZ;
+        }
+      } else {
+        memI32[I_FLAGS] |= FL_ONGROUND;
+        if (!tr.startSolid && !tr.allSolid && memF32[S_VEL_Z] <= 0) {
+          memF32[S_POS_X] = tr.endX;
+          memF32[S_POS_Y] = tr.endY;
+          memF32[S_POS_Z] = tr.endZ;
+        }
+      }
+    }
+
+    /** GoldSrc Duck / Uncrouch with standing 72u headroom check & mid-air crouch-jump */
+    function PM_Duck() {
+      const wantDuck = (memI32[I_BUTTONS] & IN_DUCK) !== 0;
+      const isDucking = (memI32[I_FLAGS] & FL_DUCKING) !== 0;
+      const onGround = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+
+      if (wantDuck && !isDucking) {
+        memI32[I_FLAGS] |= FL_DUCKING;
+        if (onGround) {
+          // Keep feet on ground while top lowers 36u
+          memF32[S_POS_Z] = f32(memF32[S_POS_Z] - 18.0);
+        }
+        // When airborne, origin stays -> feet lift +18u immediately (CS 1.6 crouch-jump!)
+      } else if (!wantDuck && isDucking) {
+        const pX = memF32[S_POS_X], pY = memF32[S_POS_Y], pZ = memF32[S_POS_Z];
+        // Headroom check before restoring 72u standing hull
+        const testZ = onGround ? f32(pZ + 18.0) : pZ;
+        const tr = traceWorld(pX, pY, testZ, pX, pY, testZ, HULL_STAND_HX, HULL_STAND_HY, HULL_STAND_HZ);
+        if (!tr.startSolid && !tr.allSolid) {
+          memI32[I_FLAGS] &= ~FL_DUCKING;
+          memF32[S_POS_Z] = testZ;
+        } else if (!onGround) {
+          // Try shifting down slightly in mid-air if ceiling is right above head
+          const trAlt = traceWorld(pX, pY, f32(pZ - 18.0), pX, pY, f32(pZ - 18.0), HULL_STAND_HX, HULL_STAND_HY, HULL_STAND_HZ);
+          if (!trAlt.startSolid && !trAlt.allSolid) {
+            memI32[I_FLAGS] &= ~FL_DUCKING;
+            memF32[S_POS_Z] = f32(pZ - 18.0);
+          }
+        }
+      }
+
+      // Smooth visual eye offset interpolation
+      const targetEye = (memI32[I_FLAGS] & FL_DUCKING) ? EYE_OFFSET_DUCK : EYE_OFFSET_STAND;
+      memF32[S_VIEW_OFS_Z] = f32(memF32[S_VIEW_OFS_Z] + (targetEye - memF32[S_VIEW_OFS_Z]) * 0.28);
+    }
+
+    /** GoldSrc PM_WalkMove with 18u step-up handling */
+    function PM_WalkMove(wishX, wishY, wishspeed) {
+      memF32[S_VEL_Z] = f32(0);
+      PM_Accelerate(wishX, wishY, f32(0), wishspeed, memF32[C_ACCEL]);
+      PM_CheckVelocity();
+
+      const vx = memF32[S_VEL_X], vy = memF32[S_VEL_Y];
+      if (Math.hypot(vx, vy) < 0.01) return;
+
+      const hz = getHullHalfZ();
+      const startX = memF32[S_POS_X], startY = memF32[S_POS_Y], startZ = memF32[S_POS_Z];
+      const destX = f32(startX + vx * FIXED_DT);
+      const destY = f32(startY + vy * FIXED_DT);
+
+      // Try direct horizontal walk first
+      const tr = traceWorld(startX, startY, startZ, destX, destY, startZ, HULL_STAND_HX, HULL_STAND_HY, hz);
+      if (tr.fraction === 1.0) {
+        memF32[S_POS_X] = tr.endX;
+        memF32[S_POS_Y] = tr.endY;
+        memF32[S_POS_Z] = tr.endZ;
+        return;
+      }
+
+      // Try standard FlyMove vs Step-Up (STEPSIZE = 18u) and keep whichever travels farther
+      const origVX = memF32[S_VEL_X], origVY = memF32[S_VEL_Y], origVZ = memF32[S_VEL_Z];
+      PM_FlyMove();
+      const downX = memF32[S_POS_X], downY = memF32[S_POS_Y], downZ = memF32[S_POS_Z];
+      const downVX = memF32[S_VEL_X], downVY = memF32[S_VEL_Y], downVZ = memF32[S_VEL_Z];
+      const downDistSq = (downX - startX) ** 2 + (downY - startY) ** 2;
+
+      // Reset and attempt step-up
+      memF32[S_POS_X] = startX; memF32[S_POS_Y] = startY; memF32[S_POS_Z] = startZ;
+      memF32[S_VEL_X] = origVX; memF32[S_VEL_Y] = origVY; memF32[S_VEL_Z] = origVZ;
+
+      const upTr = traceWorld(startX, startY, startZ, startX, startY, f32(startZ + STEPSIZE), HULL_STAND_HX, HULL_STAND_HY, hz);
+      if (!upTr.startSolid && !upTr.allSolid) {
+        memF32[S_POS_X] = upTr.endX;
+        memF32[S_POS_Y] = upTr.endY;
+        memF32[S_POS_Z] = upTr.endZ;
+        PM_FlyMove();
+
+        // Drop back down onto step surface
+        const dropTr = traceWorld(
+          memF32[S_POS_X], memF32[S_POS_Y], memF32[S_POS_Z],
+          memF32[S_POS_X], memF32[S_POS_Y], f32(memF32[S_POS_Z] - STEPSIZE - 2.0),
+          HULL_STAND_HX, HULL_STAND_HY, hz
+        );
+        if (!dropTr.allSolid && dropTr.normalZ >= SURF_NORMAL_Z) {
+          memF32[S_POS_X] = dropTr.endX;
+          memF32[S_POS_Y] = dropTr.endY;
+          memF32[S_POS_Z] = dropTr.endZ;
+        }
+        const upDistSq = (memF32[S_POS_X] - startX) ** 2 + (memF32[S_POS_Y] - startY) ** 2;
+        if (upDistSq > downDistSq + 0.01 && dropTr.normalZ >= SURF_NORMAL_Z) {
+          return;
+        }
+      }
+
+      // Revert to regular slide
+      memF32[S_POS_X] = downX; memF32[S_POS_Y] = downY; memF32[S_POS_Z] = downZ;
+      memF32[S_VEL_X] = downVX; memF32[S_VEL_Y] = downVY; memF32[S_VEL_Z] = downVZ;
+    }
+
+    /** GoldSrc PM_AirMove: computes horizontal wishdir & runs PM_AirAccelerate + PM_FlyMove */
+    function PM_AirMove(wishX, wishY, wishspeed) {
+      PM_AirAccelerate(wishX, wishY, f32(0), wishspeed, memF32[C_AIRACCEL]);
+      PM_CheckVelocity();
+      return PM_FlyMove();
+    }
+
+    // Trigger cooldown tracking & gameplay callbacks
+    const pushCooldowns = new Map();
+    const callbacks = {
+      onLand: null,
+      onJump: null,
+      onStartRun: null,
+      onFinishRun: null,
+      onBoost: null,
+      onTeleport: null
+    };
+
+    /** Evaluate AABB trigger volumes against current player hull */
+    function checkTriggers() {
+      const hz = getHullHalfZ();
+      const pMinX = memF32[S_POS_X] - HULL_STAND_HX;
+      const pMaxX = memF32[S_POS_X] + HULL_STAND_HX;
+      const pMinY = memF32[S_POS_Y] - HULL_STAND_HY;
+      const pMaxY = memF32[S_POS_Y] + HULL_STAND_HY;
+      const pMinZ = memF32[S_POS_Z] - hz;
+      const pMaxZ = memF32[S_POS_Z] + hz;
+      const tick = memI32[I_TICK];
+
+      for (let i = 0; i < worldTriggers.length; i++) {
+        const t = worldTriggers[i];
+        if (
+          pMaxX < t.minX || pMinX > t.maxX ||
+          pMaxY < t.minY || pMinY > t.maxY ||
+          pMaxZ < t.minZ || pMinZ > t.maxZ
+        ) {
+          continue;
+        }
+
+        if (t.type === 'start') {
+          if (callbacks.onStartRun) callbacks.onStartRun();
+        } else if (t.type === 'end') {
+          if (callbacks.onFinishRun) callbacks.onFinishRun();
+        } else if (t.type === 'teleport') {
+          teleportToSpawn(true);
+          return;
+        } else if (t.type === 'push') {
+          const lastTick = pushCooldowns.get(t.id) || -999;
+          if (tick - lastTick >= 22) {
+            pushCooldowns.set(t.id, tick);
+            const m = t.meta;
+            // Hybrid booster: preserves high momentum while guaranteeing launch height & speed
+            memF32[S_VEL_X] = f32(memF32[S_VEL_X] + m.dirX * m.addSpeed);
+            memF32[S_VEL_Y] = f32(memF32[S_VEL_Y] + m.dirY * m.addSpeed);
+            const curXY = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y]);
+            if (curXY < m.minSpeedXY) {
+              const dirLen = Math.hypot(m.dirX, m.dirY) || 1;
+              memF32[S_VEL_X] = f32((m.dirX / dirLen) * m.minSpeedXY);
+              memF32[S_VEL_Y] = f32((m.dirY / dirLen) * m.minSpeedXY);
+            }
+            const nextZ = Math.max(memF32[S_VEL_Z] + m.dirZ * m.addSpeed, m.minVelZ);
+            memF32[S_VEL_Z] = f32(nextZ);
+            memI32[I_FLAGS] &= ~FL_ONGROUND;
+            PM_CheckVelocity();
+            if (callbacks.onBoost) callbacks.onBoost(t.id);
+          }
+        }
+      }
+    }
+
+    /** Teleport player to Spawn & reset velocity cleanly */
+    function teleportToSpawn(isFail = false) {
+      memF32[S_POS_X] = SPAWN_POS.x;
+      memF32[S_POS_Y] = SPAWN_POS.y;
+      memF32[S_POS_Z] = SPAWN_POS.z;
+      memF32[S_PREV_X] = SPAWN_POS.x;
+      memF32[S_PREV_Y] = SPAWN_POS.y;
+      memF32[S_PREV_Z] = SPAWN_POS.z;
+      memF32[S_VEL_X] = f32(0);
+      memF32[S_VEL_Y] = f32(0);
+      memF32[S_VEL_Z] = f32(0);
+      memF32[S_YAW] = SPAWN_POS.yaw;
+      memF32[S_PITCH] = SPAWN_POS.pitch;
+      memF32[S_VIEW_OFS_Z] = EYE_OFFSET_STAND;
+      memF32[S_PREV_VIEW_OFS_Z] = EYE_OFFSET_STAND;
+      memI32[I_FLAGS] = FL_ONGROUND;
+      memI32[I_MOVESTATE] = STATE_GROUND;
+      pushCooldowns.clear();
+      if (callbacks.onTeleport) callbacks.onTeleport(isFail);
+    }
+
+    /**
+     * Single deterministic 100 Hz GoldSrc simulation step (PM_PlayerMove)
+     */
+    function simulateTick() {
+      // Save previous transform for high-refresh-rate render interpolation
+      memF32[S_PREV_X] = memF32[S_POS_X];
+      memF32[S_PREV_Y] = memF32[S_POS_Y];
+      memF32[S_PREV_Z] = memF32[S_POS_Z];
+      memF32[S_PREV_VIEW_OFS_Z] = memF32[S_VIEW_OFS_Z];
+
+      memI32[I_TICK] += 1;
+      memF32[S_SURF_NZ] = f32(0);
+
+      const wasOnGround = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+      const preVelZ = memF32[S_VEL_Z];
+
+      // 1. Update duck state & hull
+      PM_Duck();
+
+      // 2. Categorize ground/air position
+      PM_CategorizePosition();
+
+      // 3. Jump check (supports Auto-Bhop or exact fresh jump / scroll-wheel input)
+      const buttons = memI32[I_BUTTONS];
+      const prevButtons = memI32[I_PREV_BUTTONS];
+      const autoBhop = memI32[I_AUTOBHOP] === 1;
+      const jumpPressed = (buttons & IN_JUMP) !== 0;
+      const freshJump = jumpPressed && (autoBhop || (prevButtons & IN_JUMP) === 0);
+
+      if (freshJump && (memI32[I_FLAGS] & FL_ONGROUND)) {
+        memI32[I_FLAGS] &= ~FL_ONGROUND;
+        // Exact GoldSrc jump impulse: sqrt(2 * sv_gravity * 45) ≈ 268.328 u/s
+        memF32[S_VEL_Z] = f32(Math.sqrt(2.0 * memF32[C_GRAVITY] * 45.0));
+        if (callbacks.onJump) callbacks.onJump();
+      }
+
+      // 4. First half of GoldSrc gravity step (only while airborne)
+      const isGroundedNow = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+      if (!isGroundedNow) {
+        memF32[S_VEL_Z] = f32(memF32[S_VEL_Z] - 0.5 * memF32[C_GRAVITY] * FIXED_DT);
+      }
+
+      // 5. Compute horizontal wish vector from view yaw & WASD move axes
+      const yaw = memF32[U_YAW];
+      const fwdX = Math.cos(yaw), fwdY = Math.sin(yaw);
+      const rightX = Math.sin(yaw), rightY = -Math.cos(yaw);
+
+      const fmove = memF32[U_FMOVE];
+      const smove = memF32[U_SMOVE];
+      const maxSpeed = (memI32[I_FLAGS] & FL_DUCKING) && isGroundedNow
+        ? f32(memF32[U_MAXSPEED] * 0.34)
+        : memF32[U_MAXSPEED];
+
+      let wishX = f32(fwdX * fmove + rightX * smove);
+      let wishY = f32(fwdY * fmove + rightY * smove);
+      let wishspeed = f32(Math.hypot(wishX, wishY));
+      if (wishspeed > 0.0001) {
+        wishX = f32(wishX / wishspeed);
+        wishY = f32(wishY / wishspeed);
+      }
+      if (wishspeed > maxSpeed) wishspeed = maxSpeed;
+
+      // 6. Ground vs Air/Surf movement branch
+      let flyBlocked = 0;
+      if (isGroundedNow) {
+        PM_Friction();
+        PM_WalkMove(wishX, wishY, wishspeed);
+      } else {
+        flyBlocked = PM_AirMove(wishX, wishY, wishspeed);
+      }
+
+      // 7. Second half of GoldSrc gravity step
+      PM_CategorizePosition();
+      const landedNow = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+      if (!landedNow) {
+        memF32[S_VEL_Z] = f32(memF32[S_VEL_Z] - 0.5 * memF32[C_GRAVITY] * FIXED_DT);
+      } else {
+        memF32[S_VEL_Z] = f32(0);
+        if (!wasOnGround && preVelZ < -140 && callbacks.onLand) {
+          callbacks.onLand(Math.abs(preVelZ));
+        }
+      }
+
+      PM_CheckVelocity();
+
+      // 8. Determine telemetry state (GROUND / SURF / AIR)
+      if (landedNow) {
+        memI32[I_MOVESTATE] = STATE_GROUND;
+      } else if ((flyBlocked & 4) || (memF32[S_SURF_NZ] > 0.05 && memF32[S_SURF_NZ] < SURF_NORMAL_Z)) {
+        memI32[I_MOVESTATE] = STATE_SURF;
+      } else {
+        memI32[I_MOVESTATE] = STATE_AIR;
+      }
+
+      // 9. Check triggers (start, end, push boosters, fail teleporter)
+      checkTriggers();
+
+      memI32[I_PREV_BUTTONS] = buttons;
+    }
+
+    /* ============================================================================
+     * 6. PROCEDURAL WEB AUDIO API SOUND ENGINE (Zero External Audio URLs)
+     * ============================================================================
+     */
+    class SurfAudioEngine {
+      constructor() {
+        this.ctx = null;
+        this.muted = false;
+        this.ready = false;
+        this.windGain = null;
+        this.windFilter = null;
+        this.slideGain = null;
+        this.slideFilter = null;
+        this.slideOsc = null;
+      }
+
+      unlock() {
+        if (this.ready) {
+          if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+          return;
+        }
+        try {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (!AudioCtx) return;
+          this.ctx = new AudioCtx();
+
+          // Create reusable 2-second white noise buffer
+          const len = this.ctx.sampleRate * 2;
+          const noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+          const data = noiseBuf.getChannelData(0);
+          for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+          this.noiseBuf = noiseBuf;
+
+          // Continuous velocity-reactive wind rush
+          const windSrc = this.ctx.createBufferSource();
+          windSrc.buffer = noiseBuf;
+          windSrc.loop = true;
+          this.windFilter = this.ctx.createBiquadFilter();
+          this.windFilter.type = 'bandpass';
+          this.windFilter.frequency.value = 320;
+          this.windFilter.Q.value = 1.3;
+          this.windGain = this.ctx.createGain();
+          this.windGain.gain.value = 0;
+          windSrc.connect(this.windFilter).connect(this.windGain).connect(this.ctx.destination);
+          windSrc.start();
+
+          // Continuous subtle ramp slide hum (active during STATE_SURF)
+          const slideSrc = this.ctx.createBufferSource();
+          slideSrc.buffer = noiseBuf;
+          slideSrc.loop = true;
+          this.slideFilter = this.ctx.createBiquadFilter();
+          this.slideFilter.type = 'bandpass';
+          this.slideFilter.frequency.value = 220;
+          this.slideFilter.Q.value = 4.5;
+          this.slideGain = this.ctx.createGain();
+          this.slideGain.gain.value = 0;
+          slideSrc.connect(this.slideFilter).connect(this.slideGain).connect(this.ctx.destination);
+          slideSrc.start();
+
+          this.ready = true;
+        } catch (err) {
+          console.warn('Web Audio initialization skipped:', err);
+        }
+      }
+
+      setMuted(m) {
+        this.muted = m;
+        if (m && this.ready) {
+          const t = this.ctx.currentTime;
+          this.windGain.gain.setTargetAtTime(0, t, 0.04);
+          this.slideGain.gain.setTargetAtTime(0, t, 0.04);
+        }
+      }
+
+      updateContinuous(speed3D, isSurfing, isPaused) {
+        if (!this.ready || !this.ctx) return;
+        const t = this.ctx.currentTime;
+        if (this.muted || isPaused) {
+          this.windGain.gain.setTargetAtTime(0, t, 0.05);
+          this.slideGain.gain.setTargetAtTime(0, t, 0.05);
+          return;
+        }
+
+        // Wind scales smoothly from 500 u/s to 3500 u/s
+        const windNorm = Math.max(0, Math.min(1, (speed3D - 480) / 3020));
+        this.windGain.gain.setTargetAtTime(windNorm * windNorm * 0.19, t, 0.06);
+        this.windFilter.frequency.setTargetAtTime(260 + windNorm * 1450, t, 0.06);
+
+        // Ramp slide texture hum
+        const slideTarget = isSurfing ? Math.min(0.11, 0.025 + windNorm * 0.09) : 0;
+        this.slideGain.gain.setTargetAtTime(slideTarget, t, 0.04);
+        this.slideFilter.frequency.setTargetAtTime(160 + windNorm * 420, t, 0.05);
+      }
+
+      playLand(impactSpeed) {
+        if (!this.ready || this.muted) return;
+        const t = this.ctx.currentTime;
+        const intensity = Math.min(1, Math.max(0.18, impactSpeed / 650));
+
+        // Low CS 1.6 concrete thud
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(105, t);
+        osc.frequency.exponentialRampToValueAtTime(38, t + 0.09);
+        gain.gain.setValueAtTime(0.24 * intensity, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.11);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.12);
+      }
+
+      playJump() {
+        if (!this.ready || this.muted) return;
+        const t = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(120, t);
+        osc.frequency.exponentialRampToValueAtTime(210, t + 0.055);
+        gain.gain.setValueAtTime(0.06, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.065);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.07);
+      }
+
+      playBoost() {
+        if (!this.ready || this.muted) return;
+        const t = this.ctx.currentTime;
+        // Upward swept energy whoosh
+        const src = this.ctx.createBufferSource();
+        src.buffer = this.noiseBuf;
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.Q.value = 2.2;
+        filter.frequency.setValueAtTime(280, t);
+        filter.frequency.exponentialRampToValueAtTime(2400, t + 0.28);
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.001, t);
+        gain.gain.linearRampToValueAtTime(0.22, t + 0.04);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.34);
+        src.connect(filter).connect(gain).connect(this.ctx.destination);
+        src.start(t);
+        src.stop(t + 0.36);
+
+        const osc = this.ctx.createOscillator();
+        const og = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(220, t);
+        osc.frequency.exponentialRampToValueAtTime(760, t + 0.24);
+        og.gain.setValueAtTime(0.11, t);
+        og.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+        osc.connect(og).connect(this.ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.3);
+      }
+
+      playTeleport() {
+        if (!this.ready || this.muted) return;
+        const t = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(780, t);
+        osc.frequency.exponentialRampToValueAtTime(160, t + 0.14);
+        osc.frequency.exponentialRampToValueAtTime(520, t + 0.26);
+        const filt = this.ctx.createBiquadFilter();
+        filt.type = 'lowpass';
+        filt.frequency.value = 1600;
+        gain.gain.setValueAtTime(0.11, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+        osc.connect(filt).connect(gain).connect(this.ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.3);
+      }
+
+      playWeaponSwitch() {
+        if (!this.ready || this.muted) return;
+        const t = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(520, t);
+        osc.frequency.exponentialRampToValueAtTime(260, t + 0.045);
+        gain.gain.setValueAtTime(0.045, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.055);
+      }
+
+      playStartBeep() {
+        if (!this.ready || this.muted) return;
+        const t = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(660, t);
+        osc.frequency.setValueAtTime(880, t + 0.06);
+        gain.gain.setValueAtTime(0.09, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+        osc.connect(gain).connect(this.ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.18);
+      }
+
+      playFinishChime() {
+        if (!this.ready || this.muted) return;
+        const t = this.ctx.currentTime;
+        const notes = [523.25, 659.25, 783.99, 1046.5];
+        notes.forEach((freq, idx) => {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'triangle';
+          const start = t + idx * 0.065;
+          osc.frequency.setValueAtTime(freq, start);
+          gain.gain.setValueAtTime(0.11, start);
+          gain.gain.exponentialRampToValueAtTime(0.001, start + 0.42);
+          osc.connect(gain).connect(this.ctx.destination);
+          osc.start(start);
+          osc.stop(start + 0.45);
+        });
+      }
+    }
+
+    const audio = new SurfAudioEngine();
+
+    /* ============================================================================
+     * 7. PROCEDURAL DEV-GRID TEXTURES & THREE.JS WORLD RENDERER
+     * ============================================================================
+     */
+    const canvas = document.getElementById('viewport');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.autoClear = false;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x0c1322, 0.000105);
+
+    let baseFov = 90;
+    const camera = new THREE.PerspectiveCamera(baseFov, window.innerWidth / window.innerHeight, 2, 26000);
+    camera.up.set(0, 1, 0);
+
+    // Separate overlay scene for first-person weapon viewmodel (prevents ramp clipping!)
+    const vmScene = new THREE.Scene();
+    const vmCamera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.05, 20);
+    vmScene.add(new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 1.25));
+    const vmKeyLight = new THREE.DirectionalLight(0xfff7ed, 1.4);
+    vmKeyLight.position.set(2, 4, 3);
+    vmScene.add(vmKeyLight);
+
+    // Lighting for main 3D surf map
+    const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x1e293b, 0.85);
+    scene.add(hemiLight);
+    const sunLight = new THREE.DirectionalLight(0xfffbeb, 1.35);
+    sunLight.position.set(2800, 4600, 1900);
+    scene.add(sunLight);
+    const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.42);
+    fillLight.position.set(-2200, 1400, -2600);
+    scene.add(fillLight);
+
+    /** Create crisp procedural GoldSrc/Source dev-grid textures via CanvasTexture */
+    function makeDevGridTexture(baseHex, majorHex, minorHex, accentHex, labelText = '64', chevrons = false) {
+      const c = document.createElement('canvas');
+      c.width = 256;
+      c.height = 256;
+      const g = c.getContext('2d');
+
+      // Base surface fill
+      g.fillStyle = baseHex;
+      g.fillRect(0, 0, 256, 256);
+
+      // Subtle beveled vignette inside tile
+      const grad = g.createLinearGradient(0, 0, 256, 256);
+      grad.addColorStop(0, 'rgba(255,255,255,0.08)');
+      grad.addColorStop(1, 'rgba(0,0,0,0.14)');
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 256, 256);
+
+      // Minor 16u subdivisions
+      g.strokeStyle = minorHex;
+      g.lineWidth = 1;
+      for (let i = 0; i <= 256; i += 32) {
+        g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 256); g.stroke();
+        g.beginPath(); g.moveTo(0, i); g.lineTo(256, i); g.stroke();
+      }
+
+      // Optional glowing directional chevrons (for booster pads & surf ramps)
+      if (chevrons) {
+        g.strokeStyle = accentHex;
+        g.lineWidth = 10;
+        g.lineCap = 'round';
+        g.lineJoin = 'round';
+        for (let y = 40; y < 256; y += 84) {
+          g.beginPath();
+          g.moveTo(46, y + 36);
+          g.lineTo(128, y);
+          g.lineTo(210, y + 36);
+          g.stroke();
+        }
+      }
+
+      // Major 64u border
+      g.strokeStyle = majorHex;
+      g.lineWidth = 4;
+      g.strokeRect(2, 2, 252, 252);
+
+      // Corner accent ticks
+      g.fillStyle = accentHex;
+      g.fillRect(0, 0, 14, 4); g.fillRect(0, 0, 4, 14);
+      g.fillRect(242, 252, 14, 4); g.fillRect(252, 242, 4, 14);
+
+      if (labelText && !chevrons) {
+        g.fillStyle = 'rgba(255,255,255,0.22)';
+        g.font = '700 22px JetBrains Mono, monospace';
+        g.fillText(labelText, 16, 32);
+      }
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+      return tex;
+    }
+
+    function makeHazardTexture() {
+      const c = document.createElement('canvas');
+      c.width = 256;
+      c.height = 256;
+      const g = c.getContext('2d');
+      g.fillStyle = '#0f131a';
+      g.fillRect(0, 0, 256, 256);
+      g.fillStyle = '#b45309';
+      for (let i = -256; i < 512; i += 64) {
+        g.beginPath();
+        g.moveTo(i, 0);
+        g.lineTo(i + 28, 0);
+        g.lineTo(i - 228, 256);
+        g.lineTo(i - 256, 256);
+        g.closePath();
+        g.fill();
+      }
+      g.strokeStyle = 'rgba(251, 191, 36, 0.25)';
+      g.lineWidth = 3;
+      g.strokeRect(1.5, 1.5, 253, 253);
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(60, 45);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    const boosterTex = makeDevGridTexture('#083344', '#22d3ee', 'rgba(34,211,238,0.25)', 'rgba(103,232,249,0.9)', '', true);
+    const mats = {
+      slate:    new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#1e2634', '#475569', 'rgba(148,163,184,0.12)', '#64748b', '64'), roughness: 0.72, metalness: 0.12 }),
+      rampFace: new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#c2590c', '#fed7aa', 'rgba(255,237,213,0.18)', '#fbbf24', 'SURF'), roughness: 0.42, metalness: 0.14 }),
+      steepFace:new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#b91c1c', '#fecaca', 'rgba(254,202,202,0.18)', '#fb923c', '60°'), roughness: 0.38, metalness: 0.16 }),
+      walkable: new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#0f766e', '#99f6e4', 'rgba(153,246,228,0.18)', '#2dd4bf', '30°'), roughness: 0.55, metalness: 0.1 }),
+      booster:  new THREE.MeshStandardMaterial({ map: boosterTex, emissive: 0x0891b2, emissiveIntensity: 0.65, roughness: 0.25, metalness: 0.2 }),
+      finish:   new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#065f46', '#6ee7b7', 'rgba(110,231,183,0.2)', '#34d399', 'FIN'), emissive: 0x059669, emissiveIntensity: 0.35, roughness: 0.45, metalness: 0.15 }),
+    };
+
+    // Skybox gradient dome shader
+    function buildSkyDome() {
+      const skyGeo = new THREE.SphereGeometry(18000, 32, 20);
+      const skyMat = new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        depthWrite: false,
+        uniforms: {
+          topColor:     { value: new THREE.Color(0x070b14) },
+          midColor:     { value: new THREE.Color(0x162944) },
+          horizonColor: { value: new THREE.Color(0x2d3a4b) },
+          bottomColor:  { value: new THREE.Color(0x080a10) }
+        },
+        vertexShader: `
+          varying vec3 vWorldPos;
+          void main() {
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            gl_Position = projectionMatrix * viewMatrix * wp;
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 topColor;
+          uniform vec3 midColor;
+          uniform vec3 horizonColor;
+          uniform vec3 bottomColor;
+          varying vec3 vWorldPos;
+          void main() {
+            float h = normalize(vWorldPos).y;
+            vec3 col = h >= 0.0
+              ? mix(horizonColor, mix(midColor, topColor, smoothstep(0.08, 0.65, h)), smoothstep(0.0, 0.25, h))
+              : mix(horizonColor, bottomColor, smoothstep(0.0, -0.35, h));
+            gl_FragColor = vec4(col, 1.0);
+          }
+        `
+      });
+      scene.add(new THREE.Mesh(skyGeo, skyMat));
+    }
+    buildSkyDome();
+
+    // Group holding Mapper Debug wireframes (toggled via F2)
+    const debugGroup = new THREE.Group();
+    debugGroup.visible = false;
+    scene.add(debugGroup);
+
+    /** Generate Three.js meshes directly from synchronized physics convex brushes */
+    function buildVisualWorldFromBrushes() {
+      const tileScale = 1 / 128; // 128 GoldSrc units per 256px dev-grid tile
+
+      for (const brush of worldBrushes) {
+        // Group triangles by material bucket (surf face vs slate cap)
+        const buckets = new Map();
+
+        for (const face of brush.renderFaces) {
+          const isSurfSlope = face.nz > 0.05 && face.nz < SURF_NORMAL_Z;
+          let matKey = 'slate';
+          if (brush.style === 'booster') matKey = 'booster';
+          else if (brush.style === 'finish') matKey = 'finish';
+          else if (brush.style === 'walkable' && face.nz > 0.4 && face.nz < 0.98) matKey = 'walkable';
+          else if (brush.style === 'steep' && isSurfSlope) matKey = 'steepFace';
+          else if (brush.style === 'ramp' && isSurfSlope) matKey = 'rampFace';
+
+          if (!buckets.has(matKey)) buckets.set(matKey, { pos: [], norm: [], uv: [] });
+          const b = buckets.get(matKey);
+
+          // Planar world-space UV basis on this face
+          const n3 = new THREE.Vector3(face.nx, face.nz, -face.ny).normalize();
+          const upRef = Math.abs(n3.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+          const uAxis = new THREE.Vector3().crossVectors(upRef, n3).normalize();
+          const vAxis = new THREE.Vector3().crossVectors(n3, uAxis).normalize();
+
+          const vs = face.verts;
+          for (let i = 1; i < vs.length - 1; i++) {
+            const tri = [vs[0], vs[i], vs[i + 1]];
+            for (const v of tri) {
+              const tx = v[0], ty = v[2], tz = -v[1];
+              b.pos.push(tx, ty, tz);
+              b.norm.push(n3.x, n3.y, n3.z);
+              b.uv.push(
+                (tx * uAxis.x + ty * uAxis.y + tz * uAxis.z) * tileScale,
+                (tx * vAxis.x + ty * vAxis.y + tz * vAxis.z) * tileScale
+              );
+            }
+          }
+        }
+
+        for (const [matKey, data] of buckets.entries()) {
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute('position', new THREE.Float32BufferAttribute(data.pos, 3));
+          geo.setAttribute('normal', new THREE.Float32BufferAttribute(data.norm, 3));
+          geo.setAttribute('uv', new THREE.Float32BufferAttribute(data.uv, 2));
+          const mesh = new THREE.Mesh(geo, mats[matKey]);
+          scene.add(mesh);
+
+          // Subtle crisp edge outlines for depth perception at high speeds
+          const edges = new THREE.EdgesGeometry(geo, 24);
+          const edgeColor = matKey === 'rampFace' ? 0xfdba74 : (matKey === 'booster' ? 0x67e8f9 : 0x475569);
+          const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: 0.35 }));
+          scene.add(line);
+
+          // Mapper Debug collision wireframe
+          const dbgWire = new THREE.LineSegments(
+            edges,
+            new THREE.LineBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.9 })
+          );
+          debugGroup.add(dbgWire);
+        }
+      }
+
+      // Hazard-striped fail floor visual below map (Z = -200)
+      const failGeo = new THREE.PlaneGeometry(18000, 13000);
+      failGeo.rotateX(-Math.PI / 2);
+      const failMat = new THREE.MeshBasicMaterial({ map: makeHazardTexture(), transparent: true, opacity: 0.75 });
+      const failMesh = new THREE.Mesh(failGeo, failMat);
+      failMesh.position.set(5200, -200, -1400);
+      scene.add(failMesh);
+
+      // Visual laser curtain for trig_start & glowing energy fields for trig_push
+      for (const trig of worldTriggers) {
+        const sx = trig.maxX - trig.minX;
+        const sy = trig.maxY - trig.minY;
+        const sz = trig.maxZ - trig.minZ;
+        const cx = (trig.minX + trig.maxX) * 0.5;
+        const cy = (trig.minY + trig.maxY) * 0.5;
+        const cz = (trig.minZ + trig.maxZ) * 0.5;
+
+        const boxGeo = new THREE.BoxGeometry(sx, sz, sy);
+        const posThree = gsToThree(cx, cy, cz);
+
+        // Diegetic visual cues for start gate, boosters, and finish zone
+        if (trig.type === 'start') {
+          const gateMat = new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false });
+          const gate = new THREE.Mesh(boxGeo, gateMat);
+          gate.position.copy(posThree);
+          scene.add(gate);
+        } else if (trig.type === 'push') {
+          const boostMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false });
+          const boostField = new THREE.Mesh(boxGeo, boostMat);
+          boostField.position.copy(posThree);
+          scene.add(boostField);
+          const wire = new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), new THREE.LineBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.55 }));
+          wire.position.copy(posThree);
+          scene.add(wire);
+        } else if (trig.type === 'end') {
+          const endMat = new THREE.MeshBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false });
+          const endField = new THREE.Mesh(boxGeo, endMat);
+          endField.position.copy(posThree);
+          scene.add(endField);
+        }
+
+        // Mapper Debug Trigger Volumes (F2)
+        const dbgColors = { start: 0x10b981, end: 0x4ade80, push: 0x22d3ee, teleport: 0xf43f5e };
+        const col = dbgColors[trig.type] || 0xffffff;
+        const dbgMesh = new THREE.Mesh(
+          boxGeo,
+          new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: trig.type === 'teleport' ? 0.12 : 0.28, side: THREE.DoubleSide, depthWrite: false })
+        );
+        dbgMesh.position.copy(posThree);
+        debugGroup.add(dbgMesh);
+
+        const dbgEdges = new THREE.LineSegments(
+          new THREE.EdgesGeometry(boxGeo),
+          new THREE.LineBasicMaterial({ color: col })
+        );
+        dbgEdges.position.copy(posThree);
+        debugGroup.add(dbgEdges);
+      }
+
+      // Distant parallax monolith pillars for spatial speed perception
+      const pillarMat = new THREE.MeshStandardMaterial({ color: 0x131c2e, roughness: 0.9, metalness: 0.1 });
+      const pillarCoords = [
+        [900, 1200], [2300, -1450], [3700, 900], [4900, -1650],
+        [6600, -900], [5600, 1750], [8200, 500], [7400, 3200], [10400, 2900]
+      ];
+      for (const [px, py] of pillarCoords) {
+        const pGeo = new THREE.BoxGeometry(220, 2600, 220);
+        const pMesh = new THREE.Mesh(pGeo, pillarMat);
+        pMesh.position.copy(gsToThree(px, py, 400));
+        scene.add(pMesh);
+      }
+    }
+
+    /** Create crisp diegetic world-space label boards */
+    function buildWorldSigns() {
+      for (const s of worldSigns) {
+        const c = document.createElement('canvas');
+        c.width = 640;
+        c.height = 112;
+        const g = c.getContext('2d');
+        g.fillStyle = 'rgba(9, 13, 21, 0.84)';
+        g.fillRect(6, 6, 628, 100);
+        g.strokeStyle = s.color;
+        g.lineWidth = 5;
+        g.strokeRect(6, 6, 628, 100);
+        g.fillStyle = s.color;
+        g.font = '800 32px JetBrains Mono, monospace';
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillText(s.text, 320, 58);
+
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
+        const geo = new THREE.PlaneGeometry(280 * s.scale, 49 * s.scale);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.copy(gsToThree(s.x, s.y, s.z));
+        // Face toward oncoming player
+        mesh.rotation.y = s.yaw - Math.PI * 0.5;
+        scene.add(mesh);
+      }
+    }
+
+    buildVisualWorldFromBrushes();
+    buildWorldSigns();
+
+    /* ============================================================================
+     * 8. STYLIZED LOW-POLY FIRST-PERSON WEAPON VIEWMODELS (1: Scout, 2: USP, 3: Knife)
+     * ============================================================================
+     */
+    const vmRoot = new THREE.Group();
+    vmScene.add(vmRoot);
+
+    const gunDarkMat   = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.45, metalness: 0.55 });
+    const gunBodyMat   = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.58, metalness: 0.25 });
+    const gunSteelMat  = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.28, metalness: 0.85 });
+    const gunAccentMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.4, metalness: 0.65 });
+    const lensMat      = new THREE.MeshStandardMaterial({ color: 0x0ea5e9, emissive: 0x0284c7, emissiveIntensity: 0.6, roughness: 0.1 });
+    const tritiumMat   = new THREE.MeshBasicMaterial({ color: 0x4ade80 });
+
+    // [1] Steyr Scout Sniper Rifle
+    const vmScout = new THREE.Group();
+    {
+      const stock = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.14, 0.72), gunBodyMat);
+      stock.position.set(0, -0.04, 0.08);
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.95, 10), gunDarkMat);
+      barrel.rotation.x = Math.PI / 2;
+      barrel.position.set(0, 0.02, -0.45);
+      const scopeTube = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.028, 0.42, 12), gunDarkMat);
+      scopeTube.rotation.x = Math.PI / 2;
+      scopeTube.position.set(0, 0.11, -0.14);
+      const scopeLens = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.02, 12), lensMat);
+      scopeLens.rotation.x = Math.PI / 2;
+      scopeLens.position.set(0, 0.11, 0.07);
+      const bolt = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.022, 0.022), gunSteelMat);
+      bolt.position.set(0.06, 0.02, 0.02);
+      vmScout.add(stock, barrel, scopeTube, scopeLens, bolt);
+      vmScout.position.set(0.32, -0.27, -0.58);
+      vmScout.rotation.set(0.03, 0.06, 0);
+    }
+
+    // [2] USP .45 Tactical (Suppressed)
+    const vmUsp = new THREE.Group();
+    {
+      const slide = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.085, 0.34), gunDarkMat);
+      slide.position.set(0, 0.03, -0.05);
+      const frame = new THREE.Mesh(new THREE.BoxGeometry(0.068, 0.06, 0.31), gunBodyMat);
+      frame.position.set(0, -0.03, -0.03);
+      const grip = new THREE.Mesh(new THREE.BoxGeometry(0.064, 0.21, 0.095), gunBodyMat);
+      grip.position.set(0, -0.13, 0.08);
+      grip.rotation.x = 0.24;
+      const suppressor = new THREE.Mesh(new THREE.CylinderGeometry(0.027, 0.027, 0.34, 12), gunDarkMat);
+      suppressor.rotation.x = Math.PI / 2;
+      suppressor.position.set(0, 0.035, -0.38);
+      const sightL = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.012, 0.012), tritiumMat);
+      sightL.position.set(-0.022, 0.08, 0.10);
+      const sightR = sightL.clone(); sightR.position.x = 0.022;
+      vmUsp.add(slide, frame, grip, suppressor, sightL, sightR);
+      vmUsp.position.set(0.28, -0.25, -0.55);
+      vmUsp.rotation.set(0.02, 0.08, 0);
+    }
+
+    // [3] CS 1.6 Combat Knife
+    const vmKnife = new THREE.Group();
+    {
+      const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.024, 0.24, 8), gunDarkMat);
+      handle.position.set(0, -0.12, 0);
+      const guard = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.022, 0.04), gunAccentMat);
+      guard.position.set(0, 0.0, 0);
+      const bladeGeo = new THREE.ConeGeometry(0.042, 0.38, 4);
+      bladeGeo.scale(0.32, 1.0, 1.0);
+      const blade = new THREE.Mesh(bladeGeo, gunSteelMat);
+      blade.position.set(0, 0.19, 0.005);
+      vmKnife.add(handle, guard, blade);
+      vmKnife.position.set(0.30, -0.24, -0.54);
+      vmKnife.rotation.set(-0.72, 0.35, 0.42);
+    }
+
+    const viewmodels = { 1: vmScout, 2: vmUsp, 3: vmKnife };
+    vmRoot.add(vmScout, vmUsp, vmKnife);
+    vmUsp.visible = false;
+    vmKnife.visible = false;
+
+    let vmDeployT = 1.0;
+    let vmSwayX = 0, vmSwayY = 0;
+    let vmBobPhase = 0;
+
+    function getActiveWeaponSpeed() {
+      const slot = memI32[I_WEAPON];
+      if (slot === 1 && memI32[I_LEGACY_SCOUT] === 1) return f32(260.0);
+      return f32(250.0);
+    }
+
+    function selectWeapon(slot) {
+      if (slot < 1 || slot > 3) return;
+      if (memI32[I_WEAPON] === slot) return;
+      memI32[I_WEAPON] = slot;
+      vmDeployT = 0.0;
+      for (const k of [1, 2, 3]) viewmodels[k].visible = (k === slot);
+      document.querySelectorAll('.weapon-slot').forEach(el => {
+        el.classList.toggle('active', Number(el.dataset.slot) === slot);
+      });
+      audio.playWeaponSwitch();
+    }
+
+    /* ============================================================================
+     * 9. RUN TIMER, PERSONAL BESTS (localStorage) & STRAFE SYNC TRACKER
+     * ============================================================================
+     */
+    const STORAGE_KEY = 'cs16_surf_sandbox_01_runs_v1';
+    let topRuns = [];
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      if (Array.isArray(saved)) topRuns = saved.filter(n => typeof n === 'number' && n > 0).slice(0, 3);
+    } catch (_) { topRuns = []; }
+
+    const runTimer = {
+      state: 'READY', // READY | RUNNING | FINISHED
+      startTick: 0,
+      elapsedSec: 0,
+      lastFinishDelta: null
+    };
+
+    let sessionPeakSpeed = 0;
+    let prevHorizSpeed = 0;
+
+    // Rolling Strafe Sync ring buffer (last 140 active air-strafe ticks)
+    const SYNC_WINDOW = 140;
+    const syncRing = new Uint8Array(SYNC_WINDOW);
+    let syncHead = 0;
+    let syncCount = 0;
+    let syncHits = 0;
+    let accumYawDeltaTick = 0; // Mouse yaw delta accumulated per physics tick
+    let smoothYawVisual = 0;
+
+    function formatTime(sec) {
+      const clamped = Math.max(0, sec);
+      const mins = Math.floor(clamped / 60);
+      const secs = Math.floor(clamped % 60);
+      const cs = Math.floor((clamped * 100) % 100);
+      return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+    }
+
+    function updatePbDisplay() {
+      const pbEl = document.getElementById('pb-display');
+      const top3El = document.getElementById('top3-display');
+      if (topRuns.length === 0) {
+        pbEl.textContent = '--:--.--';
+        top3El.textContent = 'TOP 3: --';
+      } else {
+        pbEl.textContent = formatTime(topRuns[0]);
+        top3El.textContent = 'TOP 3: ' + topRuns.map((t, i) => `#${i + 1} ${formatTime(t)}`).join('  •  ');
+      }
+    }
+    updatePbDisplay();
+
+    // Event Toast & Flash Feedback helpers
+    let toastTimer = null;
+    const elToast = document.getElementById('event-toast');
+    const elFlash = document.getElementById('screen-flash');
+
+    function showToast(msg, borderColor = 'rgba(34,211,238,0.5)') {
+      elToast.textContent = msg;
+      elToast.style.borderColor = borderColor;
+      elToast.classList.add('visible');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => elToast.classList.remove('visible'), 2200);
+    }
+
+    function flashScreen(colorRgba) {
+      elFlash.style.background = `radial-gradient(circle, transparent 35%, ${colorRgba} 100%)`;
+      elFlash.style.opacity = '1';
+      requestAnimationFrame(() => {
+        setTimeout(() => { elFlash.style.opacity = '0'; }, 60);
+      });
+    }
+
+    // Wire physics event callbacks
+    callbacks.onLand = (impact) => audio.playLand(impact);
+    callbacks.onJump = () => audio.playJump();
+    callbacks.onBoost = () => {
+      audio.playBoost();
+      flashScreen('rgba(34, 211, 238, 0.35)');
+    };
+    callbacks.onTeleport = (isFail) => {
+      runTimer.state = 'READY';
+      runTimer.elapsedSec = 0;
+      runTimer.lastFinishDelta = null;
+      if (isFail) {
+        audio.playTeleport();
+        flashScreen('rgba(251, 113, 133, 0.42)');
+        showToast('FAIL ZONE — TELEPORTED TO SPAWN', 'rgba(251,113,133,0.6)');
+      }
+    };
+    callbacks.onStartRun = () => {
+      if (runTimer.state !== 'RUNNING') {
+        runTimer.state = 'RUNNING';
+        runTimer.startTick = memI32[I_TICK];
+        runTimer.elapsedSec = 0;
+        runTimer.lastFinishDelta = null;
+        audio.playStartBeep();
+        showToast('RUN STARTED — GO!', 'rgba(52,211,153,0.6)');
+      }
+    };
+    callbacks.onFinishRun = () => {
+      if (runTimer.state !== 'RUNNING') return;
+      runTimer.state = 'FINISHED';
+      const finishSec = (memI32[I_TICK] - runTimer.startTick) * 0.01;
+      runTimer.elapsedSec = finishSec;
+      const oldPb = topRuns.length > 0 ? topRuns[0] : null;
+      runTimer.lastFinishDelta = oldPb !== null ? (finishSec - oldPb) : null;
+
+      topRuns.push(finishSec);
+      topRuns.sort((a, b) => a - b);
+      topRuns = topRuns.slice(0, 3);
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(topRuns)); } catch (_) {}
+      updatePbDisplay();
+
+      audio.playFinishChime();
+      flashScreen('rgba(16, 185, 129, 0.42)');
+      const pbNote = (oldPb === null || finishSec < oldPb) ? ' ★ NEW PERSONAL BEST!' : '';
+      showToast(`FINISHED IN ${formatTime(finishSec)}${pbNote}  (Press R to Restart)`, 'rgba(16,185,129,0.75)');
+    };
+
+    /* ============================================================================
+     * 10. INPUT PIPELINE (144Hz-240Hz+ Raw Mouse Look + Quantized 100Hz Keys)
+     * ============================================================================
+     */
+    const keys = { w: false, a: false, s: false, d: false, jump: false, duck: false };
+    let scrollJumpQueued = false;
+    let isPointerLocked = false;
+    let mouseSensitivity = 1.80;
+
+    // Live camera angles updated at monitor refresh rate (synced to ABI every tick)
+    let viewYaw = SPAWN_POS.yaw;
+    let viewPitch = SPAWN_POS.pitch;
+
+    function releaseAllKeys() {
+      keys.w = keys.a = keys.s = keys.d = keys.jump = keys.duck = false;
+      scrollJumpQueued = false;
+    }
+
+    const menuOverlay = document.getElementById('menu-overlay');
+    const lockHint = document.getElementById('lock-hint');
+
+    function openMenu() {
+      menuOverlay.classList.remove('hidden');
+      releaseAllKeys();
+    }
+
+    function closeMenu() {
+      menuOverlay.classList.add('hidden');
+      lockHint.textContent = '';
+    }
+
+    function requestLock() {
+      audio.unlock();
+      try {
+        const p = canvas.requestPointerLock();
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {
+            lockHint.textContent = 'Browser cooldown active — click again to lock mouse.';
+          });
+        }
+      } catch (_) {
+        lockHint.textContent = 'Click the orange button again to engage Pointer Lock.';
+      }
+    }
+
+    document.addEventListener('pointerlockchange', () => {
+      isPointerLocked = (document.pointerLockElement === canvas);
+      if (isPointerLocked) {
+        closeMenu();
+      } else {
+        openMenu();
+      }
+    });
+
+    document.addEventListener('pointerlockerror', () => {
+      lockHint.textContent = 'Pointer lock paused briefly by browser — click button again.';
+    });
+
+    canvas.addEventListener('click', () => {
+      if (!isPointerLocked && menuOverlay.classList.contains('hidden')) {
+        requestLock();
+      }
+    });
+
+    // Native refresh-rate raw mouse look
+    document.addEventListener('mousemove', (e) => {
+      if (!isPointerLocked) return;
+      // CS 1.6 m_yaw = 0.022 deg per count
+      const radPerCount = (0.022 * Math.PI) / 180;
+      const dYaw = -e.movementX * mouseSensitivity * radPerCount;
+      const dPitch = -e.movementY * mouseSensitivity * radPerCount;
+
+      viewYaw += dYaw;
+      viewPitch = Math.max(-1.535, Math.min(1.535, viewPitch + dPitch)); // ±88° clamp
+
+      accumYawDeltaTick += dYaw;
+      smoothYawVisual = THREE.MathUtils.clamp(smoothYawVisual + dYaw * 14, -1, 1);
+
+      // Subtle first-person weapon inertia sway
+      vmSwayX = THREE.MathUtils.clamp(vmSwayX - e.movementX * 0.00028, -0.055, 0.055);
+      vmSwayY = THREE.MathUtils.clamp(vmSwayY + e.movementY * 0.00022, -0.04, 0.04);
+    });
+
+    // Mouse wheel jump (classic CS 1.6 mwheeldown / mwheelup bhop!)
+    window.addEventListener('wheel', () => {
+      if (!isPointerLocked) return;
+      scrollJumpQueued = true;
+    }, { passive: true });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Tab') {
+        e.preventDefault();
+        if (isPointerLocked) {
+          document.exitPointerLock();
+        } else {
+          requestLock();
+        }
+        return;
+      }
+
+      if (e.code === 'F2') {
+        e.preventDefault();
+        toggleDebugWireframes(!debugGroup.visible);
+        return;
+      }
+
+      if (!isPointerLocked) return;
+
+      switch (e.code) {
+        case 'KeyW': keys.w = true; break;
+        case 'KeyS': keys.s = true; break;
+        case 'KeyA': keys.a = true; break;
+        case 'KeyD': keys.d = true; break;
+        case 'Space': keys.jump = true; e.preventDefault(); break;
+        case 'ControlLeft':
+        case 'ControlRight':
+        case 'KeyC': keys.duck = true; break;
+        case 'Digit1': selectWeapon(1); break;
+        case 'Digit2': selectWeapon(2); break;
+        case 'Digit3': selectWeapon(3); break;
+        case 'KeyR':
+          teleportToSpawn(false);
+          viewYaw = SPAWN_POS.yaw;
+          viewPitch = SPAWN_POS.pitch;
+          showToast('RUN RESET', 'rgba(245,158,11,0.6)');
+          break;
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      switch (e.code) {
+        case 'KeyW': keys.w = false; break;
+        case 'KeyS': keys.s = false; break;
+        case 'KeyA': keys.a = false; break;
+        case 'KeyD': keys.d = false; break;
+        case 'Space': keys.jump = false; break;
+        case 'ControlLeft':
+        case 'ControlRight':
+        case 'KeyC': keys.duck = false; break;
+      }
+    });
+
+    window.addEventListener('blur', releaseAllKeys);
+
+    /* ============================================================================
+     * 11. MENU CONTROLS & LIVE CVAR BINDINGS
+     * ============================================================================
+     */
+    const slAirAccel = document.getElementById('sl-airaccel');
+    const slMaxVel   = document.getElementById('sl-maxvel');
+    const slGravity  = document.getElementById('sl-gravity');
+    const slSens     = document.getElementById('sl-sens');
+    const slFov      = document.getElementById('sl-fov');
+
+    const valAirAccel = document.getElementById('val-airaccel');
+    const valMaxVel   = document.getElementById('val-maxvel');
+    const valGravity  = document.getElementById('val-gravity');
+    const valSens     = document.getElementById('val-sens');
+    const valFov      = document.getElementById('val-fov');
+
+    const btnDefault  = document.getElementById('preset-default');
+    const btnHardcore = document.getElementById('preset-hardcore');
+    const presetInd   = document.getElementById('preset-indicator');
+    const ngCvars     = document.getElementById('ng-cvars');
+
+    function syncCvarUI() {
+      const aa = Math.round(memF32[C_AIRACCEL]);
+      const mv = Math.round(memF32[C_MAXVEL]);
+      const gv = Math.round(memF32[C_GRAVITY]);
+      slAirAccel.value = aa; valAirAccel.textContent = aa;
+      slMaxVel.value = mv;   valMaxVel.textContent = mv;
+      slGravity.value = gv;  valGravity.textContent = gv;
+      ngCvars.textContent = `aa:${aa} mv:${mv}`;
+
+      const isDef = (aa === 100 && mv === 3500 && gv === 800);
+      const isHc  = (aa === 150 && mv === 4500 && gv === 800);
+      btnDefault.classList.toggle('active', isDef);
+      btnHardcore.classList.toggle('active', isHc);
+      presetInd.textContent = isDef ? 'DEFAULT' : (isHc ? 'HARDCORE' : 'CUSTOM');
+    }
+
+    function applyPreset(name) {
+      if (name === 'hardcore') {
+        memF32[C_AIRACCEL] = f32(150.0);
+        memF32[C_MAXVEL]   = f32(4500.0);
+        memF32[C_GRAVITY]  = f32(800.0);
+      } else {
+        memF32[C_AIRACCEL] = f32(100.0);
+        memF32[C_MAXVEL]   = f32(3500.0);
+        memF32[C_GRAVITY]  = f32(800.0);
+      }
+      syncCvarUI();
+    }
+
+    btnDefault.addEventListener('click', () => applyPreset('default'));
+    btnHardcore.addEventListener('click', () => applyPreset('hardcore'));
+
+    slAirAccel.addEventListener('input', () => { memF32[C_AIRACCEL] = f32(Number(slAirAccel.value)); syncCvarUI(); });
+    slMaxVel.addEventListener('input', () => { memF32[C_MAXVEL] = f32(Number(slMaxVel.value)); syncCvarUI(); });
+    slGravity.addEventListener('input', () => { memF32[C_GRAVITY] = f32(Number(slGravity.value)); syncCvarUI(); });
+    slSens.addEventListener('input', () => {
+      mouseSensitivity = Number(slSens.value);
+      valSens.textContent = mouseSensitivity.toFixed(2);
+    });
+    slFov.addEventListener('input', () => {
+      baseFov = Number(slFov.value);
+      valFov.textContent = `${baseFov}°`;
+    });
+
+    document.getElementById('tg-autobhop').addEventListener('change', (e) => {
+      memI32[I_AUTOBHOP] = e.target.checked ? 1 : 0;
+    });
+    document.getElementById('tg-scout260').addEventListener('change', (e) => {
+      memI32[I_LEGACY_SCOUT] = e.target.checked ? 1 : 0;
+      document.getElementById('spd-slot-1').textContent = e.target.checked ? '260 u/s ★' : '250 u/s';
+    });
+    document.getElementById('tg-strafe').addEventListener('change', (e) => {
+      document.getElementById('strafe-overlay').classList.toggle('hidden', !e.target.checked);
+    });
+
+    const tgDebug = document.getElementById('tg-debug');
+    const debugPill = document.getElementById('debug-pill');
+    function toggleDebugWireframes(enabled) {
+      debugGroup.visible = enabled;
+      tgDebug.checked = enabled;
+      debugPill.classList.toggle('active', enabled);
+      showToast(enabled ? 'MAPPER DEBUG WIREFRAMES: ON' : 'MAPPER DEBUG WIREFRAMES: OFF', 'rgba(245,158,11,0.65)');
+    }
+    tgDebug.addEventListener('change', (e) => toggleDebugWireframes(e.target.checked));
+
+    document.getElementById('tg-mute').addEventListener('change', (e) => {
+      audio.setMuted(e.target.checked);
+    });
+
+    document.getElementById('btn-play').addEventListener('click', () => requestLock());
+    document.getElementById('btn-restart-menu').addEventListener('click', () => {
+      teleportToSpawn(false);
+      viewYaw = SPAWN_POS.yaw;
+      viewPitch = SPAWN_POS.pitch;
+      requestLock();
+    });
+
+    /* ============================================================================
+     * 12. HUD UPDATE & MAIN ACCUMULATOR LOOP (100Hz Physics + Native-Hz Render)
+     * ============================================================================
+     */
+    const elSpeedXY   = document.getElementById('speed-xy');
+    const elSpeed3D   = document.getElementById('speed-3d');
+    const elSpeedPeak = document.getElementById('speed-peak');
+    const elSpeedZ    = document.getElementById('speed-z');
+    const elSpeedGain = document.getElementById('speed-gain');
+    const elRunTime   = document.getElementById('run-time');
+    const elRunDelta  = document.getElementById('run-delta');
+    const elTimerState= document.getElementById('timer-state');
+    const elSyncPct   = document.getElementById('sync-pct');
+    const elSyncBar   = document.getElementById('sync-bar');
+    const elYawPip    = document.getElementById('yaw-pip');
+    const elNgFps     = document.getElementById('ng-fps');
+    const elNgSim     = document.getElementById('ng-sim');
+    const elNgState   = document.getElementById('ng-state');
+    const elNgHull    = document.getElementById('ng-hull');
+    const elNgSync    = document.getElementById('ng-sync');
+
+    const elKeys = {
+      w: document.getElementById('key-w'),
+      a: document.getElementById('key-a'),
+      s: document.getElementById('key-s'),
+      d: document.getElementById('key-d'),
+      jump: document.getElementById('key-jump'),
+      duck: document.getElementById('key-duck'),
+    };
+
+    function updateSpeedColor(speed) {
+      if (speed >= 3000) {
+        elSpeedXY.style.color = '#e879f9';
+        elSpeedXY.style.textShadow = '0 0 18px rgba(232, 121, 249, 0.72)';
+      } else if (speed >= 2000) {
+        elSpeedXY.style.color = '#fbbf24';
+        elSpeedXY.style.textShadow = '0 0 14px rgba(251, 191, 36, 0.55)';
+      } else if (speed >= 1000) {
+        elSpeedXY.style.color = '#22d3ee';
+        elSpeedXY.style.textShadow = '0 0 12px rgba(34, 211, 238, 0.45)';
+      } else {
+        elSpeedXY.style.color = '#f8fafc';
+        elSpeedXY.style.textShadow = '0 2px 10px rgba(0, 0, 0, 0.5)';
+      }
+    }
+
+    // Initialize player at spawn
+    teleportToSpawn(false);
+    syncCvarUI();
+
+    let lastFrameTime = performance.now();
+    let accumulator = 0;
+    let simMsAvg = 0.08;
+    let fpsCounter = 0;
+    let fpsTimer = lastFrameTime;
+    let currentFps = 0;
+    let currentFov = baseFov;
+    let idleClock = 0;
+    const _camPos = new THREE.Vector3();
+    const _camLook = new THREE.Vector3();
+
+    function stepPhysicsFromInputs() {
+      const maxSpd = getActiveWeaponSpeed();
+      let fmove = 0, smove = 0;
+      if (keys.w) fmove += maxSpd;
+      if (keys.s) fmove -= maxSpd;
+      if (keys.d) smove += maxSpd;
+      if (keys.a) smove -= maxSpd;
+
+      let buttons = 0;
+      if (keys.jump || scrollJumpQueued) buttons |= IN_JUMP;
+      if (keys.duck) buttons |= IN_DUCK;
+      scrollJumpQueued = false;
+
+      // Write UserCmd directly into linear memory ABI
+      memF32[U_FMOVE] = f32(fmove);
+      memF32[U_SMOVE] = f32(smove);
+      memF32[U_YAW] = f32(viewYaw);
+      memF32[U_PITCH] = f32(viewPitch);
+      memF32[U_MAXSPEED] = maxSpd;
+      memI32[I_BUTTONS] = buttons;
+
+      const preXY = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y]);
+      const t0 = performance.now();
+      simulateTick();
+      const dtSim = performance.now() - t0;
+      simMsAvg = simMsAvg * 0.92 + dtSim * 0.08;
+
+      const postXY = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y]);
+
+      // Track Strafe Sync efficiency while airborne/surfing with A or D held
+      const airborne = (memI32[I_FLAGS] & FL_ONGROUND) === 0;
+      const holdingLeft = keys.a && !keys.d;
+      const holdingRight = keys.d && !keys.a;
+      if (airborne && (holdingLeft || holdingRight)) {
+        const yawMatches = (holdingLeft && accumYawDeltaTick > 0.00015) ||
+                           (holdingRight && accumYawDeltaTick < -0.00015);
+        const hit = (yawMatches || postXY > preXY + 0.05) ? 1 : 0;
+
+        if (syncCount < SYNC_WINDOW) {
+          syncCount++;
+        } else {
+          syncHits -= syncRing[syncHead];
+        }
+        syncRing[syncHead] = hit;
+        syncHits += hit;
+        syncHead = (syncHead + 1) % SYNC_WINDOW;
+      }
+      accumYawDeltaTick = 0;
+
+      // Update live run timer
+      if (runTimer.state === 'RUNNING') {
+        runTimer.elapsedSec = (memI32[I_TICK] - runTimer.startTick) * 0.01;
+      }
+    }
+
+    function updateHUD(now) {
+      // FPS measurement
+      fpsCounter++;
+      if (now - fpsTimer >= 400) {
+        currentFps = Math.round((fpsCounter * 1000) / (now - fpsTimer));
+        fpsCounter = 0;
+        fpsTimer = now;
+        elNgFps.textContent = currentFps;
+      }
+
+      const vx = memF32[S_VEL_X], vy = memF32[S_VEL_Y], vz = memF32[S_VEL_Z];
+      const spdXY = Math.hypot(vx, vy);
+      const spd3D = Math.hypot(vx, vy, vz);
+      if (spdXY > sessionPeakSpeed) sessionPeakSpeed = spdXY;
+
+      elSpeedXY.textContent = Math.round(spdXY);
+      elSpeed3D.textContent = Math.round(spd3D);
+      elSpeedPeak.textContent = Math.round(sessionPeakSpeed);
+      elSpeedZ.textContent = Math.round(vz);
+      updateSpeedColor(spdXY);
+
+      const dSpd = spdXY - prevHorizSpeed;
+      prevHorizSpeed = spdXY;
+      if (dSpd > 2.5) {
+        elSpeedGain.textContent = '▲';
+        elSpeedGain.style.color = '#34d399';
+      } else if (dSpd < -2.5) {
+        elSpeedGain.textContent = '▼';
+        elSpeedGain.style.color = '#fb7185';
+      } else {
+        elSpeedGain.textContent = '';
+      }
+
+      // Keycaps
+      elKeys.w.classList.toggle('active', keys.w);
+      elKeys.a.classList.toggle('active', keys.a);
+      elKeys.s.classList.toggle('active', keys.s);
+      elKeys.d.classList.toggle('active', keys.d);
+      elKeys.jump.classList.toggle('active', keys.jump);
+      elKeys.duck.classList.toggle('active', keys.duck);
+
+      // Strafe Sync %
+      const pct = syncCount > 0 ? Math.round((syncHits / syncCount) * 100) : 0;
+      elSyncPct.textContent = `${pct}%`;
+      elSyncBar.style.width = `${pct}%`;
+      elNgSync.textContent = `${pct}%`;
+      elYawPip.style.left = `${50 - smoothYawVisual * 45}%`;
+
+      // Run Timer & PB Delta
+      elRunTime.textContent = formatTime(runTimer.elapsedSec);
+      elTimerState.textContent = runTimer.state;
+      elTimerState.className = 'timer-badge' +
+        (runTimer.state === 'RUNNING' ? ' running' : (runTimer.state === 'FINISHED' ? ' finished' : ''));
+
+      if (runTimer.state === 'FINISHED' && runTimer.lastFinishDelta !== null) {
+        const d = runTimer.lastFinishDelta;
+        elRunDelta.textContent = `${d <= 0 ? '' : '+'}${d.toFixed(2)}s`;
+        elRunDelta.className = d <= 0 ? 'delta-ahead' : 'delta-behind';
+      } else if (runTimer.state === 'RUNNING' && topRuns.length > 0) {
+        const diff = runTimer.elapsedSec - topRuns[0];
+        elRunDelta.textContent = `${diff <= 0 ? '' : '+'}${diff.toFixed(2)}s`;
+        elRunDelta.className = diff <= 0 ? 'delta-ahead' : 'delta-behind';
+      } else {
+        elRunDelta.textContent = '--.--';
+        elRunDelta.className = 'delta-neutral';
+      }
+
+      // net_graph state & hull
+      elNgSim.textContent = simMsAvg.toFixed(2);
+      const st = memI32[I_MOVESTATE];
+      if (st === STATE_SURF) {
+        elNgState.textContent = 'SURF';
+        elNgState.className = 'ng-surf';
+      } else if (st === STATE_AIR) {
+        elNgState.textContent = 'AIR';
+        elNgState.className = 'ng-air';
+      } else {
+        elNgState.textContent = 'GROUND';
+        elNgState.className = 'ng-gnd';
+      }
+      elNgHull.textContent = (memI32[I_FLAGS] & FL_DUCKING) ? '36u (DUCK)' : '72u (STAND)';
+    }
+
+    function updateViewmodel(dtSec, spdXY) {
+      // Smooth deploy animation
+      vmDeployT = Math.min(1.0, vmDeployT + dtSec * 4.5);
+      const deployDrop = (1 - vmDeployT) * (1 - vmDeployT) * 0.24;
+
+      // Damped mouse sway
+      vmSwayX *= Math.pow(0.001, dtSec);
+      vmSwayY *= Math.pow(0.001, dtSec);
+
+      // Speed-reactive walk bob (ground) or subtle air-strafe roll (air/surf)
+      const grounded = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+      let bobX = 0, bobY = 0;
+      if (grounded && spdXY > 15) {
+        vmBobPhase += dtSec * Math.min(13, 6 + spdXY * 0.025);
+        const amp = Math.min(1, spdXY / 250) * 0.015;
+        bobX = Math.cos(vmBobPhase) * amp;
+        bobY = Math.abs(Math.sin(vmBobPhase)) * amp * 0.85;
+      }
+
+      const strafeTilt = ((keys.a ? 1 : 0) - (keys.d ? 1 : 0)) * (grounded ? 0.02 : 0.055);
+      vmRoot.position.set(vmSwayX + bobX, vmSwayY - bobY - deployDrop, 0);
+      vmRoot.rotation.z = THREE.MathUtils.lerp(vmRoot.rotation.z, strafeTilt, Math.min(1, dtSec * 10));
+    }
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+
+      const frameDt = Math.min(0.05, (now - lastFrameTime) * 0.001);
+      lastFrameTime = now;
+      idleClock += frameDt;
+
+      // Animate scrolling cyan booster chevrons
+      boosterTex.offset.y -= frameDt * 1.45;
+      smoothYawVisual *= Math.pow(0.0005, frameDt);
+
+      // Run fixed 100 Hz deterministic physics loop when actively playing
+      if (isPointerLocked) {
+        accumulator += frameDt;
+        let substeps = 0;
+        while (accumulator >= FIXED_DT && substeps < 6) {
+          stepPhysicsFromInputs();
+          accumulator -= FIXED_DT;
+          substeps++;
+        }
+        if (substeps === 6) accumulator = 0; // Spiral-of-death guard
+      } else {
+        accumulator = 0;
+      }
+
+      // Render-rate interpolation factor (silky smooth on 144Hz-240Hz+ monitors)
+      const alpha = isPointerLocked ? (accumulator / FIXED_DT) : 1.0;
+      const rx = memF32[S_PREV_X] + (memF32[S_POS_X] - memF32[S_PREV_X]) * alpha;
+      const ry = memF32[S_PREV_Y] + (memF32[S_POS_Y] - memF32[S_PREV_Y]) * alpha;
+      const rz = memF32[S_PREV_Z] + (memF32[S_POS_Z] - memF32[S_PREV_Z]) * alpha;
+      const rEye = memF32[S_PREV_VIEW_OFS_Z] + (memF32[S_VIEW_OFS_Z] - memF32[S_PREV_VIEW_OFS_Z]) * alpha;
+
+      // Subtle living camera sway behind glass menu before pointer lock
+      const renderYaw = isPointerLocked ? viewYaw : (viewYaw + Math.sin(idleClock * 0.45) * 0.08);
+      const renderPitch = isPointerLocked ? viewPitch : (viewPitch + Math.cos(idleClock * 0.35) * 0.025);
+
+      const cosP = Math.cos(renderPitch);
+      const fwdX = cosP * Math.cos(renderYaw);
+      const fwdY = cosP * Math.sin(renderYaw);
+      const fwdZ = Math.sin(renderPitch);
+
+      gsToThree(rx, ry, rz + rEye, _camPos);
+      gsToThree(rx + fwdX * 100, ry + fwdY * 100, rz + rEye + fwdZ * 100, _camLook);
+      camera.position.copy(_camPos);
+      camera.lookAt(_camLook);
+
+      // Velocity-reactive Dynamic FOV (base -> +22° at 3000+ u/s)
+      const spdXY = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y]);
+      const spd3D = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y], memF32[S_VEL_Z]);
+      const fovBoost = THREE.MathUtils.clamp((spdXY - 450) / 2550, 0, 1) * 22.0;
+      const targetFov = baseFov + fovBoost;
+      if (Math.abs(currentFov - targetFov) > 0.02) {
+        currentFov = THREE.MathUtils.lerp(currentFov, targetFov, Math.min(1, frameDt * 7.5));
+        camera.fov = currentFov;
+        camera.updateProjectionMatrix();
+      }
+
+      updateViewmodel(frameDt, spdXY);
+      audio.updateContinuous(spd3D, memI32[I_MOVESTATE] === STATE_SURF, !isPointerLocked);
+      updateHUD(now);
+
+      // Two-pass render: World + Depth-Cleared Viewmodel Overlay
+      renderer.clear();
+      renderer.render(scene, camera);
+      renderer.clearDepth();
+      renderer.render(vmScene, vmCamera);
+    }
+
+    // Handle responsive viewport resizing
+    window.addEventListener('resize', () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      vmCamera.aspect = w / h;
+      vmCamera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+    });
+
+    // Start loop cleanly after window load
+    window.addEventListener('load', () => {
+      lastFrameTime = performance.now();
+      requestAnimationFrame(animate);
+    });
+  </script>
+</body>
+</html>

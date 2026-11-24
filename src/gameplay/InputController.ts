@@ -1,3 +1,4 @@
+// src/gameplay/InputController.ts
 import * as THREE from 'three';
 import { SpawnPoint } from '../physics/GoldSrcPhysicsEngine';
 
@@ -8,13 +9,23 @@ export interface KeyState {
   d: boolean;
   jump: boolean;
   duck: boolean;
+  attack1: boolean;
+  attack2: boolean;
+  use: boolean;
+  reload: boolean;
 }
 
 export interface InputCallbacks {
   onUnlockRequest?: () => void;
   onSelectWeapon?: (slot: number) => void;
+  onQuickSwitch?: () => void;
+  onDropWeapon?: () => void;
+  onPickupWeapon?: () => void;
+  onReloadOrReset?: () => void;
   onResetRun?: () => void;
   onToggleDebug?: () => void;
+  onAttack1Press?: () => void;
+  onAttack2Press?: () => void;
 }
 
 export class InputController {
@@ -30,10 +41,15 @@ export class InputController {
     d: false,
     jump: false,
     duck: false,
+    attack1: false,
+    attack2: false,
+    use: false,
+    reload: false,
   };
 
   public isPointerLocked = false;
   public sensitivity = 1.8;
+  public sensitivityScale = 1.0;
   public viewYaw: number;
   public viewPitch: number;
   public smoothYawVisual = 0;
@@ -54,6 +70,9 @@ export class InputController {
     document.addEventListener('pointerlockchange', this.handlePointerLockChange);
     document.addEventListener('pointerlockerror', this.handlePointerLockError);
     this.canvas.addEventListener('click', this.handleCanvasClick);
+    this.canvas.addEventListener('contextmenu', this.handleContextMenu);
+    window.addEventListener('mousedown', this.handleMouseDown);
+    window.addEventListener('mouseup', this.handleMouseUp);
     document.addEventListener('mousemove', this.handleMouseMove);
     window.addEventListener('wheel', this.handleWheel, { passive: true });
     window.addEventListener('keydown', this.handleKeyDown);
@@ -64,6 +83,12 @@ export class InputController {
   public resetView(yaw: number, pitch: number): void {
     this.viewYaw = yaw;
     this.viewPitch = pitch;
+  }
+
+  /** Apply recoil view punch in radians (+pitch kicks upward) */
+  public applyRecoilKick(pitchRad: number, yawRad: number): void {
+    this.viewPitch = Math.max(-1.535, Math.min(1.535, this.viewPitch + pitchRad));
+    this.viewYaw += yawRad;
   }
 
   public consumeScrollJump(): boolean {
@@ -119,6 +144,10 @@ export class InputController {
     this.keys.d = false;
     this.keys.jump = false;
     this.keys.duck = false;
+    this.keys.attack1 = false;
+    this.keys.attack2 = false;
+    this.keys.use = false;
+    this.keys.reload = false;
     this.scrollJumpQueued = false;
   };
 
@@ -143,13 +172,39 @@ export class InputController {
     }
   };
 
+  private handleContextMenu = (e: MouseEvent): void => {
+    if (this.isPointerLocked) {
+      e.preventDefault();
+    }
+  };
+
+  private handleMouseDown = (e: MouseEvent): void => {
+    if (!this.isPointerLocked) return;
+    if (e.button === 0) {
+      this.keys.attack1 = true;
+      this.callbacks.onAttack1Press?.();
+    } else if (e.button === 2) {
+      this.keys.attack2 = true;
+      this.callbacks.onAttack2Press?.();
+    }
+  };
+
+  private handleMouseUp = (e: MouseEvent): void => {
+    if (e.button === 0) {
+      this.keys.attack1 = false;
+    } else if (e.button === 2) {
+      this.keys.attack2 = false;
+    }
+  };
+
   private handleMouseMove = (e: MouseEvent): void => {
     if (!this.isPointerLocked) return;
 
-    // CS 1.6 m_yaw = 0.022 deg per count
+    // CS 1.6 m_yaw = 0.022 deg per count (scaled when scoped)
     const radPerCount = (0.022 * Math.PI) / 180;
-    const dYaw = -e.movementX * this.sensitivity * radPerCount;
-    const dPitch = -e.movementY * this.sensitivity * radPerCount;
+    const effSens = this.sensitivity * this.sensitivityScale;
+    const dYaw = -e.movementX * effSens * radPerCount;
+    const dPitch = -e.movementY * effSens * radPerCount;
 
     this.viewYaw += dYaw;
     this.viewPitch = Math.max(-1.535, Math.min(1.535, this.viewPitch + dPitch));
@@ -204,20 +259,39 @@ export class InputController {
         break;
       case 'ControlLeft':
       case 'ControlRight':
-      case 'KeyC':
         this.keys.duck = true;
         break;
       case 'Digit1':
-        this.callbacks.onSelectWeapon?.(1);
+        if (!e.repeat) this.callbacks.onSelectWeapon?.(1);
         break;
       case 'Digit2':
-        this.callbacks.onSelectWeapon?.(2);
+        if (!e.repeat) this.callbacks.onSelectWeapon?.(2);
         break;
       case 'Digit3':
-        this.callbacks.onSelectWeapon?.(3);
+        if (!e.repeat) this.callbacks.onSelectWeapon?.(3);
+        break;
+      case 'KeyQ':
+        if (!e.repeat) this.callbacks.onQuickSwitch?.();
+        break;
+      case 'KeyG':
+        if (!e.repeat) this.callbacks.onDropWeapon?.();
+        break;
+      case 'KeyE':
+        this.keys.use = true;
+        if (!e.repeat) this.callbacks.onPickupWeapon?.();
         break;
       case 'KeyR':
-        this.callbacks.onResetRun?.();
+        this.keys.reload = true;
+        if (!e.repeat) {
+          if (e.shiftKey) {
+            this.callbacks.onResetRun?.();
+          } else {
+            this.callbacks.onReloadOrReset?.();
+          }
+        }
+        break;
+      case 'Backspace':
+        if (!e.repeat) this.callbacks.onResetRun?.();
         break;
     }
   };
@@ -241,8 +315,13 @@ export class InputController {
         break;
       case 'ControlLeft':
       case 'ControlRight':
-      case 'KeyC':
         this.keys.duck = false;
+        break;
+      case 'KeyE':
+        this.keys.use = false;
+        break;
+      case 'KeyR':
+        this.keys.reload = false;
         break;
     }
   };

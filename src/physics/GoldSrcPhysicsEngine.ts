@@ -1,3 +1,4 @@
+// src/physics/GoldSrcPhysicsEngine.ts
 import {
   AIR_WISH_CAP,
   DIST_EPSILON,
@@ -17,6 +18,14 @@ import {
 } from '../core/constants';
 import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
 import { ConvexBrush, TriggerVolume } from './BrushBuilder';
+
+export const IN_ATTACK = 1 << 10;
+export const IN_ATTACK2 = 1 << 11;
+export const IN_RELOAD = 1 << 12;
+export const IN_USE = 1 << 13;
+
+export type WeaponSlot = 1 | 2 | 3;
+export type RigidBodyKind = 'prop' | 'weapon' | 'target';
 
 export interface SpawnPoint {
   x: number;
@@ -47,6 +56,8 @@ export interface SourcePhysicsConfig {
   linearDamping?: number;
   angularDamping?: number;
   physPushScale?: number;
+  fallDamageThreshold?: number;
+  fallDamageScale?: number;
 }
 
 export interface Vec3 {
@@ -69,8 +80,18 @@ export type Mat3 = [
   number, number, number,
 ];
 
+export interface DroppedWeaponData {
+  slot: 1 | 2;
+  clipAmmo: number;
+  reserveAmmo: number;
+  silenced?: boolean;
+  /** World tick before which auto-pickup ignores the player who dropped it */
+  pickupCooldownTick: number;
+}
+
 export interface SourceRigidBody {
   id: string;
+  kind?: RigidBodyKind;
   pos: Vec3;
   vel: Vec3;
   quat: Quat;
@@ -84,6 +105,32 @@ export interface SourceRigidBody {
   restitution: number;
   gravityScale: number;
   surfaceFriction?: number;
+  /** Combat & damage state */
+  hp?: number;
+  maxHp?: number;
+  bleeds?: boolean;
+  bloodLostMl?: number;
+  weaponData?: DroppedWeaponData;
+}
+
+export interface PlayerVitalState {
+  hp: number;
+  maxHp: number;
+  bloodMl: number;
+  maxBloodMl: number;
+  bloodLossCount: number;
+  dead: boolean;
+}
+
+export interface RayHitResult {
+  hit: boolean;
+  kind: 'none' | 'world' | 'rigidBody';
+  fraction: number;
+  distance: number;
+  point: Vec3;
+  normal: Vec3;
+  brushId?: string;
+  body?: SourceRigidBody;
 }
 
 export interface PhysicsCallbacks {
@@ -93,9 +140,12 @@ export interface PhysicsCallbacks {
   onFinishRun?: () => void;
   onBoost?: (triggerId: string) => void;
   onTeleport?: (isFail: boolean) => void;
-  onRigidBodyHit?: (bodyId: string, impulseMag: number) => void;
+  onRigidBodyHit?: (bodyId: string, impulseMag: number, pos: Vec3, kind: RigidBodyKind) => void;
+  onRigidBodyDestroyed?: (body: SourceRigidBody, hitPoint: Vec3) => void;
   onExplosion?: (triggerId: string, origin: Vec3, radius: number) => void;
   onCheckpoint?: (cp: CheckpointState) => void;
+  onPlayerDamage?: (amount: number, source: 'fall' | 'explosion' | 'hazard', bloodLostMl: number) => void;
+  onPlayerDeath?: (source: 'fall' | 'explosion' | 'hazard') => void;
 }
 
 interface TraceResult {
@@ -111,6 +161,42 @@ interface TraceResult {
   brushId: string;
 }
 
+/**
+ * Source AngleVectors:
+ * Given Euler view angles — pitch theta (positive looks downward), yaw psi, roll phi —
+ * computes orthonormal forward, right, and up basis vectors in Z-up Hammer space.
+ */
+export function computeAngleVectors(
+  sourcePitch: number,
+  yaw: number,
+  roll = 0,
+): { forward: Vec3; right: Vec3; up: Vec3 } {
+  const sp = Math.sin(sourcePitch);
+  const cp = Math.cos(sourcePitch);
+  const sy = Math.sin(yaw);
+  const cy = Math.cos(yaw);
+  const sr = Math.sin(roll);
+  const cr = Math.cos(roll);
+
+  return {
+    forward: {
+      x: f32(cp * cy),
+      y: f32(cp * sy),
+      z: f32(-sp),
+    },
+    right: {
+      x: f32(-sr * sp * cy + cr * sy),
+      y: f32(-sr * sp * sy - cr * cy),
+      z: f32(-sr * cp),
+    },
+    up: {
+      x: f32(cr * sp * cy + sr * sy),
+      y: f32(cr * sp * sy - sr * cy),
+      z: f32(cr * cp),
+    },
+  };
+}
+
 /** Create a box rigid body with exact cuboid principal inertia tensor I = (m/12) * (w^2 + h^2) */
 export function createBoxRigidBody(
   id: string,
@@ -118,10 +204,17 @@ export function createBoxRigidBody(
   halfExtents: Vec3,
   mass: number,
   opts: {
+    kind?: RigidBodyKind;
     vel?: Vec3;
+    angVel?: Vec3;
+    quat?: Quat;
     restitution?: number;
     gravityScale?: number;
     surfaceFriction?: number;
+    hp?: number;
+    maxHp?: number;
+    bleeds?: boolean;
+    weaponData?: DroppedWeaponData;
   } = {},
 ): SourceRigidBody {
   const sx = halfExtents.x * 2;
@@ -131,14 +224,21 @@ export function createBoxRigidBody(
 
   return {
     id,
+    kind: opts.kind ?? 'prop',
     pos: { x: f32(pos.x), y: f32(pos.y), z: f32(pos.z) },
     vel: {
       x: f32(opts.vel?.x ?? 0),
       y: f32(opts.vel?.y ?? 0),
       z: f32(opts.vel?.z ?? 0),
     },
-    quat: { w: f32(1), x: f32(0), y: f32(0), z: f32(0) },
-    angVel: { x: f32(0), y: f32(0), z: f32(0) },
+    quat: opts.quat
+      ? normalizeQuat(opts.quat)
+      : { w: f32(1), x: f32(0), y: f32(0), z: f32(0) },
+    angVel: {
+      x: f32(opts.angVel?.x ?? 0),
+      y: f32(opts.angVel?.y ?? 0),
+      z: f32(opts.angVel?.z ?? 0),
+    },
     inertiaLocal: {
       x: f32(inv12 * (sy * sy + sz * sz)),
       y: f32(inv12 * (sx * sx + sz * sz)),
@@ -151,7 +251,59 @@ export function createBoxRigidBody(
     restitution: f32(opts.restitution ?? 0.35),
     gravityScale: f32(opts.gravityScale ?? 1.0),
     surfaceFriction: opts.surfaceFriction,
+    hp: opts.hp,
+    maxHp: opts.maxHp ?? opts.hp,
+    bleeds: opts.bleeds ?? false,
+    bloodLostMl: 0,
+    weaponData: opts.weaponData,
   };
+}
+
+/** Create a droppable VPhysics weapon rigid body (Scout or USP .45) */
+export function createWeaponRigidBody(
+  id: string,
+  pos: Vec3,
+  weaponData: DroppedWeaponData,
+  vel: Vec3 = { x: 0, y: 0, z: 0 },
+  angVel: Vec3 = { x: 0, y: 0, z: 0 },
+): SourceRigidBody {
+  const isScout = weaponData.slot === 1;
+  return createBoxRigidBody(
+    id,
+    pos,
+    isScout ? { x: 22, y: 5, z: 6 } : { x: 11, y: 3.5, z: 5.5 },
+    isScout ? 5.2 : 2.1,
+    {
+      kind: 'weapon',
+      vel,
+      angVel,
+      restitution: 0.28,
+      surfaceFriction: 1.45,
+      weaponData,
+    },
+  );
+}
+
+/** Create a bleeding combat dummy rigid body (reacts to bullet/knife impulses + loses HP & blood) */
+export function createTargetRigidBody(
+  id: string,
+  pos: Vec3,
+  hp = 100,
+): SourceRigidBody {
+  return createBoxRigidBody(
+    id,
+    pos,
+    { x: 15, y: 15, z: 34 },
+    68,
+    {
+      kind: 'target',
+      hp,
+      maxHp: hp,
+      bleeds: true,
+      restitution: 0.22,
+      surfaceFriction: 1.35,
+    },
+  );
 }
 
 function normalizeQuat(q: Quat): Quat {
@@ -193,6 +345,14 @@ function mulMat3Vec3(m: Mat3, v: Vec3): Vec3 {
   };
 }
 
+function mulMat3TransposeVec3(m: Mat3, v: Vec3): Vec3 {
+  return {
+    x: f32(m[0] * v.x + m[3] * v.y + m[6] * v.z),
+    y: f32(m[1] * v.x + m[4] * v.y + m[7] * v.z),
+    z: f32(m[2] * v.x + m[5] * v.y + m[8] * v.z),
+  };
+}
+
 function crossVec3(a: Vec3, b: Vec3): Vec3 {
   return {
     x: f32(a.y * b.z - a.z * b.y),
@@ -205,7 +365,7 @@ function dotVec3(a: Vec3, b: Vec3): number {
   return f32(a.x * b.x + a.y * b.y + a.z * b.z);
 }
 
-/** Compute world inertia tensor I = R * I_local * R^T and its inverse I^-1 */
+/** World-space inertia tensor I = R * I_local * R^T and its inverse I^-1 */
 function computeWorldInertia(rot: Mat3, inertiaLocal: Vec3): { inertia: Mat3; invInertia: Mat3 } {
   const s0x = rot[0] * inertiaLocal.x;
   const s0y = rot[3] * inertiaLocal.x;
@@ -273,10 +433,20 @@ export class GoldSrcPhysicsEngine {
   private readonly planesY = new Float32Array(MAX_CLIP_PLANES);
   private readonly planesZ = new Float32Array(MAX_CLIP_PLANES);
 
-  // Source CGameMovement basevelocity (conveyors / surfaces)
+  // Source CGameMovement basevelocity (conveyors / moving platforms)
   private baseVelX = f32(0);
   private baseVelY = f32(0);
   private baseVelZ = f32(0);
+
+  // Player life / health / blood state
+  private readonly vitals: PlayerVitalState = {
+    hp: 100,
+    maxHp: 100,
+    bloodMl: 5000,
+    maxBloodMl: 5000,
+    bloodLossCount: 0,
+    dead: false,
+  };
 
   private readonly traceScratch: TraceResult = {
     fraction: f32(1.0),
@@ -314,7 +484,36 @@ export class GoldSrcPhysicsEngine {
       linearDamping: sourceConfig.linearDamping ?? 0.02,
       angularDamping: sourceConfig.angularDamping ?? 0.05,
       physPushScale: sourceConfig.physPushScale ?? 1.0,
+      fallDamageThreshold: sourceConfig.fallDamageThreshold ?? 580,
+      fallDamageScale: sourceConfig.fallDamageScale ?? 0.16,
     };
+  }
+
+  public getVitals(): Readonly<PlayerVitalState> {
+    return this.vitals;
+  }
+
+  public restoreVitals(): void {
+    this.vitals.hp = this.vitals.maxHp;
+    this.vitals.bloodMl = this.vitals.maxBloodMl;
+    this.vitals.bloodLossCount = 0;
+    this.vitals.dead = false;
+  }
+
+  public damagePlayer(amount: number, source: 'fall' | 'explosion' | 'hazard'): void {
+    if (this.vitals.dead || amount <= 0) return;
+    const dmg = Math.max(1, Math.round(amount));
+    this.vitals.hp = Math.max(0, this.vitals.hp - dmg);
+    const bloodLostMl = Math.min(this.vitals.bloodMl, Math.round(dmg * 36));
+    this.vitals.bloodMl = Math.max(0, this.vitals.bloodMl - bloodLostMl);
+    this.vitals.bloodLossCount += 1;
+
+    this.callbacks.onPlayerDamage?.(dmg, source, bloodLostMl);
+
+    if (this.vitals.hp <= 0) {
+      this.vitals.dead = true;
+      this.callbacks.onPlayerDeath?.(source);
+    }
   }
 
   public getRigidBodies(): readonly SourceRigidBody[] {
@@ -325,11 +524,371 @@ export class GoldSrcPhysicsEngine {
     this.rigidBodies.push(body);
   }
 
+  public removeRigidBody(id: string): SourceRigidBody | null {
+    const idx = this.rigidBodies.findIndex((b) => b.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.rigidBodies.splice(idx, 1);
+    return removed;
+  }
+
   public setRigidBodies(bodies: SourceRigidBody[]): void {
     this.rigidBodies = bodies;
   }
 
-  /** Capture current player position, view angles, and velocity for practice save-states */
+  public getPlayerEyePosition(): Vec3 {
+    const vf = this.abi.f32;
+    return {
+      x: vf[F32.POS_X],
+      y: vf[F32.POS_Y],
+      z: f32(vf[F32.POS_Z] + vf[F32.VIEW_OFS_Z]),
+    };
+  }
+
+  /** Find nearest pickupable dropped weapon within range (and optionally aligned with aim ray) */
+  public findNearbyWeapon(
+    maxRange: number,
+    aimOrigin?: Vec3,
+    aimDir?: Vec3,
+    minAimDot = 0.72,
+    respectAutoCooldown = false,
+  ): SourceRigidBody | null {
+    const vf = this.abi.f32;
+    const tick = this.abi.i32[I32.TICK];
+    const px = aimOrigin?.x ?? vf[F32.POS_X];
+    const py = aimOrigin?.y ?? vf[F32.POS_Y];
+    const pz = aimOrigin?.z ?? vf[F32.POS_Z];
+
+    let best: SourceRigidBody | null = null;
+    let bestScore = Infinity;
+
+    for (let i = 0; i < this.rigidBodies.length; i++) {
+      const b = this.rigidBodies[i];
+      if (b.kind !== 'weapon' || !b.weaponData) continue;
+      if (respectAutoCooldown && tick < b.weaponData.pickupCooldownTick) continue;
+
+      const dx = b.pos.x - px;
+      const dy = b.pos.y - py;
+      const dz = b.pos.z - pz;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist > maxRange) continue;
+
+      if (aimDir && dist > 1e-4) {
+        const dot = (dx * aimDir.x + dy * aimDir.y + dz * aimDir.z) / dist;
+        if (dot < minAimDot && dist > 52) continue;
+        const score = dist * (1.25 - Math.max(0, dot));
+        if (score < bestScore) {
+          bestScore = score;
+          best = b;
+        }
+      } else if (dist < bestScore) {
+        bestScore = dist;
+        best = b;
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Hitscan raycast against BOTH static BSP convex brushes and oriented VPhysics rigid bodies (OBBs).
+   */
+  public traceRay(
+    origin: Vec3,
+    dir: Vec3,
+    maxDistance: number,
+    ignoreBodyIds?: ReadonlySet<string>,
+  ): RayHitResult {
+    const dLen = Math.hypot(dir.x, dir.y, dir.z);
+    if (dLen < 1e-6 || maxDistance <= 0) {
+      return {
+        hit: false,
+        kind: 'none',
+        fraction: 1,
+        distance: maxDistance,
+        point: { ...origin },
+        normal: { x: 0, y: 0, z: 1 },
+      };
+    }
+
+    const nx = dir.x / dLen;
+    const ny = dir.y / dLen;
+    const nz = dir.z / dLen;
+
+    const endX = f32(origin.x + nx * maxDistance);
+    const endY = f32(origin.y + ny * maxDistance);
+    const endZ = f32(origin.z + nz * maxDistance);
+
+    // 1. Static BSP brush trace (point ray with DIST_EPSILON)
+    const worldTr: TraceResult = {
+      fraction: f32(1.0),
+      endX,
+      endY,
+      endZ,
+      normalX: f32(0),
+      normalY: f32(0),
+      normalZ: f32(1),
+      startSolid: false,
+      allSolid: false,
+      brushId: '',
+    };
+    this.traceWorld(origin.x, origin.y, origin.z, endX, endY, endZ, 0, 0, 0, worldTr);
+
+    let bestFrac = worldTr.fraction;
+    let bestKind: 'none' | 'world' | 'rigidBody' = worldTr.fraction < 1.0 ? 'world' : 'none';
+    let bestNormal: Vec3 = {
+      x: worldTr.normalX,
+      y: worldTr.normalY,
+      z: worldTr.normalZ,
+    };
+    let bestBrushId: string | undefined = worldTr.fraction < 1.0 ? worldTr.brushId : undefined;
+    let bestBody: SourceRigidBody | undefined;
+
+    // 2. Oriented bounding box (OBB) slab ray intersection against every VPhysics rigid body
+    const rayDir: Vec3 = { x: nx, y: ny, z: nz };
+    for (let i = 0; i < this.rigidBodies.length; i++) {
+      const b = this.rigidBodies[i];
+      if (ignoreBodyIds?.has(b.id)) continue;
+
+      const rot = quatToMat3(b.quat);
+      const relOrigin: Vec3 = {
+        x: origin.x - b.pos.x,
+        y: origin.y - b.pos.y,
+        z: origin.z - b.pos.z,
+      };
+      const localOrigin = mulMat3TransposeVec3(rot, relOrigin);
+      const localDir = mulMat3TransposeVec3(rot, rayDir);
+
+      const obbHit = this.intersectRayLocalBox(
+        localOrigin,
+        localDir,
+        b.hx,
+        b.hy,
+        b.hz,
+        maxDistance * bestFrac,
+      );
+
+      if (obbHit) {
+        const frac = obbHit.t / maxDistance;
+        if (frac >= 0 && frac < bestFrac) {
+          bestFrac = frac;
+          bestKind = 'rigidBody';
+          bestBody = b;
+          bestBrushId = undefined;
+          const worldNorm = mulMat3Vec3(rot, obbHit.localNormal);
+          const nLen = Math.hypot(worldNorm.x, worldNorm.y, worldNorm.z) || 1;
+          bestNormal = {
+            x: f32(worldNorm.x / nLen),
+            y: f32(worldNorm.y / nLen),
+            z: f32(worldNorm.z / nLen),
+          };
+        }
+      }
+    }
+
+    const hitDist = bestFrac * maxDistance;
+    return {
+      hit: bestKind !== 'none',
+      kind: bestKind,
+      fraction: bestFrac,
+      distance: hitDist,
+      point: {
+        x: f32(origin.x + nx * hitDist),
+        y: f32(origin.y + ny * hitDist),
+        z: f32(origin.z + nz * hitDist),
+      },
+      normal: bestNormal,
+      brushId: bestBrushId,
+      body: bestBody,
+    };
+  }
+
+  /**
+   * CS 1.6-style knife melee trace: tries center ray first, then falls back to an expanded
+   * melee hull (half-extent 10u) so close-quarters slashes connect cleanly with targets & props.
+   */
+  public traceMelee(origin: Vec3, dir: Vec3, maxDistance: number): RayHitResult {
+    const exact = this.traceRay(origin, dir, maxDistance);
+    if (exact.hit && exact.kind === 'rigidBody') return exact;
+
+    const dLen = Math.hypot(dir.x, dir.y, dir.z) || 1;
+    const nx = dir.x / dLen;
+    const ny = dir.y / dLen;
+    const nz = dir.z / dLen;
+    const rayDir: Vec3 = { x: nx, y: ny, z: nz };
+
+    // Expanded OBB check for forgiving melee hits on props/targets
+    let bestFrac = exact.fraction;
+    let bestBody: SourceRigidBody | undefined;
+    let bestNormal: Vec3 = exact.normal;
+    const meleePad = 10;
+
+    for (let i = 0; i < this.rigidBodies.length; i++) {
+      const b = this.rigidBodies[i];
+      const rot = quatToMat3(b.quat);
+      const localOrigin = mulMat3TransposeVec3(rot, {
+        x: origin.x - b.pos.x,
+        y: origin.y - b.pos.y,
+        z: origin.z - b.pos.z,
+      });
+      const localDir = mulMat3TransposeVec3(rot, rayDir);
+
+      const hit = this.intersectRayLocalBox(
+        localOrigin,
+        localDir,
+        b.hx + meleePad,
+        b.hy + meleePad,
+        b.hz + meleePad,
+        maxDistance * bestFrac,
+      );
+      if (hit) {
+        const frac = hit.t / maxDistance;
+        if (frac >= 0 && frac < bestFrac) {
+          bestFrac = frac;
+          bestBody = b;
+          const wn = mulMat3Vec3(rot, hit.localNormal);
+          const wl = Math.hypot(wn.x, wn.y, wn.z) || 1;
+          bestNormal = { x: f32(wn.x / wl), y: f32(wn.y / wl), z: f32(wn.z / wl) };
+        }
+      }
+    }
+
+    if (bestBody) {
+      const dist = bestFrac * maxDistance;
+      return {
+        hit: true,
+        kind: 'rigidBody',
+        fraction: bestFrac,
+        distance: dist,
+        point: {
+          x: f32(origin.x + nx * dist),
+          y: f32(origin.y + ny * dist),
+          z: f32(origin.z + nz * dist),
+        },
+        normal: bestNormal,
+        body: bestBody,
+      };
+    }
+
+    return exact;
+  }
+
+  /** Local-space AABB slab test for exact OBB ray intersection */
+  private intersectRayLocalBox(
+    o: Vec3,
+    d: Vec3,
+    hx: number,
+    hy: number,
+    hz: number,
+    maxDist: number,
+  ): { t: number; localNormal: Vec3 } | null {
+    let tMin = 0;
+    let tMax = maxDist;
+    let hitNormal: Vec3 = { x: 0, y: 0, z: 1 };
+
+    const axes: Array<{ o: number; d: number; h: number; axis: 0 | 1 | 2 }> = [
+      { o: o.x, d: d.x, h: hx, axis: 0 },
+      { o: o.y, d: d.y, h: hy, axis: 1 },
+      { o: o.z, d: d.z, h: hz, axis: 2 },
+    ];
+
+    for (const a of axes) {
+      if (Math.abs(a.d) < 1e-7) {
+        if (a.o < -a.h || a.o > a.h) return null;
+      } else {
+        const invD = 1 / a.d;
+        let t1 = (-a.h - a.o) * invD;
+        let t2 = (a.h - a.o) * invD;
+        let sign = -1;
+        if (t1 > t2) {
+          const tmp = t1;
+          t1 = t2;
+          t2 = tmp;
+          sign = 1;
+        }
+        if (t1 > tMin) {
+          tMin = t1;
+          hitNormal =
+            a.axis === 0
+              ? { x: sign, y: 0, z: 0 }
+              : a.axis === 1
+                ? { x: 0, y: sign, z: 0 }
+                : { x: 0, y: 0, z: sign };
+        }
+        if (t2 < tMax) tMax = t2;
+        if (tMin > tMax) return null;
+      }
+    }
+
+    if (tMin < 0 || tMin > maxDist) return null;
+    return { t: tMin, localNormal: hitNormal };
+  }
+
+  /**
+   * Apply a Source VPhysics point impact impulse (gunshot or knife strike) at world hit point p:
+   *   r = p - x_B
+   *   delta_v = (j / m_B) * dir
+   *   delta_omega = I_B^-1 * (r x (j * dir))
+   */
+  public applyPointImpulse(
+    body: SourceRigidBody,
+    hitPoint: Vec3,
+    direction: Vec3,
+    impulseMag: number,
+    damage = 0,
+  ): { destroyed: boolean; remainingHp?: number; bled: boolean; bloodLostMl: number } {
+    if (body.mass > 0 && impulseMag > 0) {
+      const dLen = Math.hypot(direction.x, direction.y, direction.z) || 1;
+      const nx = direction.x / dLen;
+      const ny = direction.y / dLen;
+      const nz = direction.z / dLen;
+
+      const scaledJ = f32(impulseMag * this.sourceConfig.physPushScale);
+      const jVec: Vec3 = {
+        x: f32(nx * scaledJ),
+        y: f32(ny * scaledJ),
+        z: f32(nz * scaledJ),
+      };
+
+      const invM = 1 / body.mass;
+      body.vel.x = f32(body.vel.x + jVec.x * invM);
+      body.vel.y = f32(body.vel.y + jVec.y * invM);
+      body.vel.z = f32(body.vel.z + jVec.z * invM + Math.min(85, scaledJ * invM * 0.12));
+
+      const r: Vec3 = {
+        x: f32(hitPoint.x - body.pos.x),
+        y: f32(hitPoint.y - body.pos.y),
+        z: f32(hitPoint.z - body.pos.z),
+      };
+      const rot = quatToMat3(body.quat);
+      const { invInertia } = computeWorldInertia(rot, body.inertiaLocal);
+      const dOmega = mulMat3Vec3(invInertia, crossVec3(r, jVec));
+
+      body.angVel.x = f32(body.angVel.x + dOmega.x);
+      body.angVel.y = f32(body.angVel.y + dOmega.y);
+      body.angVel.z = f32(body.angVel.z + dOmega.z);
+
+      this.callbacks.onRigidBodyHit?.(body.id, scaledJ, hitPoint, body.kind ?? 'prop');
+    }
+
+    const bled = Boolean(body.bleeds && damage > 0);
+    const bloodLostMl = bled ? Math.round(damage * 24) : 0;
+    if (bled) {
+      body.bloodLostMl = (body.bloodLostMl ?? 0) + bloodLostMl;
+    }
+
+    let destroyed = false;
+    if (damage > 0 && typeof body.hp === 'number') {
+      body.hp = Math.max(0, body.hp - damage);
+      if (body.hp <= 0) {
+        destroyed = true;
+        this.removeRigidBody(body.id);
+        this.callbacks.onRigidBodyDestroyed?.(body, hitPoint);
+      }
+    }
+
+    return { destroyed, remainingHp: body.hp, bled, bloodLostMl };
+  }
+
   public captureCheckpointState(index = 0, label = 'CUSTOM SAVE-STATE'): CheckpointState {
     const vf = this.abi.f32;
     return {
@@ -346,7 +905,6 @@ export class GoldSrcPhysicsEngine {
     };
   }
 
-  /** Teleport player to a stage checkpoint or saved practice state */
   public teleportToCheckpoint(cp: CheckpointState): void {
     const { f32: vf, i32: vi } = this.abi;
     vf[F32.POS_X] = f32(cp.x);
@@ -369,35 +927,44 @@ export class GoldSrcPhysicsEngine {
     this.checkVelocity();
   }
 
-  /** Radial explosion impulse scaled by blast radius R and phys_pushscale */
+  /**
+   * Radial explosion impulse:
+   *   I_mag = D_max * max(0, 1 - ||x_obj - x_exp|| / R) * k_push
+   *   delta_v = (I_mag / m) * (x_obj - x_exp) / ||x_obj - x_exp||
+   */
   public applyExplosionImpulse(
     origin: Vec3,
     maxDamage: number,
     radius: number,
     pushScaleOverride?: number,
     sourceId = 'manual_blast',
+    applyPlayerHpDamage = true,
   ): void {
     if (radius <= 0) return;
     const kPush = pushScaleOverride ?? this.sourceConfig.physPushScale;
     const vf = this.abi.f32;
 
-    // Player impulse
     const pDx = vf[F32.POS_X] - origin.x;
     const pDy = vf[F32.POS_Y] - origin.y;
     const pDz = vf[F32.POS_Z] - origin.z;
     const pDist = Math.hypot(pDx, pDy, pDz);
     if (pDist > 1e-5 && pDist < radius) {
-      const mag = maxDamage * Math.max(0, 1 - pDist / radius) * kPush;
+      const falloff = Math.max(0, 1 - pDist / radius);
+      const mag = maxDamage * falloff * kPush;
       const pMass = Math.max(1, this.sourceConfig.playerMass);
       const dv = mag / pMass;
       vf[F32.VEL_X] = f32(vf[F32.VEL_X] + dv * (pDx / pDist));
       vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + dv * (pDy / pDist));
       vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + dv * (pDz / pDist));
       this.abi.i32[I32.FLAGS] &= ~FL_ONGROUND;
+
+      if (applyPlayerHpDamage && falloff > 0.25) {
+        const hpDmg = Math.round(falloff * 42);
+        if (hpDmg > 0) this.damagePlayer(hpDmg, 'explosion');
+      }
     }
 
-    // Rigid-body linear + slight eccentric tumble impulses
-    for (let i = 0; i < this.rigidBodies.length; i++) {
+    for (let i = this.rigidBodies.length - 1; i >= 0; i--) {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
       const dx = b.pos.x - origin.x;
@@ -405,7 +972,8 @@ export class GoldSrcPhysicsEngine {
       const dz = b.pos.z - origin.z;
       const dist = Math.hypot(dx, dy, dz);
       if (dist > 1e-5 && dist < radius) {
-        const mag = maxDamage * Math.max(0, 1 - dist / radius) * kPush;
+        const falloff = Math.max(0, 1 - dist / radius);
+        const mag = maxDamage * falloff * kPush;
         const nx = dx / dist;
         const ny = dy / dist;
         const nz = dz / dist;
@@ -431,6 +999,14 @@ export class GoldSrcPhysicsEngine {
         b.angVel.x = f32(b.angVel.x + dOmega.x);
         b.angVel.y = f32(b.angVel.y + dOmega.y);
         b.angVel.z = f32(b.angVel.z + dOmega.z);
+
+        if (typeof b.hp === 'number') {
+          b.hp = Math.max(0, b.hp - Math.round(falloff * 110));
+          if (b.hp <= 0) {
+            this.rigidBodies.splice(i, 1);
+            this.callbacks.onRigidBodyDestroyed?.(b, b.pos);
+          }
+        }
       }
     }
 
@@ -463,32 +1039,13 @@ export class GoldSrcPhysicsEngine {
     vi[I32.FLAGS] = FL_ONGROUND;
     vi[I32.MOVESTATE] = MoveState.GROUND;
     this.triggerCooldowns.clear();
+    if (!isFail) {
+      this.restoreVitals();
+    }
     this.callbacks.onTeleport?.(isFail);
   }
 
-  /** Source AngleVectors: pitch theta (+down), yaw psi, roll phi -> forward & right */
-  private angleVectors(pitch: number, yaw: number, roll = 0): { forward: Vec3; right: Vec3 } {
-    const sp = Math.sin(pitch);
-    const cp = Math.cos(pitch);
-    const sy = Math.sin(yaw);
-    const cy = Math.cos(yaw);
-    const sr = Math.sin(roll);
-    const cr = Math.cos(roll);
-
-    return {
-      forward: {
-        x: f32(cp * cy),
-        y: f32(cp * sy),
-        z: f32(-sp),
-      },
-      right: {
-        x: f32(-sr * sp * cy + cr * sy),
-        y: f32(-sr * sp * sy - cr * cy),
-        z: f32(-sr * cp),
-      },
-    };
-  }
-
+  /** Half-step Velocity-Verlet gravity: v_z <- v_z - 0.5 * g_ent * g * dt */
   private applyHalfGravity(gravity: number, gravityScale = 1.0): void {
     const vf = this.abi.f32;
     vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] - 0.5 * gravityScale * gravity * FIXED_DT);
@@ -505,17 +1062,27 @@ export class GoldSrcPhysicsEngine {
     vi[I32.TICK] += 1;
     vf[F32.SURF_NZ] = f32(0);
 
+    // If dead, keep stepping VPhysics props/dropped guns while player movement is frozen
+    if (this.vitals.dead) {
+      if (this.rigidBodies.length > 0) {
+        this.stepRigidBodies();
+        this.resolveRigidBodyPairCollisions();
+      }
+      vi[I32.PREV_BUTTONS] = vi[I32.BUTTONS];
+      return;
+    }
+
     const wasOnGround = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     const preVelZ = vf[F32.VEL_Z];
     const gravity = vf[F32.CVAR_GRAVITY];
 
-    // 1. Update duck state & hull
+    // 1. Duck / uncrouch hull update
     this.duck();
 
-    // 2. Categorize ground/air position
+    // 2. Categorize ground/air state (walkable n_z >= 0.7)
     this.categorizePosition();
 
-    // 3. Jump check: v_z = sqrt(2 * g * h_jump)
+    // 3. CheckJumpButton: v_z = sqrt(2 * g * h_jump), h_jump = 45u (CS:S / GoldSrc)
     const buttons = vi[I32.BUTTONS];
     const prevButtons = vi[I32.PREV_BUTTONS];
     const autoBhop = vi[I32.AUTOBHOP] === 1;
@@ -528,21 +1095,20 @@ export class GoldSrcPhysicsEngine {
       this.callbacks.onJump?.();
     }
 
-    // 4. First half of gravity step (while airborne)
+    // 4. StartGravity (first half-step)
     const isGroundedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     if (!isGroundedNow) {
       this.applyHalfGravity(gravity, 1.0);
     }
 
-    // Apply Source basevelocity before movement sweep
     if (this.baseVelX !== 0 || this.baseVelY !== 0 || this.baseVelZ !== 0) {
       vf[F32.VEL_X] = f32(vf[F32.VEL_X] + this.baseVelX);
       vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + this.baseVelY);
       vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + this.baseVelZ);
     }
 
-    // 5. AngleVectors -> horizontal wish velocity w & normalized wish direction w_hat
-    const { forward, right } = this.angleVectors(vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0);
+    // 5. AngleVectors -> horizontal projection (f_xy, r_xy) -> wish velocity & unit wish direction
+    const { forward, right } = computeAngleVectors(-vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0);
     const fLenXY = Math.hypot(forward.x, forward.y);
     const rLenXY = Math.hypot(right.x, right.y);
     const fxyX = fLenXY > 1e-6 ? forward.x / fLenXY : 0;
@@ -573,7 +1139,6 @@ export class GoldSrcPhysicsEngine {
       flyBlocked = this.airMove(wishDirX, wishDirY, wishspeed, this.sourceConfig.surfaceFriction);
     }
 
-    // Strip transient basevelocity after movement step
     if (this.baseVelX !== 0 || this.baseVelY !== 0 || this.baseVelZ !== 0) {
       vf[F32.VEL_X] = f32(vf[F32.VEL_X] - this.baseVelX);
       vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] - this.baseVelY);
@@ -583,7 +1148,7 @@ export class GoldSrcPhysicsEngine {
       this.baseVelZ = f32(0);
     }
 
-    // 7. Second half of gravity step
+    // 7. FinishGravity (second half-step) + fall damage check
     this.categorizePosition();
     const landedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     if (!landedNow) {
@@ -591,11 +1156,17 @@ export class GoldSrcPhysicsEngine {
     } else {
       vf[F32.VEL_Z] = f32(0);
       if (!wasOnGround && preVelZ < -140) {
-        this.callbacks.onLand?.(Math.abs(preVelZ));
+        const impact = Math.abs(preVelZ);
+        this.callbacks.onLand?.(impact);
+        if (impact > this.sourceConfig.fallDamageThreshold) {
+          const fallDmg =
+            (impact - this.sourceConfig.fallDamageThreshold) * this.sourceConfig.fallDamageScale;
+          this.damagePlayer(fallDmg, 'fall');
+        }
       }
     }
 
-    // 8. VPhysics rigid bodies: world traces, prop-prop stacking & player-prop impulses
+    // 8. VPhysics rigid bodies: semi-implicit Euler, prop-prop & player-prop impulses
     if (this.rigidBodies.length > 0) {
       this.stepRigidBodies();
       this.resolveRigidBodyPairCollisions();
@@ -616,13 +1187,13 @@ export class GoldSrcPhysicsEngine {
       vi[I32.MOVESTATE] = MoveState.AIR;
     }
 
-    // 10. Check triggers (start, checkpoint, end, push, explosion, teleport)
+    // 10. Trigger volumes
     this.checkTriggers();
 
     vi[I32.PREV_BUTTONS] = buttons;
   }
 
-  /** Step VPhysics rigid bodies with semi-implicit Euler integration & world trace */
+  /** VPhysics semi-implicit Euler integration for linear, angular, and quaternion kinematics */
   private stepRigidBodies(): void {
     const gravity = this.abi.f32[F32.CVAR_GRAVITY];
     const linKeep = f32(Math.max(0, 1.0 - this.sourceConfig.linearDamping * FIXED_DT));
@@ -698,6 +1269,7 @@ export class GoldSrcPhysicsEngine {
         const vn = dotVec3(b.vel, n);
         if (vn < 0) {
           const bounce = f32(1.0 + Math.max(b.restitution, this.sourceConfig.svBounce));
+          const impactJ = Math.abs(vn) * b.mass;
           b.vel.x = f32(b.vel.x - n.x * vn * bounce);
           b.vel.y = f32(b.vel.y - n.y * vn * bounce);
           b.vel.z = f32(b.vel.z - n.z * vn * bounce);
@@ -706,9 +1278,13 @@ export class GoldSrcPhysicsEngine {
           const damp = f32(Math.max(0, 1.0 - 0.14 * mu));
           b.vel.x = f32(b.vel.x * damp);
           b.vel.y = f32(b.vel.y * damp);
-          b.angVel.x = f32(b.angVel.x * 0.86);
-          b.angVel.y = f32(b.angVel.y * 0.86);
-          b.angVel.z = f32(b.angVel.z * 0.86);
+          b.angVel.x = f32(b.angVel.x * 0.84);
+          b.angVel.y = f32(b.angVel.y * 0.84);
+          b.angVel.z = f32(b.angVel.z * 0.84);
+
+          if (impactJ > 260) {
+            this.callbacks.onRigidBodyHit?.(b.id, impactJ, b.pos, b.kind ?? 'prop');
+          }
 
           if (n.z >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 16) {
             b.vel.z = f32(0);
@@ -718,7 +1294,7 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** Resolve rigid-body vs rigid-body stacking & collision impulses with full 2-body inertia */
+  /** Full 2-body rigid-body collision impulse solver */
   private resolveRigidBodyPairCollisions(): void {
     const count = this.rigidBodies.length;
     for (let i = 0; i < count; i++) {
@@ -823,7 +1399,7 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** Resolve AABB overlap and impulse transfer between player hull (A) and rigid body (B) */
+  /** Player hull vs non-weapon VPhysics rigid-body collision impulse */
   private resolvePlayerRigidBodyCollisions(): void {
     const vf = this.abi.f32;
     const phx = HULL_STAND.hx;
@@ -837,7 +1413,7 @@ export class GoldSrcPhysicsEngine {
 
     for (let i = 0; i < this.rigidBodies.length; i++) {
       const b = this.rigidBodies[i];
-      if (b.mass <= 0) continue;
+      if (b.mass <= 0 || b.kind === 'weapon') continue;
 
       const dx = b.pos.x - pPos.x;
       const dy = b.pos.y - pPos.y;
@@ -923,7 +1499,7 @@ export class GoldSrcPhysicsEngine {
       b.angVel.y = f32(b.angVel.y + dOmegaB.y);
       b.angVel.z = f32(b.angVel.z + dOmegaB.z);
 
-      this.callbacks.onRigidBodyHit?.(b.id, Math.abs(j));
+      this.callbacks.onRigidBodyHit?.(b.id, Math.abs(j), contact, b.kind ?? 'prop');
     }
 
     vf[F32.POS_X] = pPos.x;
@@ -934,11 +1510,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = pVel.z;
   }
 
-  /**
-   * Minkowski plane expansion:
-   *   offset = |nx|*hx + |ny|*hy + |nz|*hz
-   *   d_shifted = d + offset
-   */
+  /** BSP Minkowski plane expansion + swept point ray test with DIST_EPSILON (1/32u) */
   private clipBoxToBrush(
     brush: ConvexBrush,
     sX: number,
@@ -1004,7 +1576,6 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** Trace swept AABB against all world convex brushes */
   private traceWorld(
     sX: number,
     sY: number,
@@ -1085,7 +1656,6 @@ export class GoldSrcPhysicsEngine {
     this.clipOut[2] = oz;
   }
 
-  /** CheckVelocity: clamp each component and total speed to maxvelocity */
   private checkVelocity(): void {
     const vf = this.abi.f32;
     const maxv = Math.max(vf[F32.CVAR_MAXVEL], this.sourceConfig.sourceMaxVelocity);
@@ -1107,7 +1677,7 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** AirAccelerate: v_cap = min(v_wish, 30), v_add = v_cap - (v . w_hat), v_accel = min(a_air * dt * v_wish * mu, v_add) */
+  /** AirAccelerate: v_cap = min(v_wish, 30), v_add = v_cap - (v . w_hat) */
   private airAccelerate(
     wishDirX: number,
     wishDirY: number,
@@ -1132,7 +1702,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + accelspeed * wishDirZ);
   }
 
-  /** Accelerate: v_add = v_wish - (v . w_hat), v_accel = min(a * dt * v_wish * mu, v_add) */
+  /** Ground Accelerate: v_add = v_wish - (v . w_hat) */
   private accelerate(
     wishDirX: number,
     wishDirY: number,
@@ -1156,7 +1726,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + accelspeed * wishDirZ);
   }
 
-  /** Friction with sv_stopspeed, sv_friction, mu_surface, and leading-edge drop-off */
+  /** Ground Friction with sv_stopspeed, sv_friction, mu_surface, and leading-edge drop-off */
   private friction(surfaceFriction: number): void {
     const vf = this.abi.f32;
     const vx = vf[F32.VEL_X];
@@ -1189,7 +1759,6 @@ export class GoldSrcPhysicsEngine {
     const stopspeed = vf[F32.CVAR_STOPSPEED];
     const control = vHoriz < stopspeed ? stopspeed : vHoriz;
     const drop = f32(control * kFriction * surfaceFriction * FIXED_DT);
-
     const scale = f32(Math.max(vHoriz - drop, 0) / vHoriz);
 
     vf[F32.VEL_X] = f32(vx * scale);
@@ -1197,7 +1766,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = f32(vz);
   }
 
-  /** Multi-plane iterative sliding (up to 4 bumps) with crease cross-product resolution */
+  /** TryPlayerMove / PM_FlyMove: multi-plane iterative sliding with crease cross-product */
   private flyMove(): number {
     const vf = this.abi.f32;
     const hz = this.getHullHalfZ();
@@ -1362,7 +1931,6 @@ export class GoldSrcPhysicsEngine {
     return blocked;
   }
 
-  /** CategorizePosition: walkable when n_z >= 0.7; surf ramp when 0.05 < n_z < 0.7 */
   private categorizePosition(): void {
     const { f32: vf, i32: vi } = this.abi;
     const hz = this.getHullHalfZ();
@@ -1391,7 +1959,6 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** Duck / Uncrouch with standing headroom check & mid-air crouch-jump */
   private duck(): void {
     const { f32: vf, i32: vi } = this.abi;
     const wantDuck = (vi[I32.BUTTONS] & IN_DUCK) !== 0;
@@ -1445,7 +2012,7 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VIEW_OFS_Z] = f32(vf[F32.VIEW_OFS_Z] + (targetEye - vf[F32.VIEW_OFS_Z]) * 0.28);
   }
 
-  /** StepMove / WalkMove: compares Path A (slide) vs Path B (step up by STEPSIZE, move, drop down) */
+  /** StepMove / WalkMove: compares Path A (slide) vs Path B (step up 18u, move, drop down) */
   private walkMove(
     wishDirX: number,
     wishDirY: number,
@@ -1552,7 +2119,6 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = downVZ;
   }
 
-  /** AirMove: runs airAccelerate + flyMove */
   private airMove(
     wishDirX: number,
     wishDirY: number,
@@ -1571,7 +2137,6 @@ export class GoldSrcPhysicsEngine {
     return this.flyMove();
   }
 
-  /** Evaluate AABB trigger volumes against current player hull */
   private checkTriggers(): void {
     const { f32: vf, i32: vi } = this.abi;
     const hz = this.getHullHalfZ();
@@ -1615,7 +2180,10 @@ export class GoldSrcPhysicsEngine {
       } else if (t.type === 'end') {
         this.callbacks.onFinishRun?.();
       } else if (t.type === 'teleport') {
-        this.teleportToSpawn(true);
+        this.damagePlayer(18, 'hazard');
+        if (!this.vitals.dead) {
+          this.teleportToSpawn(true);
+        }
         return;
       } else if (t.type === 'explosion') {
         const cooldown = (t.meta?.cooldownTicks as number | undefined) ?? 40;

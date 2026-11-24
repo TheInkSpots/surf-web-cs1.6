@@ -1,3 +1,4 @@
+// src/ui/HudController.ts
 import { MoveState } from '../core/constants';
 import { KeyState } from '../gameplay/InputController';
 import { RunTracker } from '../gameplay/RunTracker';
@@ -15,6 +16,8 @@ export interface HudSnapshot {
   keys: KeyState;
   cvarLabel: string;
 }
+
+type MovementKey = 'w' | 'a' | 's' | 'd' | 'jump' | 'duck';
 
 export class HudController {
   private readonly runTracker: RunTracker;
@@ -43,7 +46,7 @@ export class HudController {
   private readonly elStrafeOverlay = document.getElementById('strafe-overlay')!;
   private readonly elSpdSlot1 = document.getElementById('spd-slot-1')!;
 
-  private readonly elKeys: Record<keyof KeyState, HTMLElement> = {
+  private readonly elKeys: Record<MovementKey, HTMLElement> = {
     w: document.getElementById('key-w')!,
     a: document.getElementById('key-a')!,
     s: document.getElementById('key-s')!,
