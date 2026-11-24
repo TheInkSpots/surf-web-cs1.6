@@ -1,0 +1,1 @@
+Integration Note for WorldRenderer.tsIf WorldRenderer creates a THREE.WebGLRenderer and attaches a resize listener in its constructor, add a dispose() method (calling window.removeEventListener('resize', ...) and disposing geometries/materials) so switching between Maps 1, 2, and 3 leaks zero GPU memory. SurfApp.loadMap() already calls this.renderer?.dispose?.() automatically.

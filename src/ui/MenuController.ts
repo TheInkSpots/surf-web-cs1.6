@@ -1,9 +1,12 @@
+// src/ui/MenuController.ts
 import { f32 } from '../core/constants';
 import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
+import { DEFAULT_MAP_ID, getMapById, MAP_LIST, MapId } from '../maps/mapRegistry';
 
 export interface MenuCallbacks {
   onPlay: () => void;
   onRestart: () => void;
+  onMapSelect: (mapId: MapId) => void;
   onSensitivityChange: (sens: number) => void;
   onBaseFovChange: (fov: number) => void;
   onScout260Change: (enabled: boolean) => void;
@@ -40,9 +43,20 @@ export class MenuController {
   private readonly tgMute = document.getElementById('tg-mute') as HTMLInputElement;
   private readonly debugPill = document.getElementById('debug-pill')!;
 
-  constructor(abi: PhysicsMemoryAbi, callbacks: MenuCallbacks) {
+  private selectedMapId: MapId;
+  private readonly mapButtons = new Map<MapId, HTMLButtonElement>();
+  private mapDescEl: HTMLElement | null = null;
+
+  constructor(
+    abi: PhysicsMemoryAbi,
+    callbacks: MenuCallbacks,
+    initialMapId: MapId = DEFAULT_MAP_ID,
+  ) {
     this.abi = abi;
     this.callbacks = callbacks;
+    this.selectedMapId = initialMapId;
+
+    this.mountMapSelector();
 
     this.btnDefault.addEventListener('click', () => this.applyPreset('default'));
     this.btnHardcore.addEventListener('click', () => this.applyPreset('hardcore'));
@@ -92,6 +106,76 @@ export class MenuController {
     document
       .getElementById('btn-restart-menu')
       ?.addEventListener('click', () => this.callbacks.onRestart());
+  }
+
+  private mountMapSelector(): void {
+    let container = document.getElementById('map-selector');
+    if (!container) {
+      const playBtn = document.getElementById('btn-play');
+      const host = playBtn?.parentElement;
+      if (!host) return;
+
+      container = document.createElement('div');
+      container.id = 'map-selector';
+      container.style.cssText =
+        'display:flex;flex-direction:column;gap:8px;margin-bottom:14px;padding:10px 12px;' +
+        'border-radius:10px;background:rgba(15,23,42,0.72);border:1px solid rgba(148,163,184,0.22);';
+      host.insertBefore(container, playBtn);
+    }
+
+    container.innerHTML = '';
+
+    const header = document.createElement('div');
+    header.style.cssText =
+      'display:flex;justify-content:space-between;align-items:center;font-size:11px;' +
+      'letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;font-weight:700;';
+    header.innerHTML = '<span>SELECT MAP</span><span id="map-tier-badge" style="color:#38bdf8;"></span>';
+    container.appendChild(header);
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;';
+    container.appendChild(btnRow);
+
+    for (const mapDef of MAP_LIST) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.mapId = mapDef.id;
+      btn.textContent = mapDef.shortName;
+      btn.style.cssText =
+        'padding:7px 8px;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;' +
+        'border:1px solid rgba(148,163,184,0.28);background:rgba(30,41,59,0.8);color:#cbd5e1;' +
+        'transition:all 0.14s ease;';
+      btn.addEventListener('click', () => {
+        if (this.selectedMapId === mapDef.id) return;
+        this.setSelectedMap(mapDef.id);
+        this.callbacks.onMapSelect(mapDef.id);
+      });
+      btnRow.appendChild(btn);
+      this.mapButtons.set(mapDef.id, btn);
+    }
+
+    this.mapDescEl = document.createElement('div');
+    this.mapDescEl.style.cssText = 'font-size:11px;line-height:1.35;color:#94a3b8;';
+    container.appendChild(this.mapDescEl);
+
+    this.setSelectedMap(this.selectedMapId);
+  }
+
+  public setSelectedMap(mapId: MapId): void {
+    this.selectedMapId = mapId;
+    const def = getMapById(mapId);
+
+    for (const [id, btn] of this.mapButtons.entries()) {
+      const active = id === mapId;
+      btn.classList.toggle('active', active);
+      btn.style.background = active ? 'rgba(56, 189, 248, 0.22)' : 'rgba(30, 41, 59, 0.8)';
+      btn.style.borderColor = active ? '#38bdf8' : 'rgba(148, 163, 184, 0.28)';
+      btn.style.color = active ? '#f8fafc' : '#cbd5e1';
+    }
+
+    const badge = document.getElementById('map-tier-badge');
+    if (badge) badge.textContent = `${def.difficulty} • ${def.stages} STAGES`;
+    if (this.mapDescEl) this.mapDescEl.textContent = `${def.name} — ${def.description}`;
   }
 
   public setDebugChecked(checked: boolean): void {

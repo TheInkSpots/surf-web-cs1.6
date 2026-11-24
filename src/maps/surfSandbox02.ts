@@ -51,6 +51,7 @@ function makeBoxBrush(
         nx: 0,
         ny: 0,
         nz: 1,
+        d: maxZ,
         verts: [
           [minX, minY, maxZ],
           [maxX, minY, maxZ],
@@ -62,6 +63,7 @@ function makeBoxBrush(
         nx: 0,
         ny: 0,
         nz: -1,
+        d: -minZ,
         verts: [
           [minX, maxY, minZ],
           [maxX, maxY, minZ],
@@ -73,6 +75,7 @@ function makeBoxBrush(
         nx: 1,
         ny: 0,
         nz: 0,
+        d: maxX,
         verts: [
           [maxX, minY, minZ],
           [maxX, maxY, minZ],
@@ -84,6 +87,7 @@ function makeBoxBrush(
         nx: -1,
         ny: 0,
         nz: 0,
+        d: -minX,
         verts: [
           [minX, maxY, minZ],
           [minX, minY, minZ],
@@ -95,6 +99,7 @@ function makeBoxBrush(
         nx: 0,
         ny: 1,
         nz: 0,
+        d: maxY,
         verts: [
           [maxX, maxY, minZ],
           [minX, maxY, minZ],
@@ -106,6 +111,7 @@ function makeBoxBrush(
         nx: 0,
         ny: -1,
         nz: 0,
+        d: -minY,
         verts: [
           [minX, minY, minZ],
           [maxX, minY, minZ],
@@ -163,6 +169,7 @@ function makeSurfRampX(
         nx: 0,
         ny: nyL,
         nz: nzL,
+        d: dLeft,
         verts: [
           [x0, yCenter + w, zBot],
           [x0, yCenter, zTop],
@@ -175,6 +182,7 @@ function makeSurfRampX(
         nx: 0,
         ny: nyR,
         nz: nzR,
+        d: dRight,
         verts: [
           [x1, yCenter - w, zBot],
           [x1, yCenter, zTop],
@@ -187,6 +195,7 @@ function makeSurfRampX(
         nx: -1,
         ny: 0,
         nz: 0,
+        d: -x0,
         verts: [
           [x0, yCenter - w, zBot],
           [x0, yCenter, zTop],
@@ -198,6 +207,7 @@ function makeSurfRampX(
         nx: 1,
         ny: 0,
         nz: 0,
+        d: x1,
         verts: [
           [x1, yCenter + w, zBot],
           [x1, yCenter, zTop],
@@ -209,6 +219,7 @@ function makeSurfRampX(
         nx: 0,
         ny: 0,
         nz: -1,
+        d: -zBot,
         verts: [
           [x0, yCenter + w, zBot],
           [x1, yCenter + w, zBot],
@@ -230,15 +241,11 @@ export function buildSurfSandbox02(): SurfMap02Data {
   // =========================================================================
   brushes.push(
     makeBoxBrush('spawn_deck', -420, 420, -480, 480, 420, 460, 'slate'),
-    // Backstop wall behind the combat target gallery
     makeBoxBrush('range_backstop', -420, 420, 456, 480, 460, 660, 'slate'),
-    // Armory table holding ground weapons
     makeBoxBrush('armory_table', -240, -60, -340, -240, 460, 492, 'walkable'),
-    // Launch lip toward Stage 1
     makeBoxBrush('launch_lip', 420, 520, -220, 220, 430, 460, 'booster'),
   );
 
-  // Start Run timer gate at the edge of Spawn Deck
   triggers.push({
     id: 'trig_start',
     type: 'start',
@@ -257,9 +264,7 @@ export function buildSurfSandbox02(): SurfMap02Data {
   brushes.push(
     makeSurfRampX('s1_ramp_1', 640, 2240, -210, 175, 100, 320, 'ramp'),
     makeSurfRampX('s1_ramp_2', 2380, 4050, 230, 175, 40, 260, 'ramp'),
-    // Mid-stage target platform alongside Ramp 2 for mid-air drive-by shots
     makeBoxBrush('s1_target_ledge', 2750, 3250, -360, -180, 180, 212, 'slate'),
-    // Stage 1 -> Stage 2 booster deck
     makeBoxBrush('s1_booster_pad', 4220, 4620, -140, 340, 140, 172, 'booster'),
   );
 
@@ -290,7 +295,6 @@ export function buildSurfSandbox02(): SurfMap02Data {
     makeBoxBrush('s2_checkpoint_deck', 4850, 5450, -260, 260, 320, 360, 'slate'),
     makeSurfRampX('s2_ramp_1', 5620, 7380, 240, 160, 80, 336, 'steep'),
     makeSurfRampX('s2_ramp_2', 7550, 9320, -240, 160, 20, 276, 'steep'),
-    // Blast-zone boost bridge
     makeBoxBrush('s2_blast_bridge', 9480, 9980, -240, 240, 160, 192, 'slate'),
   );
 
@@ -426,12 +430,10 @@ export function buildSurfSandbox02(): SurfMap02Data {
   // 7. INITIAL VPHYSICS RIGID BODIES (TARGETS, CRATES, GROUND WEAPONS)
   // =========================================================================
   const createRigidBodies = (): SourceRigidBody[] => [
-    // Spawn Shooting / Knife Range bleeding targets
     createTargetRigidBody('spawn_target_1', { x: -160, y: 360, z: 500 }, 100),
     createTargetRigidBody('spawn_target_2', { x: 0, y: 380, z: 500 }, 100),
     createTargetRigidBody('spawn_target_3', { x: 160, y: 360, z: 500 }, 100),
 
-    // Spawn VPhysics destructible / pushable crates
     createBoxRigidBody('spawn_crate_1', { x: 240, y: -260, z: 486 }, { x: 22, y: 22, z: 22 }, 32, {
       hp: 80,
       restitution: 0.35,
@@ -445,7 +447,6 @@ export function buildSurfSandbox02(): SurfMap02Data {
       restitution: 0.35,
     }),
 
-    // Ground weapons on the Armory Table (ready to pick up or swap)
     createWeaponRigidBody(
       'armory_scout_1',
       { x: -190, y: -290, z: 504 },
@@ -457,11 +458,9 @@ export function buildSurfSandbox02(): SurfMap02Data {
       { slot: 2, clipAmmo: 12, reserveAmmo: 100, silenced: true, pickupCooldownTick: 0 },
     ),
 
-    // Stage 1 mid-air target gallery
     createTargetRigidBody('s1_target_1', { x: 2900, y: -270, z: 252 }, 75),
     createTargetRigidBody('s1_target_2', { x: 3100, y: -270, z: 252 }, 75),
 
-    // Stage 2 checkpoint crates + spare USP
     createBoxRigidBody('s2_crate_1', { x: 5300, y: -150, z: 386 }, { x: 22, y: 22, z: 22 }, 30, {
       hp: 80,
     }),
@@ -471,7 +470,6 @@ export function buildSurfSandbox02(): SurfMap02Data {
       { slot: 1, clipAmmo: 10, reserveAmmo: 60, pickupCooldownTick: 0 },
     ),
 
-    // Finish Arena combat targets & physics crates
     createTargetRigidBody('fin_target_1', { x: 12950, y: -220, z: 300 }, 100),
     createTargetRigidBody('fin_target_2', { x: 13080, y: 0, z: 300 }, 100),
     createTargetRigidBody('fin_target_3', { x: 12950, y: 220, z: 300 }, 100),

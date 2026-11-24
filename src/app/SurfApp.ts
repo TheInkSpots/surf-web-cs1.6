@@ -19,7 +19,8 @@ import {
   IN_USE,
   SourceRigidBody,
 } from '../physics/GoldSrcPhysicsEngine';
-import { buildSurfSandbox02 } from '../maps/surfSandbox02';
+import { MapBuildResult } from '../maps/surfSandbox01';
+import { DEFAULT_MAP_ID, getMapById, MapId } from '../maps/mapRegistry';
 import { SurfAudioEngine } from '../audio/SurfAudioEngine';
 import { WorldRenderer } from '../render/WorldRenderer';
 import { ViewmodelRig } from '../render/ViewmodelRig';
@@ -32,44 +33,141 @@ import { CombatHudOverlay } from '../ui/CombatHudOverlay';
 import { MenuController } from '../ui/MenuController';
 
 export class SurfApp {
+  private readonly canvas: HTMLCanvasElement;
   private readonly abi = new PhysicsMemoryAbi(2);
   private readonly audio = new SurfAudioEngine();
   private readonly runTracker = new RunTracker();
   private readonly strafeSync = new StrafeSyncTracker(140);
-  private readonly createInitialRigidBodies: () => SourceRigidBody[];
-  private readonly physics: GoldSrcPhysicsEngine;
-  private readonly renderer: WorldRenderer;
-  private readonly viewmodel: ViewmodelRig;
-  private readonly input: InputController;
-  private readonly weapons: WeaponSystem;
+  private readonly viewmodel = new ViewmodelRig();
   private readonly hud: HudController;
-  private readonly combatHud: CombatHudOverlay;
+  private readonly combatHud = new CombatHudOverlay();
+  private readonly input: InputController;
   private readonly menu: MenuController;
+
+  private currentMapId: MapId = DEFAULT_MAP_ID;
+  private currentMapData!: MapBuildResult;
+  private createInitialRigidBodies!: () => SourceRigidBody[];
+  private physics!: GoldSrcPhysicsEngine;
+  private renderer!: WorldRenderer;
+  private weapons!: WeaponSystem;
 
   private activeCheckpoint: CheckpointState | null = null;
   private customCheckpoint: CheckpointState | null = null;
   private readonly visitedCheckpoints = new Set<number>();
 
+  private currentBaseFov = 95;
+  private currentDebugVisible = false;
   private spawnedPropCount = 0;
   private lastFrameTime = performance.now();
   private accumulator = 0;
   private simMsAvg = 0.08;
   private idleClock = 0;
 
-  constructor(canvas: HTMLCanvasElement) {
-    const mapData = buildSurfSandbox02();
+  constructor(canvas: HTMLCanvasElement, initialMapId: MapId = DEFAULT_MAP_ID) {
+    this.canvas = canvas;
+    this.currentMapId = initialMapId;
+    this.hud = new HudController(this.runTracker);
+
+    const initialMap = getMapById(initialMapId).build();
+
+    this.input = new InputController(canvas, initialMap.spawn, {
+      onUnlockRequest: () => this.audio.unlock(),
+      onSelectWeapon: (slot) => this.weapons.selectSlot(slot),
+      onQuickSwitch: () => this.weapons.quickSwitch(),
+      onDropWeapon: () => this.weapons.dropActiveWeapon(),
+      onPickupWeapon: () => {
+        if (!this.weapons.tryPickupLookedWeapon()) {
+          this.hud.showToast('AIM AT A GROUND WEAPON TO PICK UP', 'rgba(148,163,184,0.65)');
+        }
+      },
+      onAttack1Press: () => this.weapons.handlePrimaryPress(performance.now() * 0.001),
+      onAttack2Press: () => this.weapons.handleSecondaryPress(performance.now() * 0.001),
+      onReloadOrReset: () => {
+        if (this.physics.getVitals().dead) {
+          this.fullReset();
+          return;
+        }
+        const startedReload = this.weapons.tryReload(performance.now() * 0.001);
+        if (!startedReload && this.weapons.getActiveSlot() === 3) {
+          this.fullReset();
+        }
+      },
+      onResetRun: () => this.fullReset(),
+      onToggleDebug: () => {
+        const next = !this.renderer.debugGroup.visible;
+        this.currentDebugVisible = next;
+        this.renderer.setDebugVisible(next);
+        this.menu.setDebugChecked(next);
+        this.hud.showToast(
+          next ? 'MAPPER DEBUG WIREFRAMES: ON' : 'MAPPER DEBUG WIREFRAMES: OFF',
+          'rgba(245,158,11,0.65)',
+        );
+      },
+    });
+
+    this.menu = new MenuController(
+      this.abi,
+      {
+        onPlay: () => this.input.requestLock(),
+        onRestart: () => {
+          this.fullReset();
+          this.input.requestLock();
+        },
+        onMapSelect: (mapId) => this.loadMap(mapId),
+        onSensitivityChange: (sens) => {
+          this.input.sensitivity = sens;
+        },
+        onBaseFovChange: (fov) => {
+          this.currentBaseFov = fov;
+          this.renderer.baseFov = fov;
+        },
+        onScout260Change: (enabled) => this.hud.setScoutSpeedLabel(enabled),
+        onStrafeHudChange: (visible) => this.hud.setStrafeHudVisible(visible),
+        onDebugChange: (enabled) => {
+          this.currentDebugVisible = enabled;
+          this.renderer.setDebugVisible(enabled);
+          this.hud.showToast(
+            enabled ? 'MAPPER DEBUG WIREFRAMES: ON' : 'MAPPER DEBUG WIREFRAMES: OFF',
+            'rgba(245,158,11,0.65)',
+          );
+        },
+        onMuteChange: (muted) => this.audio.setMuted(muted),
+      },
+      initialMapId,
+    );
+
+    this.loadMap(initialMapId, initialMap, false);
+
+    window.addEventListener('keydown', this.handleSandboxHotkey);
+    this.menu.syncAll();
+  }
+
+  public loadMap(mapId: MapId, prebuilt?: MapBuildResult, announce = true): void {
+    const def = getMapById(mapId);
+    const mapData = prebuilt ?? def.build();
+
+    this.currentMapId = mapId;
+    this.currentMapData = mapData;
     this.createInitialRigidBodies = mapData.createRigidBodies;
 
-    this.hud = new HudController(this.runTracker);
-    this.combatHud = new CombatHudOverlay();
-    this.viewmodel = new ViewmodelRig();
+    this.activeCheckpoint = null;
+    this.customCheckpoint = null;
+    this.visitedCheckpoints.clear();
+    this.spawnedPropCount = 0;
+    this.runTracker.reset();
+
+    // Dispose prior renderer resources if WorldRenderer exposes a dispose() hook
+    (this.renderer as { dispose?: () => void } | undefined)?.dispose?.();
+
     this.renderer = new WorldRenderer(
-      canvas,
+      this.canvas,
       mapData.brushes,
       mapData.triggers,
       mapData.signs,
       this.viewmodel.root,
     );
+    this.renderer.baseFov = this.currentBaseFov;
+    this.renderer.setDebugVisible(this.currentDebugVisible);
 
     this.physics = new GoldSrcPhysicsEngine(
       this.abi,
@@ -160,7 +258,7 @@ export class SurfApp {
             }
 
             this.runTracker.reset();
-            this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
+            this.input.resetView(this.currentMapData.spawn.yaw, this.currentMapData.spawn.pitch);
             this.hud.showToast('FAIL ZONE — TELEPORTED TO SPAWN', 'rgba(251,113,133,0.65)');
           } else {
             this.runTracker.reset();
@@ -197,40 +295,6 @@ export class SurfApp {
       this.createInitialRigidBodies(),
     );
 
-    this.input = new InputController(canvas, mapData.spawn, {
-      onUnlockRequest: () => this.audio.unlock(),
-      onSelectWeapon: (slot) => this.weapons.selectSlot(slot),
-      onQuickSwitch: () => this.weapons.quickSwitch(),
-      onDropWeapon: () => this.weapons.dropActiveWeapon(),
-      onPickupWeapon: () => {
-        if (!this.weapons.tryPickupLookedWeapon()) {
-          this.hud.showToast('AIM AT A GROUND WEAPON TO PICK UP', 'rgba(148,163,184,0.65)');
-        }
-      },
-      onAttack1Press: () => this.weapons.handlePrimaryPress(performance.now() * 0.001),
-      onAttack2Press: () => this.weapons.handleSecondaryPress(performance.now() * 0.001),
-      onReloadOrReset: () => {
-        if (this.physics.getVitals().dead) {
-          this.fullReset(mapData.spawn);
-          return;
-        }
-        const startedReload = this.weapons.tryReload(performance.now() * 0.001);
-        if (!startedReload && this.weapons.getActiveSlot() === 3) {
-          this.fullReset(mapData.spawn);
-        }
-      },
-      onResetRun: () => this.fullReset(mapData.spawn),
-      onToggleDebug: () => {
-        const next = !this.renderer.debugGroup.visible;
-        this.renderer.setDebugVisible(next);
-        this.menu.setDebugChecked(next);
-        this.hud.showToast(
-          next ? 'MAPPER DEBUG WIREFRAMES: ON' : 'MAPPER DEBUG WIREFRAMES: OFF',
-          'rgba(245,158,11,0.65)',
-        );
-      },
-    });
-
     this.weapons = new WeaponSystem(
       this.abi,
       this.physics,
@@ -245,56 +309,27 @@ export class SurfApp {
       },
     );
 
-    this.menu = new MenuController(this.abi, {
-      onPlay: () => this.input.requestLock(),
-      onRestart: () => {
-        this.fullReset(mapData.spawn);
-        this.input.requestLock();
-      },
-      onSensitivityChange: (sens) => {
-        this.input.sensitivity = sens;
-      },
-      onBaseFovChange: (fov) => {
-        this.renderer.baseFov = fov;
-      },
-      onScout260Change: (enabled) => this.hud.setScoutSpeedLabel(enabled),
-      onStrafeHudChange: (visible) => this.hud.setStrafeHudVisible(visible),
-      onDebugChange: (enabled) => {
-        this.renderer.setDebugVisible(enabled);
-        this.hud.showToast(
-          enabled ? 'MAPPER DEBUG WIREFRAMES: ON' : 'MAPPER DEBUG WIREFRAMES: OFF',
-          'rgba(245,158,11,0.65)',
-        );
-      },
-      onMuteChange: (muted) => this.audio.setMuted(muted),
-    });
-
-    window.addEventListener('keydown', this.handleSandboxHotkey);
-
     this.physics.teleportToSpawn(false);
-    this.menu.syncAll();
+    this.weapons.resetLoadout();
+    this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
+    this.menu.setSelectedMap(mapId);
+
+    if (announce) {
+      this.hud.showToast(`LOADED ${def.name.toUpperCase()}`, 'rgba(56,189,248,0.85)');
+    }
   }
 
-  private fullReset(spawn: { yaw: number; pitch: number }): void {
+  private fullReset(): void {
     this.activeCheckpoint = null;
     this.visitedCheckpoints.clear();
     this.physics.restoreVitals();
     this.physics.setRigidBodies(this.createInitialRigidBodies());
     this.physics.teleportToSpawn(false);
     this.weapons.resetLoadout();
-    this.input.resetView(spawn.yaw, spawn.pitch);
+    this.input.resetView(this.currentMapData.spawn.yaw, this.currentMapData.spawn.pitch);
     this.hud.showToast('FULL RUN & LOADOUT RESET', 'rgba(245,158,11,0.65)');
   }
 
-  /**
-   * Live Sandbox Hotkeys (while pointer-locked):
-   *   B = Respawn at active stage checkpoint
-   *   C = Save custom practice checkpoint
-   *   V = Load custom practice checkpoint (preserves velocity)
-   *   T = Spawn VPhysics crate ahead
-   *   F = Detonate radial blast ahead
-   *   X = Reset VPhysics props, targets & ground weapons
-   */
   private handleSandboxHotkey = (e: KeyboardEvent): void => {
     if (!this.input.isPointerLocked || e.repeat) return;
 
@@ -505,7 +540,7 @@ export class SurfApp {
       moveState: vi[I32.MOVESTATE],
       ducking,
       keys: this.input.keys,
-      cvarLabel: `aa:${Math.round(vf[F32.CVAR_AIRACCEL])} mv:${Math.round(vf[F32.CVAR_MAXVEL])}`,
+      cvarLabel: `${this.currentMapId} | aa:${Math.round(vf[F32.CVAR_AIRACCEL])} mv:${Math.round(vf[F32.CVAR_MAXVEL])}`,
     });
 
     this.combatHud.update(frameDt, this.physics.getVitals(), this.weapons.getHudSnapshot(nowSec));
