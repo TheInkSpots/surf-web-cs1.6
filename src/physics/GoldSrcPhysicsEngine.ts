@@ -30,23 +30,47 @@ export interface SourcePhysicsConfig {
   sourceMaxVelocity?: number;
   svBounce?: number;
   playerMass?: number;
+  surfaceFriction?: number;
   linearDamping?: number;
+  angularDamping?: number;
+  physPushScale?: number;
 }
 
-export interface RigidBody {
+export interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface Quat {
+  w: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** 3x3 row-major matrix */
+export type Mat3 = [
+  number, number, number,
+  number, number, number,
+  number, number, number,
+];
+
+export interface SourceRigidBody {
   id: string;
-  posX: number;
-  posY: number;
-  posZ: number;
-  velX: number;
-  velY: number;
-  velZ: number;
+  pos: Vec3;
+  vel: Vec3;
+  quat: Quat;
+  angVel: Vec3;
+  /** Diagonal principal moments of inertia in local body frame */
+  inertiaLocal: Vec3;
   hx: number;
   hy: number;
   hz: number;
   mass: number;
   restitution: number;
   gravityScale: number;
+  surfaceFriction?: number;
 }
 
 export interface PhysicsCallbacks {
@@ -72,11 +96,120 @@ interface TraceResult {
   brushId: string;
 }
 
+function normalizeQuat(q: Quat): Quat {
+  const len = Math.hypot(q.w, q.x, q.y, q.z);
+  if (len < 1e-8) return { w: 1, x: 0, y: 0, z: 0 };
+  return {
+    w: f32(q.w / len),
+    x: f32(q.x / len),
+    y: f32(q.y / len),
+    z: f32(q.z / len),
+  };
+}
+
+function quatToMat3(q: Quat): Mat3 {
+  const n = normalizeQuat(q);
+  const { w, x, y, z } = n;
+  const xx = x * x;
+  const yy = y * y;
+  const zz = z * z;
+  const xy = x * y;
+  const xz = x * z;
+  const yz = y * z;
+  const wx = w * x;
+  const wy = w * y;
+  const wz = w * z;
+
+  return [
+    f32(1 - 2 * (yy + zz)), f32(2 * (xy - wz)),     f32(2 * (xz + wy)),
+    f32(2 * (xy + wz)),     f32(1 - 2 * (xx + zz)), f32(2 * (yz - wx)),
+    f32(2 * (xz - wy)),     f32(2 * (yz + wx)),     f32(1 - 2 * (xx + yy)),
+  ];
+}
+
+function mulMat3Vec3(m: Mat3, v: Vec3): Vec3 {
+  return {
+    x: f32(m[0] * v.x + m[1] * v.y + m[2] * v.z),
+    y: f32(m[3] * v.x + m[4] * v.y + m[5] * v.z),
+    z: f32(m[6] * v.x + m[7] * v.y + m[8] * v.z),
+  };
+}
+
+function crossVec3(a: Vec3, b: Vec3): Vec3 {
+  return {
+    x: f32(a.y * b.z - a.z * b.y),
+    y: f32(a.z * b.x - a.x * b.z),
+    z: f32(a.x * b.y - a.y * b.x),
+  };
+}
+
+function dotVec3(a: Vec3, b: Vec3): number {
+  return f32(a.x * b.x + a.y * b.y + a.z * b.z);
+}
+
+/** Compute world inertia tensor I = R * I_local * R^T and its inverse I^-1 */
+function computeWorldInertia(rot: Mat3, inertiaLocal: Vec3): { inertia: Mat3; invInertia: Mat3 } {
+  // Scale columns of R by diagonal inertiaLocal to get R * I_local
+  const s0x = rot[0] * inertiaLocal.x;
+  const s0y = rot[3] * inertiaLocal.x;
+  const s0z = rot[6] * inertiaLocal.x;
+
+  const s1x = rot[1] * inertiaLocal.y;
+  const s1y = rot[4] * inertiaLocal.y;
+  const s1z = rot[7] * inertiaLocal.y;
+
+  const s2x = rot[2] * inertiaLocal.z;
+  const s2y = rot[5] * inertiaLocal.z;
+  const s2z = rot[8] * inertiaLocal.z;
+
+  // (R * I_local) * R^T
+  const i00 = f32(s0x * rot[0] + s1x * rot[1] + s2x * rot[2]);
+  const i01 = f32(s0x * rot[3] + s1x * rot[4] + s2x * rot[5]);
+  const i02 = f32(s0x * rot[6] + s1x * rot[7] + s2x * rot[8]);
+
+  const i10 = f32(s0y * rot[0] + s1y * rot[1] + s2y * rot[2]);
+  const i11 = f32(s0y * rot[3] + s1y * rot[4] + s2y * rot[5]);
+  const i12 = f32(s0y * rot[6] + s1y * rot[7] + s2y * rot[8]);
+
+  const i20 = f32(s0z * rot[0] + s1z * rot[1] + s2z * rot[2]);
+  const i21 = f32(s0z * rot[3] + s1z * rot[4] + s2z * rot[5]);
+  const i22 = f32(s0z * rot[6] + s1z * rot[7] + s2z * rot[8]);
+
+  const inertia: Mat3 = [i00, i01, i02, i10, i11, i12, i20, i21, i22];
+
+  const c00 = i11 * i22 - i12 * i21;
+  const c01 = -(i10 * i22 - i12 * i20);
+  const c02 = i10 * i21 - i11 * i20;
+  const c10 = -(i01 * i22 - i02 * i21);
+  const c11 = i00 * i22 - i02 * i20;
+  const c12 = -(i00 * i21 - i01 * i20);
+  const c20 = i01 * i12 - i02 * i11;
+  const c21 = -(i00 * i12 - i02 * i10);
+  const c22 = i00 * i11 - i01 * i10;
+
+  const det = i00 * c00 + i01 * c01 + i02 * c02;
+  if (Math.abs(det) < 1e-8) {
+    return {
+      inertia,
+      invInertia: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+  }
+  const invDet = 1 / det;
+
+  const invInertia: Mat3 = [
+    f32(c00 * invDet), f32(c10 * invDet), f32(c20 * invDet),
+    f32(c01 * invDet), f32(c11 * invDet), f32(c21 * invDet),
+    f32(c02 * invDet), f32(c12 * invDet), f32(c22 * invDet),
+  ];
+
+  return { inertia, invInertia };
+}
+
 export class GoldSrcPhysicsEngine {
   private readonly abi: PhysicsMemoryAbi;
   private readonly brushes: ConvexBrush[];
   private readonly triggers: TriggerVolume[];
-  private readonly rigidBodies: RigidBody[];
+  private readonly rigidBodies: SourceRigidBody[];
   private readonly spawn: SpawnPoint;
   private readonly callbacks: PhysicsCallbacks;
   private readonly sourceConfig: Required<SourcePhysicsConfig>;
@@ -111,7 +244,7 @@ export class GoldSrcPhysicsEngine {
     triggers: TriggerVolume[],
     spawn: SpawnPoint,
     callbacks: PhysicsCallbacks = {},
-    rigidBodies: RigidBody[] = [],
+    rigidBodies: SourceRigidBody[] = [],
     sourceConfig: SourcePhysicsConfig = {},
   ) {
     this.abi = abi;
@@ -124,16 +257,65 @@ export class GoldSrcPhysicsEngine {
       sourceMaxVelocity: sourceConfig.sourceMaxVelocity ?? 3500,
       svBounce: sourceConfig.svBounce ?? 0,
       playerMass: sourceConfig.playerMass ?? 85,
+      surfaceFriction: sourceConfig.surfaceFriction ?? 1.0,
       linearDamping: sourceConfig.linearDamping ?? 0.02,
+      angularDamping: sourceConfig.angularDamping ?? 0.05,
+      physPushScale: sourceConfig.physPushScale ?? 1.0,
     };
   }
 
-  public getRigidBodies(): readonly RigidBody[] {
+  public getRigidBodies(): readonly SourceRigidBody[] {
     return this.rigidBodies;
   }
 
-  public addRigidBody(body: RigidBody): void {
+  public addRigidBody(body: SourceRigidBody): void {
     this.rigidBodies.push(body);
+  }
+
+  /** Radial explosion impulse scaled by blast radius R and phys_pushscale */
+  public applyExplosionImpulse(
+    origin: Vec3,
+    maxDamage: number,
+    radius: number,
+    pushScaleOverride?: number,
+  ): void {
+    if (radius <= 0) return;
+    const kPush = pushScaleOverride ?? this.sourceConfig.physPushScale;
+    const vf = this.abi.f32;
+
+    // Player impulse
+    const pDx = vf[F32.POS_X] - origin.x;
+    const pDy = vf[F32.POS_Y] - origin.y;
+    const pDz = vf[F32.POS_Z] - origin.z;
+    const pDist = Math.hypot(pDx, pDy, pDz);
+    if (pDist > 1e-5 && pDist < radius) {
+      const mag = maxDamage * Math.max(0, 1 - pDist / radius) * kPush;
+      const pMass = Math.max(1, this.sourceConfig.playerMass);
+      const dv = mag / pMass;
+      vf[F32.VEL_X] = f32(vf[F32.VEL_X] + dv * (pDx / pDist));
+      vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + dv * (pDy / pDist));
+      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + dv * (pDz / pDist));
+      this.abi.i32[I32.FLAGS] &= ~FL_ONGROUND;
+    }
+
+    // Rigid-body impulses
+    for (let i = 0; i < this.rigidBodies.length; i++) {
+      const b = this.rigidBodies[i];
+      if (b.mass <= 0) continue;
+      const dx = b.pos.x - origin.x;
+      const dy = b.pos.y - origin.y;
+      const dz = b.pos.z - origin.z;
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist > 1e-5 && dist < radius) {
+        const mag = maxDamage * Math.max(0, 1 - dist / radius) * kPush;
+        const dv = mag / b.mass;
+        b.vel.x = f32(b.vel.x + dv * (dx / dist));
+        b.vel.y = f32(b.vel.y + dv * (dy / dist));
+        b.vel.z = f32(b.vel.z + dv * (dz / dist));
+      }
+    }
+
+    this.checkVelocity();
   }
 
   public getHullHalfZ(): number {
@@ -164,6 +346,36 @@ export class GoldSrcPhysicsEngine {
     this.callbacks.onTeleport?.(isFail);
   }
 
+  /** Source AngleVectors: pitch theta (+down), yaw psi, roll phi -> forward & right */
+  private angleVectors(pitch: number, yaw: number, roll = 0): { forward: Vec3; right: Vec3 } {
+    const sp = Math.sin(pitch);
+    const cp = Math.cos(pitch);
+    const sy = Math.sin(yaw);
+    const cy = Math.cos(yaw);
+    const sr = Math.sin(roll);
+    const cr = Math.cos(roll);
+
+    const forward: Vec3 = {
+      x: f32(cp * cy),
+      y: f32(cp * sy),
+      z: f32(-sp),
+    };
+
+    const right: Vec3 = {
+      x: f32(-sr * sp * cy + cr * sy),
+      y: f32(-sr * sp * sy - cr * cy),
+      z: f32(-sr * cp),
+    };
+
+    return { forward, right };
+  }
+
+  /** Half-step gravity helper (StartGravity / FinishGravity) */
+  private applyHalfGravity(gravity: number, gravityScale = 1.0): void {
+    const vf = this.abi.f32;
+    vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] - 0.5 * gravityScale * gravity * FIXED_DT);
+  }
+
   public simulateTick(): void {
     const { f32: vf, i32: vi } = this.abi;
 
@@ -178,6 +390,7 @@ export class GoldSrcPhysicsEngine {
 
     const wasOnGround = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     const preVelZ = vf[F32.VEL_Z];
+    const gravity = vf[F32.CVAR_GRAVITY];
 
     // 1. Update duck state & hull
     this.duck();
@@ -185,7 +398,7 @@ export class GoldSrcPhysicsEngine {
     // 2. Categorize ground/air position
     this.categorizePosition();
 
-    // 3. Jump check (supports Auto-Bhop or exact fresh jump / scroll-wheel input)
+    // 3. Jump check: v_z = sqrt(2 * g * h_jump)
     const buttons = vi[I32.BUTTONS];
     const prevButtons = vi[I32.PREV_BUTTONS];
     const autoBhop = vi[I32.AUTOBHOP] === 1;
@@ -194,15 +407,14 @@ export class GoldSrcPhysicsEngine {
 
     if (freshJump && (vi[I32.FLAGS] & FL_ONGROUND)) {
       vi[I32.FLAGS] &= ~FL_ONGROUND;
-      // Jump impulse: sqrt(2 * gravity * 45) ≈ 268.328 u/s
-      vf[F32.VEL_Z] = f32(Math.sqrt(2.0 * vf[F32.CVAR_GRAVITY] * 45.0));
+      vf[F32.VEL_Z] = f32(Math.sqrt(2.0 * gravity * 45.0));
       this.callbacks.onJump?.();
     }
 
-    // 4. First half of gravity step (only while airborne)
+    // 4. First half of gravity step (while airborne)
     const isGroundedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     if (!isGroundedNow) {
-      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] - 0.5 * vf[F32.CVAR_GRAVITY] * FIXED_DT);
+      this.applyHalfGravity(gravity, 1.0);
     }
 
     // Apply Source basevelocity before movement sweep
@@ -212,12 +424,14 @@ export class GoldSrcPhysicsEngine {
       vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + this.baseVelZ);
     }
 
-    // 5. Compute horizontal wish vector from view yaw & WASD move axes
-    const yaw = vf[F32.CMD_YAW];
-    const fwdX = Math.cos(yaw);
-    const fwdY = Math.sin(yaw);
-    const rightX = Math.sin(yaw);
-    const rightY = -Math.cos(yaw);
+    // 5. AngleVectors -> horizontal wish velocity w & normalized wish direction w_hat
+    const { forward, right } = this.angleVectors(vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0);
+    const fLenXY = Math.hypot(forward.x, forward.y);
+    const rLenXY = Math.hypot(right.x, right.y);
+    const fxyX = fLenXY > 1e-6 ? forward.x / fLenXY : 0;
+    const fxyY = fLenXY > 1e-6 ? forward.y / fLenXY : 0;
+    const rxyX = rLenXY > 1e-6 ? right.x / rLenXY : 0;
+    const rxyY = rLenXY > 1e-6 ? right.y / rLenXY : 0;
 
     const fmove = vf[F32.CMD_FMOVE];
     const smove = vf[F32.CMD_SMOVE];
@@ -226,22 +440,20 @@ export class GoldSrcPhysicsEngine {
         ? f32(vf[F32.CMD_MAXSPEED] * 0.34)
         : vf[F32.CMD_MAXSPEED];
 
-    let wishX = f32(fwdX * fmove + rightX * smove);
-    let wishY = f32(fwdY * fmove + rightY * smove);
-    let wishspeed = f32(Math.hypot(wishX, wishY));
-    if (wishspeed > 0.0001) {
-      wishX = f32(wishX / wishspeed);
-      wishY = f32(wishY / wishspeed);
-    }
-    if (wishspeed > maxSpeed) wishspeed = maxSpeed;
+    const rawWishX = f32(fmove * fxyX + smove * rxyX);
+    const rawWishY = f32(fmove * fxyY + smove * rxyY);
+    const wishMag = f32(Math.hypot(rawWishX, rawWishY));
+    const wishspeed = f32(Math.min(wishMag, maxSpeed));
+    const wishDirX = wishMag > 1e-5 ? f32(rawWishX / wishMag) : f32(0);
+    const wishDirY = wishMag > 1e-5 ? f32(rawWishY / wishMag) : f32(0);
 
     // 6. Ground vs Air/Surf movement branch
     let flyBlocked = 0;
     if (isGroundedNow) {
-      this.friction();
-      this.walkMove(wishX, wishY, wishspeed);
+      this.friction(this.sourceConfig.surfaceFriction);
+      this.walkMove(wishDirX, wishDirY, wishspeed, this.sourceConfig.surfaceFriction);
     } else {
-      flyBlocked = this.airMove(wishX, wishY, wishspeed);
+      flyBlocked = this.airMove(wishDirX, wishDirY, wishspeed, this.sourceConfig.surfaceFriction);
     }
 
     // Strip transient basevelocity after movement step
@@ -258,7 +470,7 @@ export class GoldSrcPhysicsEngine {
     this.categorizePosition();
     const landedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     if (!landedNow) {
-      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] - 0.5 * vf[F32.CVAR_GRAVITY] * FIXED_DT);
+      this.applyHalfGravity(gravity, 1.0);
     } else {
       vf[F32.VEL_Z] = f32(0);
       if (!wasOnGround && preVelZ < -140) {
@@ -266,7 +478,7 @@ export class GoldSrcPhysicsEngine {
       }
     }
 
-    // 8. Source VPhysics-style rigid bodies & player-prop collision resolution
+    // 8. VPhysics rigid bodies & player-prop collision resolution
     if (this.rigidBodies.length > 0) {
       this.stepRigidBodies();
       this.resolvePlayerRigidBodyCollisions();
@@ -292,10 +504,12 @@ export class GoldSrcPhysicsEngine {
     vi[I32.PREV_BUTTONS] = buttons;
   }
 
-  /** Step VPhysics-style rigid bodies against world convex brushes */
+  /** Step VPhysics rigid bodies with semi-implicit Euler integration & world trace */
   private stepRigidBodies(): void {
     const gravity = this.abi.f32[F32.CVAR_GRAVITY];
-    const dampingFactor = f32(Math.max(0, 1.0 - this.sourceConfig.linearDamping * FIXED_DT));
+    const linKeep = f32(Math.max(0, 1.0 - this.sourceConfig.linearDamping * FIXED_DT));
+    const angKeep = f32(Math.max(0, 1.0 - this.sourceConfig.angularDamping * FIXED_DT));
+
     const traceOut: TraceResult = {
       fraction: f32(1.0),
       endX: f32(0),
@@ -313,49 +527,92 @@ export class GoldSrcPhysicsEngine {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
 
-      b.velZ = f32(b.velZ - gravity * b.gravityScale * FIXED_DT);
-      b.velX = f32(b.velX * dampingFactor);
-      b.velY = f32(b.velY * dampingFactor);
-      b.velZ = f32(b.velZ * dampingFactor);
+      // Semi-implicit Euler linear velocity & position
+      b.vel.x = f32(b.vel.x * linKeep);
+      b.vel.y = f32(b.vel.y * linKeep);
+      b.vel.z = f32(b.vel.z * linKeep - gravity * b.gravityScale * FIXED_DT);
 
-      const targetX = f32(b.posX + b.velX * FIXED_DT);
-      const targetY = f32(b.posY + b.velY * FIXED_DT);
-      const targetZ = f32(b.posZ + b.velZ * FIXED_DT);
+      const targetX = f32(b.pos.x + b.vel.x * FIXED_DT);
+      const targetY = f32(b.pos.y + b.vel.y * FIXED_DT);
+      const targetZ = f32(b.pos.z + b.vel.z * FIXED_DT);
 
-      this.traceWorld(b.posX, b.posY, b.posZ, targetX, targetY, targetZ, b.hx, b.hy, b.hz, traceOut);
+      // Semi-implicit Euler angular velocity & quaternion integration (tau_ext = 0 here)
+      const rot = quatToMat3(b.quat);
+      const { inertia, invInertia } = computeWorldInertia(rot, b.inertiaLocal);
+      const iOmega = mulMat3Vec3(inertia, b.angVel);
+      const gyro = crossVec3(b.angVel, iOmega);
+      const angAccel = mulMat3Vec3(invInertia, {
+        x: f32(-gyro.x),
+        y: f32(-gyro.y),
+        z: f32(-gyro.z),
+      });
 
-      b.posX = traceOut.endX;
-      b.posY = traceOut.endY;
-      b.posZ = traceOut.endZ;
+      b.angVel.x = f32(b.angVel.x * angKeep + angAccel.x * FIXED_DT);
+      b.angVel.y = f32(b.angVel.y * angKeep + angAccel.y * FIXED_DT);
+      b.angVel.z = f32(b.angVel.z * angKeep + angAccel.z * FIXED_DT);
+
+      // q_{t+dt} = normalize(q_t + 0.5 * [0, omega_{t+dt}] * q_t * dt)
+      const qw = b.quat.w;
+      const qx = b.quat.x;
+      const qy = b.quat.y;
+      const qz = b.quat.z;
+      const wx = b.angVel.x;
+      const wy = b.angVel.y;
+      const wz = b.angVel.z;
+
+      const dw = f32(-0.5 * (wx * qx + wy * qy + wz * qz) * FIXED_DT);
+      const dx = f32(0.5 * (wx * qw + wy * qz - wz * qy) * FIXED_DT);
+      const dy = f32(0.5 * (-wx * qz + wy * qw + wz * qx) * FIXED_DT);
+      const dz = f32(0.5 * (wx * qy - wy * qx + wz * qw) * FIXED_DT);
+
+      b.quat = normalizeQuat({
+        w: f32(qw + dw),
+        x: f32(qx + dx),
+        y: f32(qy + dy),
+        z: f32(qz + dz),
+      });
+
+      this.traceWorld(b.pos.x, b.pos.y, b.pos.z, targetX, targetY, targetZ, b.hx, b.hy, b.hz, traceOut);
+
+      b.pos.x = traceOut.endX;
+      b.pos.y = traceOut.endY;
+      b.pos.z = traceOut.endZ;
 
       if (traceOut.fraction < 1.0) {
-        const vn = f32(
-          b.velX * traceOut.normalX + b.velY * traceOut.normalY + b.velZ * traceOut.normalZ,
-        );
+        const n: Vec3 = { x: traceOut.normalX, y: traceOut.normalY, z: traceOut.normalZ };
+        const vn = dotVec3(b.vel, n);
         if (vn < 0) {
           const bounce = f32(1.0 + Math.max(b.restitution, this.sourceConfig.svBounce));
-          b.velX = f32(b.velX - traceOut.normalX * vn * bounce);
-          b.velY = f32(b.velY - traceOut.normalY * vn * bounce);
-          b.velZ = f32(b.velZ - traceOut.normalZ * vn * bounce);
+          b.vel.x = f32(b.vel.x - n.x * vn * bounce);
+          b.vel.y = f32(b.vel.y - n.y * vn * bounce);
+          b.vel.z = f32(b.vel.z - n.z * vn * bounce);
 
-          // Ground contact friction for rigid bodies
-          if (traceOut.normalZ >= SURF_NORMAL_Z) {
-            b.velX = f32(b.velX * 0.92);
-            b.velY = f32(b.velY * 0.92);
-            if (Math.abs(b.velZ) < 12) b.velZ = f32(0);
+          // Tangential friction on contact
+          const mu = b.surfaceFriction ?? this.sourceConfig.surfaceFriction;
+          const damp = f32(Math.max(0, 1.0 - 0.12 * mu));
+          b.vel.x = f32(b.vel.x * damp);
+          b.vel.y = f32(b.vel.y * damp);
+          b.angVel.x = f32(b.angVel.x * 0.85);
+          b.angVel.y = f32(b.angVel.y * 0.85);
+          b.angVel.z = f32(b.angVel.z * 0.85);
+
+          if (n.z >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 12) {
+            b.vel.z = f32(0);
           }
         }
       }
     }
   }
 
-  /** Resolve AABB overlap and impulse transfer between player hull and rigid bodies */
+  /** Resolve AABB overlap and rigid-body impulse with lever arms r_A, r_B and inertia I */
   private resolvePlayerRigidBodyCollisions(): void {
     const vf = this.abi.f32;
     const phx = HULL_STAND.hx;
     const phy = HULL_STAND.hy;
     const phz = this.getHullHalfZ();
 
+    const pPos: Vec3 = { x: vf[F32.POS_X], y: vf[F32.POS_Y], z: vf[F32.POS_Z] };
+    const pVel: Vec3 = { x: vf[F32.VEL_X], y: vf[F32.VEL_Y], z: vf[F32.VEL_Z] };
     const pMass = Math.max(1, this.sourceConfig.playerMass);
     const pInvMass = 1 / pMass;
 
@@ -363,9 +620,9 @@ export class GoldSrcPhysicsEngine {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
 
-      const dx = vf[F32.POS_X] - b.posX;
-      const dy = vf[F32.POS_Y] - b.posY;
-      const dz = vf[F32.POS_Z] - b.posZ;
+      const dx = pPos.x - b.pos.x;
+      const dy = pPos.y - b.pos.y;
+      const dz = pPos.z - b.pos.z;
 
       const overlapX = phx + b.hx - Math.abs(dx);
       const overlapY = phy + b.hy - Math.abs(dy);
@@ -389,49 +646,98 @@ export class GoldSrcPhysicsEngine {
         nz = dz >= 0 ? 1 : -1;
       }
 
+      const n: Vec3 = { x: f32(nx), y: f32(ny), z: f32(nz) };
       const bInvMass = 1 / b.mass;
       const totalInvMass = pInvMass + bInvMass;
       const pShare = pInvMass / totalInvMass;
       const bShare = bInvMass / totalInvMass;
 
-      // Positional separation along minimum penetration axis
-      vf[F32.POS_X] = f32(vf[F32.POS_X] + nx * pen * pShare);
-      vf[F32.POS_Y] = f32(vf[F32.POS_Y] + ny * pen * pShare);
-      vf[F32.POS_Z] = f32(vf[F32.POS_Z] + nz * pen * pShare);
+      // Positional separation
+      pPos.x = f32(pPos.x + n.x * pen * pShare);
+      pPos.y = f32(pPos.y + n.y * pen * pShare);
+      pPos.z = f32(pPos.z + n.z * pen * pShare);
 
-      b.posX = f32(b.posX - nx * pen * bShare);
-      b.posY = f32(b.posY - ny * pen * bShare);
-      b.posZ = f32(b.posZ - nz * pen * bShare);
+      b.pos.x = f32(b.pos.x - n.x * pen * bShare);
+      b.pos.y = f32(b.pos.y - n.y * pen * bShare);
+      b.pos.z = f32(b.pos.z - n.z * pen * bShare);
 
-      // Relative velocity along contact normal (normal points from body toward player)
-      const rvx = vf[F32.VEL_X] - b.velX;
-      const rvy = vf[F32.VEL_Y] - b.velY;
-      const rvz = vf[F32.VEL_Z] - b.velZ;
-      const velAlongNormal = rvx * nx + rvy * ny + rvz * nz;
+      // Contact point p at mid-overlap along normal, lever arms r_A (player) and r_B (body)
+      const contact: Vec3 = {
+        x: f32(b.pos.x + n.x * (b.hx * Math.abs(n.x) + pen * 0.5)),
+        y: f32(b.pos.y + n.y * (b.hy * Math.abs(n.y) + pen * 0.5)),
+        z: f32(b.pos.z + n.z * (b.hz * Math.abs(n.z) + pen * 0.5)),
+      };
+      const rA: Vec3 = {
+        x: f32(contact.x - pPos.x),
+        y: f32(contact.y - pPos.y),
+        z: f32(contact.z - pPos.z),
+      };
+      const rB: Vec3 = {
+        x: f32(contact.x - b.pos.x),
+        y: f32(contact.y - b.pos.y),
+        z: f32(contact.z - b.pos.z),
+      };
 
-      if (velAlongNormal > 0) continue;
+      const rotB = quatToMat3(b.quat);
+      const { invInertia: invIB } = computeWorldInertia(rotB, b.inertiaLocal);
+
+      // v_rel = (v_B + omega_B x r_B) - (v_A + omega_A x r_A), with omega_A = 0
+      const omegaCrossRB = crossVec3(b.angVel, rB);
+      const vBAtContact: Vec3 = {
+        x: f32(b.vel.x + omegaCrossRB.x),
+        y: f32(b.vel.y + omegaCrossRB.y),
+        z: f32(b.vel.z + omegaCrossRB.z),
+      };
+      const vRel: Vec3 = {
+        x: f32(vBAtContact.x - pVel.x),
+        y: f32(vBAtContact.y - pVel.y),
+        z: f32(vBAtContact.z - pVel.z),
+      };
+
+      const vRelDotN = dotVec3(vRel, n);
+      if (vRelDotN > 0) continue;
+
+      const rBCrossN = crossVec3(rB, n);
+      const invIBTimesCross = mulMat3Vec3(invIB, rBCrossN);
+      const angTermB = dotVec3(crossVec3(invIBTimesCross, rB), n);
 
       const e = Math.max(b.restitution, this.sourceConfig.svBounce);
-      const j = (-(1 + e) * velAlongNormal) / totalInvMass;
-      const ix = j * nx;
-      const iy = j * ny;
-      const iz = j * nz;
+      const denom = pInvMass + bInvMass + angTermB;
+      if (denom <= 1e-8) continue;
 
-      vf[F32.VEL_X] = f32(vf[F32.VEL_X] + ix * pInvMass);
-      vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + iy * pInvMass);
-      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + iz * pInvMass);
+      const j = f32((-(1 + e) * vRelDotN) / denom);
+      const jn: Vec3 = { x: f32(j * n.x), y: f32(j * n.y), z: f32(j * n.z) };
 
-      b.velX = f32(b.velX - ix * bInvMass);
-      b.velY = f32(b.velY - iy * bInvMass);
-      b.velZ = f32(b.velZ - iz * bInvMass);
+      // Player A (index 0 in v_rel = v_B - v_A): v_A' = v_A - (j / m_A) * n
+      pVel.x = f32(pVel.x - (j * pInvMass) * n.x);
+      pVel.y = f32(pVel.y - (j * pInvMass) * n.y);
+      pVel.z = f32(pVel.z - (j * pInvMass) * n.z);
+
+      // Rigid body B: v_B' = v_B + (j / m_B) * n, omega_B' = omega_B + I_B^-1 * (r_B x j*n)
+      b.vel.x = f32(b.vel.x + (j * bInvMass) * n.x);
+      b.vel.y = f32(b.vel.y + (j * bInvMass) * n.y);
+      b.vel.z = f32(b.vel.z + (j * bInvMass) * n.z);
+
+      const dOmegaB = mulMat3Vec3(invIB, crossVec3(rB, jn));
+      b.angVel.x = f32(b.angVel.x + dOmegaB.x);
+      b.angVel.y = f32(b.angVel.y + dOmegaB.y);
+      b.angVel.z = f32(b.angVel.z + dOmegaB.z);
 
       this.callbacks.onRigidBodyHit?.(b.id, Math.abs(j));
     }
+
+    vf[F32.POS_X] = pPos.x;
+    vf[F32.POS_Y] = pPos.y;
+    vf[F32.POS_Z] = pPos.z;
+    vf[F32.VEL_X] = pVel.x;
+    vf[F32.VEL_Y] = pVel.y;
+    vf[F32.VEL_Z] = pVel.z;
   }
 
   /**
-   * GoldSrc/Quake ClipBoxToBrush using Minkowski plane expansion:
+   * Minkowski plane expansion:
    *   offset = |nx|*hx + |ny|*hy + |nz|*hz
+   *   d_shifted = d + offset
    */
   private clipBoxToBrush(
     brush: ConvexBrush,
@@ -456,25 +762,25 @@ export class GoldSrcPhysicsEngine {
     for (let i = 0; i < planes.length; i++) {
       const p = planes[i];
       const offset = f32(Math.abs(p.nx) * hx + Math.abs(p.ny) * hy + Math.abs(p.nz) * hz);
-      const dist = f32(p.d + offset);
-      const d1 = f32(p.nx * sX + p.ny * sY + p.nz * sZ - dist);
-      const d2 = f32(p.nx * eX + p.ny * eY + p.nz * eZ - dist);
+      const dShifted = f32(p.d + offset);
+      const s1 = f32(p.nx * sX + p.ny * sY + p.nz * sZ - dShifted);
+      const s2 = f32(p.nx * eX + p.ny * eY + p.nz * eZ - dShifted);
 
-      if (d1 > 0) startsOut = true;
-      if (d2 > 0) getsOut = true;
+      if (s1 > 0) startsOut = true;
+      if (s2 > 0) getsOut = true;
 
-      if (d1 > 0 && (d2 >= DIST_EPSILON || d2 >= d1)) return;
-      if (d1 <= 0 && d2 <= 0) continue;
+      if (s1 > 0 && (s2 >= DIST_EPSILON || s2 >= s1)) return;
+      if (s1 <= 0 && s2 <= 0) continue;
 
-      if (d1 > d2) {
-        let f = f32((d1 - DIST_EPSILON) / (d1 - d2));
+      if (s1 > s2) {
+        let f = f32((s1 - DIST_EPSILON) / (s1 - s2));
         if (f < 0) f = f32(0);
         if (f > enterFrac) {
           enterFrac = f;
           clipPlane = p;
         }
       } else {
-        let f = f32((d1 + DIST_EPSILON) / (d1 - d2));
+        let f = f32((s1 + DIST_EPSILON) / (s1 - s2));
         if (f > 1) f = f32(1);
         if (f < leaveFrac) {
           leaveFrac = f;
@@ -548,7 +854,7 @@ export class GoldSrcPhysicsEngine {
     return out;
   }
 
-  /** PM_ClipVelocity: projects incoming velocity along collision plane with bounce support */
+  /** ClipVelocity: v' = v - (v . n) * beta * n */
   private clipVelocity(
     inX: number,
     inY: number,
@@ -601,67 +907,69 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** AirAccelerate: wishspeed capped at 30.0 u/s for projection */
+  /** AirAccelerate: v_cap = min(v_wish, 30), v_add = v_cap - (v . w_hat), v_accel = min(a_air * dt * v_wish * mu, v_add) */
   private airAccelerate(
-    wishX: number,
-    wishY: number,
-    wishZ: number,
+    wishDirX: number,
+    wishDirY: number,
+    wishDirZ: number,
     wishspeed: number,
     accel: number,
+    surfaceFriction: number,
   ): void {
     const vf = this.abi.f32;
-    const wishspd = wishspeed > AIR_WISH_CAP ? AIR_WISH_CAP : wishspeed;
-    const currentspeed = f32(
-      vf[F32.VEL_X] * wishX + vf[F32.VEL_Y] * wishY + vf[F32.VEL_Z] * wishZ,
+    const wishCap = wishspeed > AIR_WISH_CAP ? AIR_WISH_CAP : wishspeed;
+    const vDotWish = f32(
+      vf[F32.VEL_X] * wishDirX + vf[F32.VEL_Y] * wishDirY + vf[F32.VEL_Z] * wishDirZ,
     );
-    const addspeed = f32(wishspd - currentspeed);
+    const addspeed = f32(wishCap - vDotWish);
     if (addspeed <= 0) return;
 
-    let accelspeed = f32(accel * wishspeed * FIXED_DT);
+    let accelspeed = f32(accel * FIXED_DT * wishspeed * surfaceFriction);
     if (accelspeed > addspeed) accelspeed = addspeed;
 
-    vf[F32.VEL_X] = f32(vf[F32.VEL_X] + accelspeed * wishX);
-    vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + accelspeed * wishY);
-    vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + accelspeed * wishZ);
+    vf[F32.VEL_X] = f32(vf[F32.VEL_X] + accelspeed * wishDirX);
+    vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + accelspeed * wishDirY);
+    vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + accelspeed * wishDirZ);
   }
 
-  /** Accelerate (Ground only) */
+  /** Accelerate: v_add = v_wish - (v . w_hat), v_accel = min(a * dt * v_wish * mu, v_add) */
   private accelerate(
-    wishX: number,
-    wishY: number,
-    wishZ: number,
+    wishDirX: number,
+    wishDirY: number,
+    wishDirZ: number,
     wishspeed: number,
     accel: number,
+    surfaceFriction: number,
   ): void {
     const vf = this.abi.f32;
-    const currentspeed = f32(
-      vf[F32.VEL_X] * wishX + vf[F32.VEL_Y] * wishY + vf[F32.VEL_Z] * wishZ,
+    const vDotWish = f32(
+      vf[F32.VEL_X] * wishDirX + vf[F32.VEL_Y] * wishDirY + vf[F32.VEL_Z] * wishDirZ,
     );
-    const addspeed = f32(wishspeed - currentspeed);
+    const addspeed = f32(wishspeed - vDotWish);
     if (addspeed <= 0) return;
 
-    let accelspeed = f32(accel * FIXED_DT * wishspeed);
+    let accelspeed = f32(accel * FIXED_DT * wishspeed * surfaceFriction);
     if (accelspeed > addspeed) accelspeed = addspeed;
 
-    vf[F32.VEL_X] = f32(vf[F32.VEL_X] + accelspeed * wishX);
-    vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + accelspeed * wishY);
-    vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + accelspeed * wishZ);
+    vf[F32.VEL_X] = f32(vf[F32.VEL_X] + accelspeed * wishDirX);
+    vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + accelspeed * wishDirY);
+    vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + accelspeed * wishDirZ);
   }
 
-  /** Friction with leading-edge drop-off detection (Ground only) */
-  private friction(): void {
+  /** Friction with sv_stopspeed, sv_friction, mu_surface, and leading-edge drop-off */
+  private friction(surfaceFriction: number): void {
     const vf = this.abi.f32;
     const vx = vf[F32.VEL_X];
     const vy = vf[F32.VEL_Y];
     const vz = vf[F32.VEL_Z];
-    const speed = f32(Math.hypot(vx, vy, vz));
-    if (speed < 0.1) return;
+    const vHoriz = f32(Math.hypot(vx, vy));
+    if (vHoriz < 0.1) return;
 
-    let friction = vf[F32.CVAR_FRICTION];
+    let kFriction = vf[F32.CVAR_FRICTION];
     const hz = this.getHullHalfZ();
 
-    const leadX = f32(vf[F32.POS_X] + (vx / speed) * 16.0);
-    const leadY = f32(vf[F32.POS_Y] + (vy / speed) * 16.0);
+    const leadX = f32(vf[F32.POS_X] + (vx / vHoriz) * 16.0);
+    const leadY = f32(vf[F32.POS_Y] + (vy / vHoriz) * 16.0);
     const leadZ = f32(vf[F32.POS_Z] - hz + 1.0);
     const edgeTrace = this.traceWorld(
       leadX,
@@ -675,20 +983,18 @@ export class GoldSrcPhysicsEngine {
       f32(1),
     );
     if (edgeTrace.fraction === 1.0) {
-      friction = f32(friction * vf[F32.CVAR_EDGEFRIC]);
+      kFriction = f32(kFriction * vf[F32.CVAR_EDGEFRIC]);
     }
 
     const stopspeed = vf[F32.CVAR_STOPSPEED];
-    const control = speed < stopspeed ? stopspeed : speed;
-    const drop = f32(control * friction * FIXED_DT);
+    const control = vHoriz < stopspeed ? stopspeed : vHoriz;
+    const drop = f32(control * kFriction * surfaceFriction * FIXED_DT);
 
-    let newspeed = f32(speed - drop);
-    if (newspeed < 0) newspeed = f32(0);
-    newspeed = f32(newspeed / speed);
+    const scale = f32(Math.max(vHoriz - drop, 0) / vHoriz);
 
-    vf[F32.VEL_X] = f32(vx * newspeed);
-    vf[F32.VEL_Y] = f32(vy * newspeed);
-    vf[F32.VEL_Z] = f32(vz * newspeed);
+    vf[F32.VEL_X] = f32(vx * scale);
+    vf[F32.VEL_Y] = f32(vy * scale);
+    vf[F32.VEL_Z] = f32(vz);
   }
 
   /**
@@ -859,7 +1165,7 @@ export class GoldSrcPhysicsEngine {
     return blocked;
   }
 
-  /** CategorizePosition: sets/clears FL_ONGROUND and detects surf ramps */
+  /** CategorizePosition: walkable when n_z >= 0.7; surf ramp when 0.05 < n_z < 0.7 */
   private categorizePosition(): void {
     const { f32: vf, i32: vi } = this.abi;
     const hz = this.getHullHalfZ();
@@ -942,11 +1248,16 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VIEW_OFS_Z] = f32(vf[F32.VIEW_OFS_Z] + (targetEye - vf[F32.VIEW_OFS_Z]) * 0.28);
   }
 
-  /** WalkMove with step-up handling */
-  private walkMove(wishX: number, wishY: number, wishspeed: number): void {
+  /** StepMove / WalkMove: compares Path A (slide) vs Path B (step up by STEPSIZE, move, drop down) */
+  private walkMove(
+    wishDirX: number,
+    wishDirY: number,
+    wishspeed: number,
+    surfaceFriction: number,
+  ): void {
     const vf = this.abi.f32;
     vf[F32.VEL_Z] = f32(0);
-    this.accelerate(wishX, wishY, f32(0), wishspeed, vf[F32.CVAR_ACCEL]);
+    this.accelerate(wishDirX, wishDirY, f32(0), wishspeed, vf[F32.CVAR_ACCEL], surfaceFriction);
     this.checkVelocity();
 
     const vx = vf[F32.VEL_X];
@@ -978,6 +1289,7 @@ export class GoldSrcPhysicsEngine {
       return;
     }
 
+    // Path A: slide
     const origVX = vf[F32.VEL_X];
     const origVY = vf[F32.VEL_Y];
     const origVZ = vf[F32.VEL_Z];
@@ -990,6 +1302,7 @@ export class GoldSrcPhysicsEngine {
     const downVZ = vf[F32.VEL_Z];
     const downDistSq = (downX - startX) ** 2 + (downY - startY) ** 2;
 
+    // Reset to start for Path B: step up -> move -> step down
     vf[F32.POS_X] = startX;
     vf[F32.POS_Y] = startY;
     vf[F32.POS_Z] = startZ;
@@ -1044,9 +1357,21 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = downVZ;
   }
 
-  /** AirMove: computes horizontal wishdir & runs airAccelerate + flyMove */
-  private airMove(wishX: number, wishY: number, wishspeed: number): number {
-    this.airAccelerate(wishX, wishY, f32(0), wishspeed, this.abi.f32[F32.CVAR_AIRACCEL]);
+  /** AirMove: runs airAccelerate + flyMove */
+  private airMove(
+    wishDirX: number,
+    wishDirY: number,
+    wishspeed: number,
+    surfaceFriction: number,
+  ): number {
+    this.airAccelerate(
+      wishDirX,
+      wishDirY,
+      f32(0),
+      wishspeed,
+      this.abi.f32[F32.CVAR_AIRACCEL],
+      surfaceFriction,
+    );
     this.checkVelocity();
     return this.flyMove();
   }
@@ -1094,7 +1419,6 @@ export class GoldSrcPhysicsEngine {
           const minSpeedXY = t.meta.minSpeedXY ?? 1500;
           const minVelZ = t.meta.minVelZ ?? 600;
 
-          // Route pusher impulse through Source basevelocity for clean movement integration
           this.baseVelX = f32(this.baseVelX + dirX * addSpeed);
           this.baseVelY = f32(this.baseVelY + dirY * addSpeed);
 
