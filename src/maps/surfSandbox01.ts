@@ -85,10 +85,10 @@ export function buildSurfSandbox01(): MapBuildResult {
     mode: 'hybrid',
     dirX: 0.92,
     dirY: 0.08,
-    dirZ: 0.38,
-    addSpeed: 520,
-    minSpeedXY: 1550,
-    minVelZ: 640,
+    dirZ: 0.36,
+    addSpeed: 400,
+    minSpeedXY: 1450,
+    minVelZ: 560,
   });
   signs.push({ x: 3300, y: -340, z: 790, yaw: Math.PI, text: 'BOOSTER 1  •  TRIG_PUSH', color: '#22d3ee', scale: 1.1 });
 
@@ -184,8 +184,7 @@ export function buildSurfSandbox01(): MapBuildResult {
     scale: 1.05,
   });
 
-  // --- 6B. MID-AIR EXPLOSION BOOST GATE (trig_exp_stage2) ---
-  // Origin sits behind & below the gate so the radial blast propels player + crates up onto Stage 3
+  // --- 6B. MID-AIR EXPLOSION BOOST GATE (rebalanced to ~1480 u/s arc onto Stage 3) ---
   const b2x = splitOriginX + d45 * (splitLen + 420);
   const b2y = splitOriginY + d45 * (splitLen + 420);
   builder.addBoxBrush('booster_2_pad', b2x - 360, b2y - 360, 40, b2x + 360, b2y + 360, 80, 'booster');
@@ -193,20 +192,19 @@ export function buildSurfSandbox01(): MapBuildResult {
     originX: b2x - d45 * 220,
     originY: b2y - d45 * 220,
     originZ: -120,
-    maxDamage: 92000,
-    radius: 1050,
-    pushScale: 1.25,
+    maxDamage: 26000,
+    radius: 900,
+    pushScale: 1.0,
     cooldownTicks: 40,
   });
-  // Safety hybrid pusher ensures minimum launch height into Stage 3
-  builder.addTrigger('trig_push_2', 'push', b2x - 360, b2y - 360, 80, b2x + 360, b2y + 360, 320, {
+  builder.addTrigger('trig_push_2', 'push', b2x - 360, b2y - 360, 80, b2x + 360, b2y + 360, 360, {
     mode: 'hybrid',
     dirX: d45,
     dirY: d45,
-    dirZ: 0.62,
-    addSpeed: 420,
-    minSpeedXY: 1650,
-    minVelZ: 880,
+    dirZ: 0.48,
+    addSpeed: 280,
+    minSpeedXY: 1480,
+    minVelZ: 980,
   });
   signs.push({
     x: b2x,
@@ -219,10 +217,9 @@ export function buildSurfSandbox01(): MapBuildResult {
   });
 
   // =========================================================================
-  // STAGE 3: HIGH-ALTITUDE APEX SWEEP, ARCHWAY DIVE & CRATE BRIDGE
+  // STAGE 3: HIGH-ALTITUDE APEX SWEEP, ARCHWAY DIVE & BLAST CANYON
   // =========================================================================
 
-  // Optional Stage 3 sky deck / catch pad before diving onto the high spine
   const s3DeckX = b2x + d45 * 1120;
   const s3DeckY = b2y + d45 * 1120;
   builder.addBoxBrush(
@@ -287,7 +284,6 @@ export function buildSurfSandbox01(): MapBuildResult {
     style: 'steep',
   });
 
-  // Overhead visual & physical archway across the dive ramp midpoint (X ≈ 12320, Y ≈ 2620)
   builder.addBoxBrush('arch_pillar_w', 11780, 2580, -40, 11840, 2660, 860, 'slate');
   builder.addBoxBrush('arch_pillar_e', 12800, 2580, -40, 12860, 2660, 860, 'slate');
   builder.addBoxBrush('arch_beam_top', 11780, 2580, 820, 12860, 2660, 890, 'steep');
@@ -301,25 +297,25 @@ export function buildSurfSandbox01(): MapBuildResult {
     scale: 1.25,
   });
 
-  // --- 10. BLAST CANYON (trig_exp_canyon + Crate Ledge) ---
+  // --- 10. BLAST CANYON (rebalanced to ~1460 u/s onto Stage 4 Slalom) ---
   builder.addBoxBrush('canyon_pad', 12260, 1340, -10, 12960, 1880, 30, 'booster');
   builder.addTrigger('trig_exp_canyon', 'explosion', 12280, 1360, 30, 12940, 1860, 620, {
     originX: 12580,
     originY: 1940,
     originZ: -140,
-    maxDamage: 105000,
-    radius: 1150,
-    pushScale: 1.3,
+    maxDamage: 28000,
+    radius: 880,
+    pushScale: 1.0,
     cooldownTicks: 38,
   });
-  builder.addTrigger('trig_push_3', 'push', 12260, 1340, 30, 12960, 1880, 310, {
+  builder.addTrigger('trig_push_3', 'push', 12260, 1340, 30, 12960, 1880, 340, {
     mode: 'hybrid',
-    dirX: -0.18,
-    dirY: -0.92,
-    dirZ: 0.52,
-    addSpeed: 460,
-    minSpeedXY: 1750,
-    minVelZ: 740,
+    dirX: -0.14,
+    dirY: -0.94,
+    dirZ: 0.34,
+    addSpeed: 260,
+    minSpeedXY: 1460,
+    minVelZ: 680,
   });
   signs.push({
     x: 12610,
@@ -386,7 +382,7 @@ export function buildSurfSandbox01(): MapBuildResult {
     scale: 1.2,
   });
 
-  // --- 14. FINAL HYPER-LAUNCH (trig_push_4 + trig_exp_finale) ---
+  // --- 14. FINAL HYPER-LAUNCH (rebalanced to land cleanly on Citadel Finish) ---
   const b4x = 10460;
   const b4y = -3960;
   builder.addBoxBrush('booster_4_pad', b4x - 380, b4y - 380, -40, b4x + 380, b4y + 380, 0, 'booster');
@@ -394,26 +390,26 @@ export function buildSurfSandbox01(): MapBuildResult {
     originX: b4x + 240,
     originY: b4y + 150,
     originZ: -180,
-    maxDamage: 108000,
-    radius: 1150,
-    pushScale: 1.3,
+    maxDamage: 26000,
+    radius: 900,
+    pushScale: 1.0,
     cooldownTicks: 40,
   });
-  builder.addTrigger('trig_push_4', 'push', b4x - 380, b4y - 380, 0, b4x + 380, b4y + 380, 320, {
+  builder.addTrigger('trig_push_4', 'push', b4x - 380, b4y - 380, 0, b4x + 380, b4y + 380, 360, {
     mode: 'hybrid',
     dirX: -0.82,
     dirY: -0.44,
-    dirZ: 0.64,
-    addSpeed: 540,
-    minSpeedXY: 1800,
-    minVelZ: 960,
+    dirZ: 0.56,
+    addSpeed: 240,
+    minSpeedXY: 1380,
+    minVelZ: 1160,
   });
   signs.push({
     x: b4x,
     y: b4y,
     z: 610,
     yaw: 0.45,
-    text: 'FINAL HYPER-LAUNCH  •  CITADEL FINISH',
+    text: 'FINAL LAUNCH  •  CITADEL FINISH',
     color: '#22d3ee',
     scale: 1.25,
   });
@@ -421,7 +417,7 @@ export function buildSurfSandbox01(): MapBuildResult {
   // --- 15. ELEVATED CITADEL FINISH PLATFORM (trig_end + Victory Crates) ---
   const finX = 9060;
   const finY = -4720;
-  const finZ = 780;
+  const finZ = 700;
   builder.addBoxBrush('finish_platform', finX - 440, finY - 440, finZ - 60, finX + 440, finY + 440, finZ, 'finish');
   builder.addBoxBrush('fin_p1', finX - 420, finY - 420, finZ, finX - 388, finY - 388, finZ + 280, 'finish');
   builder.addBoxBrush('fin_p2', finX + 388, finY - 420, finZ, finX + 420, finY - 388, finZ + 280, 'finish');
@@ -443,7 +439,6 @@ export function buildSurfSandbox01(): MapBuildResult {
   // =========================================================================
 
   builder.addBoxBrush('calib_deck', -340, 230, 940, 560, 1680, 1000, 'slate');
-  // Low curbs around the VPhysics pit so blasted crates stay mostly in-bounds
   builder.addBoxBrush('lab_wall_n', -340, 1680, 1000, 560, 1704, 1140, 'slate');
   builder.addBoxBrush('lab_wall_w', -364, 230, 1000, -340, 1704, 1140, 'slate');
   builder.addBoxBrush('lab_wall_e', 560, 1180, 1000, 584, 1704, 1140, 'slate');
@@ -487,7 +482,7 @@ export function buildSurfSandbox01(): MapBuildResult {
     });
   }
 
-  // 48u Crouch-Height Hull Calibration Tunnel (Standing 72u blocked, Ducking 36u passes)
+  // 48u Crouch-Height Hull Calibration Tunnel
   builder.addBoxBrush('crouch_wall_l', -288, 640, 1000, -264, 940, 1110, 'slate');
   builder.addBoxBrush('crouch_wall_r', -116, 640, 1000, -92, 940, 1110, 'slate');
   builder.addBoxBrush('crouch_roof', -288, 640, 1048, -92, 940, 1110, 'ramp');
@@ -501,7 +496,7 @@ export function buildSurfSandbox01(): MapBuildResult {
     scale: 0.72,
   });
 
-  // Lab Blast Pad (step into pad to detonate radial VPhysics blast across crate stack)
+  // Lab Blast Pad
   builder.addBoxBrush('lab_blast_pad', 240, 1340, 1000, 360, 1460, 1012, 'steep');
   builder.addTrigger('trig_exp_lab', 'explosion', 240, 1340, 1012, 360, 1460, 1120, {
     originX: 300,
@@ -529,26 +524,24 @@ export function buildSurfSandbox01(): MapBuildResult {
     dest: spawn,
   });
 
-  // Factory function so SurfApp can spawn & reset props cleanly
   const createRigidBodies = (): SourceRigidBody[] => [
-    // Calibration Lab: 2x2x2 pyramid of crates near the blast pad
+    // Calibration Lab crates
     createBoxRigidBody('lab_crate_1', { x: 80, y: 1420, z: 1024 }, { x: 24, y: 24, z: 24 }, 38, { restitution: 0.35 }),
     createBoxRigidBody('lab_crate_2', { x: 80, y: 1474, z: 1024 }, { x: 24, y: 24, z: 24 }, 38, { restitution: 0.35 }),
     createBoxRigidBody('lab_crate_3', { x: 134, y: 1447, z: 1024 }, { x: 24, y: 24, z: 24 }, 38, { restitution: 0.35 }),
     createBoxRigidBody('lab_crate_top', { x: 105, y: 1447, z: 1074 }, { x: 22, y: 22, z: 22 }, 28, { restitution: 0.45 }),
-    // Heavy steel physics block & bouncy lightweight cube
     createBoxRigidBody('lab_heavy_block', { x: -120, y: 1460, z: 1030 }, { x: 30, y: 30, z: 30 }, 110, { restitution: 0.15 }),
     createBoxRigidBody('lab_bouncy_cube', { x: -40, y: 1320, z: 1020 }, { x: 18, y: 18, z: 18 }, 18, { restitution: 0.78 }),
 
-    // Stage 3 Sky Deck crates (scatter them if you touch down)
+    // Stage 3 Sky Deck crates
     createBoxRigidBody('s3_crate_1', { x: s3DeckX - 70, y: s3DeckY + 70, z: 766 }, { x: 24, y: 24, z: 24 }, 35, { restitution: 0.4 }),
     createBoxRigidBody('s3_crate_2', { x: s3DeckX + 70, y: s3DeckY - 70, z: 766 }, { x: 24, y: 24, z: 24 }, 35, { restitution: 0.4 }),
 
-    // Blast Canyon crates perched on the launch pad (detonate along with you)
+    // Blast Canyon crates
     createBoxRigidBody('canyon_crate_1', { x: 12460, y: 1580, z: 58 }, { x: 26, y: 26, z: 26 }, 32, { restitution: 0.5 }),
     createBoxRigidBody('canyon_crate_2', { x: 12740, y: 1580, z: 58 }, { x: 26, y: 26, z: 26 }, 32, { restitution: 0.5 }),
 
-    // Citadel Finish Victory Stack (smash through at 2000+ u/s on landing!)
+    // Citadel Finish Victory Stack
     createBoxRigidBody('fin_crate_1', { x: finX - 50, y: finY, z: finZ + 26 }, { x: 26, y: 26, z: 26 }, 30, { restitution: 0.45 }),
     createBoxRigidBody('fin_crate_2', { x: finX + 50, y: finY, z: finZ + 26 }, { x: 26, y: 26, z: 26 }, 30, { restitution: 0.45 }),
     createBoxRigidBody('fin_crate_3', { x: finX, y: finY + 55, z: finZ + 26 }, { x: 26, y: 26, z: 26 }, 30, { restitution: 0.45 }),

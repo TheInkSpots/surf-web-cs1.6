@@ -1577,35 +1577,39 @@ export class GoldSrcPhysicsEngine {
           this.applyExplosionImpulse(origin, maxDamage, radius, pushScale, t.id);
         }
       } else if (t.type === 'push') {
+        const cooldown = (t.meta.cooldownTicks as number | undefined) ?? 22;
         const lastTick = this.triggerCooldowns.get(t.id) ?? -999;
-        if (tick - lastTick >= 22) {
+        if (tick - lastTick >= cooldown) {
           this.triggerCooldowns.set(t.id, tick);
           const dirX = t.meta.dirX ?? 1;
           const dirY = t.meta.dirY ?? 0;
-          const dirZ = t.meta.dirZ ?? 0.5;
-          const addSpeed = t.meta.addSpeed ?? 500;
-          const minSpeedXY = t.meta.minSpeedXY ?? 1500;
-          const minVelZ = t.meta.minVelZ ?? 600;
+          const dirZ = t.meta.dirZ ?? 0.42;
+          const addSpeed = t.meta.addSpeed ?? 650;
+          const minSpeedXY = t.meta.minSpeedXY ?? 1950;
+          const minVelZ = t.meta.minVelZ ?? 680;
 
-          this.baseVelX = f32(this.baseVelX + dirX * addSpeed);
-          this.baseVelY = f32(this.baseVelY + dirY * addSpeed);
+          vf[F32.VEL_X] = f32(vf[F32.VEL_X] + dirX * addSpeed);
+          vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + dirY * addSpeed);
 
-          const projectedXY = Math.hypot(vf[F32.VEL_X] + this.baseVelX, vf[F32.VEL_Y] + this.baseVelY);
-          if (projectedXY < minSpeedXY) {
-            const dirLen = Math.hypot(dirX, dirY) || 1;
-            const targetX = f32((dirX / dirLen) * minSpeedXY);
-            const targetY = f32((dirY / dirLen) * minSpeedXY);
-            this.baseVelX = f32(targetX - vf[F32.VEL_X]);
-            this.baseVelY = f32(targetY - vf[F32.VEL_Y]);
+          const dirLen = Math.hypot(dirX, dirY);
+          if (dirLen > 1e-4 && minSpeedXY > 0) {
+            const curXY = Math.hypot(vf[F32.VEL_X], vf[F32.VEL_Y]);
+            if (curXY < minSpeedXY) {
+              vf[F32.VEL_X] = f32((dirX / dirLen) * minSpeedXY);
+              vf[F32.VEL_Y] = f32((dirY / dirLen) * minSpeedXY);
+            }
           }
 
-          const nextZ = Math.max(vf[F32.VEL_Z] + this.baseVelZ + dirZ * addSpeed, minVelZ);
-          this.baseVelZ = f32(nextZ - vf[F32.VEL_Z]);
-
+          const nextZ = Math.max(vf[F32.VEL_Z] + dirZ * addSpeed, minVelZ);
+          vf[F32.VEL_Z] = f32(nextZ);
           vi[I32.FLAGS] &= ~FL_ONGROUND;
+          this.checkVelocity();
           this.callbacks.onBoost?.(t.id);
         }
       }
+
+
+
     }
   }
 }
