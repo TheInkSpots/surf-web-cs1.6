@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CS 1.6 Surf — Phase 1 Offline Movement Sandbox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <script type="module" crossorigin src="/assets/index-D3RlmxP7.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-Bz5_GcjZ.css">
+</head>
+<body>
+  <canvas id="viewport"></canvas>
+  <div id="screen-flash"></div>
+
+  <div id="hud">
+    <div id="top-left-status">
+      <div class="status-pill">
+        <span class="dot"></span>
+        <span>surf_sandbox_01 • 100Hz WASM ABI</span>
+      </div>
+      <div id="debug-pill" class="status-pill">
+        <span>DEBUG WIREFRAMES ACTIVE [F2]</span>
+      </div>
+    </div>
+
+    <div id="timer-panel">
+      <div class="timer-card">
+        <span id="timer-state" class="timer-badge">READY</span>
+        <span id="run-time">00:00.00</span>
+        <span id="run-delta" class="delta-neutral">--.--</span>
+      </div>
+      <div class="pb-strip">
+        <span>PB: <strong id="pb-display">--:--.--</strong></span>
+        <span class="top3-sep">|</span>
+        <span id="top3-display">TOP 3: --</span>
+      </div>
+    </div>
+
+    <div id="event-toast"></div>
+
+    <div id="crosshair" aria-hidden="true">
+      <div class="ch-line ch-top"></div>
+      <div class="ch-line ch-bottom"></div>
+      <div class="ch-line ch-left"></div>
+      <div class="ch-line ch-right"></div>
+      <div class="ch-line ch-dot"></div>
+    </div>
+
+    <div id="weapon-hud">
+      <div class="weapon-slot active" data-slot="1">
+        <span><span class="weapon-key">[1]</span>SCOUT</span>
+        <span class="weapon-spd" id="spd-slot-1">250 u/s</span>
+      </div>
+      <div class="weapon-slot" data-slot="2">
+        <span><span class="weapon-key">[2]</span>USP .45</span>
+        <span class="weapon-spd">250 u/s</span>
+      </div>
+      <div class="weapon-slot" data-slot="3">
+        <span><span class="weapon-key">[3]</span>KNIFE</span>
+        <span class="weapon-spd">250 u/s</span>
+      </div>
+    </div>
+
+    <div id="speed-cluster">
+      <div id="strafe-overlay">
+        <div class="key-grid">
+          <div></div>
+          <div class="keycap warn-w" id="key-w">W</div>
+          <div></div>
+          <div class="keycap" id="key-a">A</div>
+          <div class="keycap" id="key-s">S</div>
+          <div class="keycap" id="key-d">D</div>
+        </div>
+        <div class="key-aux">
+          <div class="keycap keycap-wide" id="key-jump">JUMP</div>
+          <div class="keycap keycap-wide" id="key-duck">DUCK</div>
+        </div>
+        <div class="sync-box">
+          <div class="sync-header">
+            <span>STRAFE SYNC</span>
+            <span id="sync-pct">0%</span>
+          </div>
+          <div class="sync-track"><div id="sync-bar"></div></div>
+          <div class="yaw-meter">
+            <div class="yaw-center"></div>
+            <div id="yaw-pip"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="speed-card">
+        <div class="speed-main-row">
+          <span id="speed-xy">0</span>
+          <span class="speed-unit">u/s</span>
+          <span id="speed-gain"></span>
+        </div>
+        <div class="speed-sub-row">
+          <span>3D <strong id="speed-3d">0</strong></span>
+          <span>PEAK <strong id="speed-peak">0</strong></span>
+          <span>Z <strong id="speed-z">0</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="net-graph">
+      <div class="ng-row">
+        <span>fps: <strong id="ng-fps">0</strong></span>
+        <span>tick: <strong>100 Hz</strong></span>
+      </div>
+      <div class="ng-row">
+        <span>sim: <strong id="ng-sim">0.00</strong> ms</span>
+        <span class="ng-muted">lerp: 0.0ms (WASM ABI)</span>
+      </div>
+      <div class="ng-row">
+        <span>state: <span id="ng-state" class="ng-gnd">GROUND</span></span>
+        <span>hull: <strong id="ng-hull">72u</strong></span>
+      </div>
+      <div class="ng-row">
+        <span>sync: <strong id="ng-sync">0%</strong></span>
+        <span class="ng-muted" id="ng-cvars">aa:100 mv:3500</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="menu-overlay">
+    <div class="menu-shell">
+      <div class="menu-header">
+        <div>
+          <div class="brand-title">
+            <span class="brand-tag">PHASE 1 SANDBOX</span>
+            <h1>CS 1.6 Surf — GoldSrc 100Hz Physics Core</h1>
+          </div>
+          <div class="menu-subtitle">
+            Deterministic Float32 Linear Memory ABI • Swept AABB Convex Brushes • Procedural Dev-Grid Map
+          </div>
+        </div>
+      </div>
+
+      <div class="cta-row">
+        <button id="btn-play" type="button">CLICK TO SURF (POINTER LOCK)</button>
+        <button id="btn-restart-menu" type="button">RESET RUN [R]</button>
+        <div id="lock-hint"></div>
+      </div>
+
+      <div class="tip-banner">
+        <span class="tip-badge">SURF TIP</span>
+        <span>
+          Hold <strong>D</strong> on left-side ramps, <strong>A</strong> on right-side ramps, and <strong>never hold W in mid-air!</strong>
+          Match your mouse yaw smoothly to the ramp angle to accelerate past 2500+ u/s. Turn left at spawn to test the 30°/46°/52°/60° calibration wedges &amp; 48u crouch tunnel.
+        </span>
+      </div>
+
+      <div class="menu-grid">
+        <div class="panel-box">
+          <div class="panel-title">
+            <span>Server Physics CVars</span>
+            <span id="preset-indicator" style="color: #fbbf24;">DEFAULT</span>
+          </div>
+
+          <div class="preset-group">
+            <button type="button" class="preset-btn active" id="preset-default">
+              DEFAULT SURF
+              <small>aa 100 • maxvel 3500</small>
+            </button>
+            <button type="button" class="preset-btn" id="preset-hardcore">
+              HARDCORE PRESET
+              <small>aa 150 • maxvel 4500</small>
+            </button>
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-airaccel">sv_airaccelerate</label>
+              <span class="slider-val" id="val-airaccel">100</span>
+            </div>
+            <input type="range" id="sl-airaccel" min="10" max="250" step="5" value="100" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-maxvel">sv_maxvelocity</label>
+              <span class="slider-val" id="val-maxvel">3500</span>
+            </div>
+            <input type="range" id="sl-maxvel" min="1500" max="6000" step="100" value="3500" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-gravity">sv_gravity</label>
+              <span class="slider-val" id="val-gravity">800</span>
+            </div>
+            <input type="range" id="sl-gravity" min="400" max="1200" step="20" value="800" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-sens">Mouse Sensitivity</label>
+              <span class="slider-val" id="val-sens">1.80</span>
+            </div>
+            <input type="range" id="sl-sens" min="0.4" max="5.0" step="0.05" value="1.80" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-fov">Base FOV (Scales +22° at 3000+ u/s)</label>
+              <span class="slider-val" id="val-fov">90°</span>
+            </div>
+            <input type="range" id="sl-fov" min="75" max="110" step="1" value="90" />
+          </div>
+        </div>
+
+        <div class="panel-box">
+          <div class="panel-title">
+            <span>Movement, Weapon &amp; HUD Options</span>
+          </div>
+
+          <div class="toggle-list">
+            <label class="toggle-row">
+              <span>
+                Auto-Bhop (Hold Space)
+                <small>Jump immediately on ground touch (Mouse Wheel also jumps)</small>
+              </span>
+              <input type="checkbox" id="tg-autobhop" checked />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Legacy Scout 260 u/s
+                <small>CS 1.6 classic Scout base ground speed (260 vs 250 u/s)</small>
+              </span>
+              <input type="checkbox" id="tg-scout260" />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Strafe Sync &amp; Keycap HUD
+                <small>Live yaw-to-strafe efficiency percentage &amp; key overlay</small>
+              </span>
+              <input type="checkbox" id="tg-strafe" checked />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Mapper Debug Wireframes [F2]
+                <small>Show trigger volumes (start/end/push/tp) &amp; convex hulls</small>
+              </span>
+              <input type="checkbox" id="tg-debug" />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Mute Procedural Audio
+                <small>Wind rush, ramp slide hum, booster whoosh, landing thuds</small>
+              </span>
+              <input type="checkbox" id="tg-mute" />
+            </label>
+          </div>
+
+          <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(148,163,184,0.12); font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: #94a3b8; line-height: 1.55;">
+            Fixed Hulls: <span style="color:#e2e8f0;">32×32×72u</span> (stand) / <span style="color:#e2e8f0;">32×32×36u</span> (duck)<br/>
+            Fixed Ground CVars: <span style="color:#e2e8f0;">accel=10 • fric=4 • stop=100 • edge=2</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hotkey-bar">
+        <span class="hk"><kbd>W A S D</kbd> Move / Strafe</span>
+        <span class="hk"><kbd>SPACE</kbd> / <kbd>WHEEL</kbd> Jump</span>
+        <span class="hk"><kbd>CTRL</kbd> / <kbd>C</kbd> Duck (36u Hull)</span>
+        <span class="hk"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> Weapons</span>
+        <span class="hk"><kbd>R</kbd> Restart Run</span>
+        <span class="hk"><kbd>F2</kbd> Debug Triggers</span>
+        <span class="hk"><kbd>TAB</kbd> / <kbd>ESC</kbd> Menu</span>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
