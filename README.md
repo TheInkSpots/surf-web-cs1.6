@@ -119,8 +119,59 @@ Would you like to begin Phase 1 by implementing the Wasm GoldSrc physics core an
 
 ###Recommended AI-Modular Repo Structure
 To keep LLM context windows small and prevent regressions as features grow, isolate the codebase into four strict boundaries:
+
+
 /surf-game
 ├── /packages/physics-wasm     # Rust (or C++20) deterministic 100Hz GoldSrc movement + BVH/BSP collision
 ├── /packages/shared-protocol  # Binary packet encoders/decoders (inputs, snapshots, room CVars)
 ├── /apps/client               # Vite + TypeScript + Three.js renderer, Pointer Lock, audio, HTML/CSS HUD
 └── /apps/server               # Node.js / Bun 100Hz authoritative tick server loading physics-wasm
+
+
+client:
+
+surf-sandbox/
+├── index.html
+├── package.json
+├── tsconfig.json
+└── src/
+    ├── main.ts
+    ├── styles/
+    │   └── sandbox.css
+    ├── core/
+    │   ├── constants.ts          # 100Hz tickrate, hulls, flags, buttons, state enums
+    │   ├── memoryAbi.ts          # Float32/Int32 views over WebAssembly.Memory & CVars
+    │   └── coordinates.ts        # GoldSrc (Z-up) <-> Three.js (Y-up) conversions
+    ├── physics/
+    │   ├── BrushBuilder.ts       # Convex brush plane generation, boxes & surf ramps
+    │   └── GoldSrcPhysicsEngine.ts # Swept AABB trace, PM_FlyMove, PM_AirAccelerate, triggers
+    ├── maps/
+    │   └── surfSandbox01.ts      # Ramps, boosters, 30°–60° calibration wedges, 48u tunnel
+    ├── audio/
+    │   └── SurfAudioEngine.ts    # Web Audio velocity wind, surf hum, jump/land/boost SFX
+    ├── render/
+    │   ├── textures.ts           # Procedural CanvasTexture dev-grid & hazard textures
+    │   ├── ViewmodelRig.ts       # Scout, USP .45, and Knife viewmodels with sway & bob
+    │   └── WorldRenderer.ts      # Two-pass Three.js renderer, sky dome, debug wireframes
+    ├── gameplay/
+    │   ├── InputController.ts    # Pointer lock, raw mouse look, WASD, scroll jump, hotkeys
+    │   ├── RunTracker.ts         # Timer state machine, delta tracking, localStorage Top 3
+    │   └── StrafeSyncTracker.ts  # Ring-buffer strafe sync & yaw efficiency calculator
+    ├── ui/
+    │   ├── HudController.ts      # Speedometer, timer, keycaps, strafe bar, net_graph
+    │   └── MenuController.ts     # Presets, CVar sliders, toggles, restart/play actions
+    └── app/
+        └── SurfApp.ts            # Fixed 100Hz accumulator loop & subsystem wiring
+
+1. How Phase 2 Rust/C++ Wasm Binds to PhysicsMemoryAbi
+PhysicsMemoryAbi is already designed around a shared WebAssembly.Memory buffer rather than standard JavaScript objects. Connecting a Rust or C++ physics core requires four architectural pieces:
+
+Importing Linear Memory (--import-memory): By default, a compiled Wasm module allocates and exports its own internal memory block. To share PhysicsMemoryAbi, you pass the linker flag --import-memory (in both Rust's wasm32-unknown-unknown target and C++ clang --target=wasm32) and --no-entry so the module compiles as a pure library. When JavaScript calls WebAssembly.instantiate, you pass abi.memory inside the env import object—mapping Wasm's linear address space directly onto the exact same 128 KB ArrayBuffer backing abi.f32 and abi.i32.
+
+Zero-Copy Struct Mapping at Fixed Offsets: Because abi.f32 starts at byte offset 0 (0x0000) and abi.i32 starts at byte offset 1024 (0x0400), your Rust (#[repr(C)]) or C++ (struct with 4-byte alignment) code simply casts raw pointers to those exact base addresses. When TypeScript writes CMD_FMOVE, CMD_YAW, or CVAR_AIRACCEL before a tick, Wasm's simulate_tick() reads them straight from memory on the very next instruction with zero serialization, zero FFI copying, and zero garbage collection.
+
+Static Map Arena in Upper Memory: Player state and CVars only consume the first ~1.3 KB of the 128 KB buffer (expandable to more 64 KB pages if needed for large .bsp maps). Bytes 4096 (0x1000) onward serve as a static geometry arena. When a map loads, TypeScript writes the flattened convex brush planes and trigger AABBs into that upper region once and calls an exported load_map(brush_count, trigger_count) function so Wasm caches the pointers.
+
+Event Bitmasks Instead of Re-entrant Callbacks: Calling back from Wasm into JavaScript audio or HUD functions mid-tick adds FFI overhead and complicates deterministic replay or multiplayer rollback later. Instead, reserve one Int32 slot (such as I32.EVENTS) as a bitmask for jump, land, boost, teleport, start, and finish triggers, alongside a float slot for landing impact velocity. After simulate_tick() returns, SurfApp reads and clears that bitmask to trigger SurfAudioEngine and HudController.
+
+Drop-in Engine Swap: GoldSrcPhysicsEngine in TypeScript becomes a thin wrapper around the WebAssembly.Instance exports (simulate_tick, teleport_to_spawn, load_map), while WorldRenderer, InputController, HudController, and SurfAudioEngine remain completely untouched.

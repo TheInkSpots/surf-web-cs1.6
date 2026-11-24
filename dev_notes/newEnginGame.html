@@ -1,0 +1,1790 @@
+A.hx + B.hx) * 0.92;
+if (dist >= minDist || dist < 1e-4) continue;
+
+      const nx = dx / dist, ny = dy / dist, nz = dz / dist;
+      const pen = minDist - dist;
+
+      // Positional separation
+      const totalInvM = A.invMass + B.invMass;
+      const corr = (pen * 0.5) / totalInvM;
+      A.pos.x -= nx * corr * A.invMass;
+      A.pos.y -= ny * corr * A.invMass;
+      A.pos.z -= nz * corr * A.invMass;
+      B.pos.x += nx * corr * B.invMass;
+      B.pos.y += ny * corr * B.invMass;
+      B.pos.z += nz * corr * B.invMass;
+
+      // Contact point p & lever arms r_A = p - x_A, r_B = p - x_B
+      const px = A.pos.x + nx * (A.hx * 0.9);
+      const py = A.pos.y + ny * (A.hy * 0.9);
+      const pz = A.pos.z + nz * (A.hz * 0.9);
+      const rA = new THREE.Vector3(px - A.pos.x, py - A.pos.y, pz - A.pos.z);
+      const rB = new THREE.Vector3(px - B.pos.x, py - B.pos.y, pz - B.pos.z);
+      const nVec = new THREE.Vector3(nx, ny, nz);
+
+      const vA_p = A.vel.clone().add(new THREE.Vector3().crossVectors(A.omega, rA));
+      const vB_p = B.vel.clone().add(new THREE.Vector3().crossVectors(B.omega, rB));
+      const vRel = vB_p.sub(vA_p);
+      const vRelN = vRel.dot(nVec);
+      if (vRelN >= 0) continue;
+
+      A.getWorldInvInertiaMatrix(matInvIA);
+      B.getWorldInvInertiaMatrix(matInvIB);
+
+      const rACrossN = new THREE.Vector3().crossVectors(rA, nVec);
+      const rBCrossN = new THREE.Vector3().crossVectors(rB, nVec);
+      const termA = new THREE.Vector3().crossVectors(rACrossN.clone().applyMatrix3(matInvIA), rA);
+      const termB = new THREE.Vector3().crossVectors(rBCrossN.clone().applyMatrix3(matInvIB), rB);
+      const denom = A.invMass + B.invMass + termA.add(termB).dot(nVec);
+
+      const impulseMag = -(1.0 + VPHYS_RESTITUTION) * vRelN / denom;
+      const jVec = nVec.clone().multiplyScalar(impulseMag);
+
+      A.vel.addScaledVector(jVec, -A.invMass);
+      A.omega.sub(new THREE.Vector3().crossVectors(rA, jVec).applyMatrix3(matInvIA));
+
+      B.vel.addScaledVector(jVec, B.invMass);
+      B.omega.add(new THREE.Vector3().crossVectors(rB, jVec).applyMatrix3(matInvIB));
+    }
+  }
+}
+
+/**
+ * Step all VPhysics rigid bodies via Semi-Implicit Euler Integration:
+ *   v_{t+dt} = v_t(1 - c_lin * dt) + (F_ext / m + g) * dt
+ *   x_{t+dt} = x_t + v_{t+dt} * dt
+ *   w_{t+dt} = w_t(1 - c_ang * dt) + I^-1 (tau_ext - w_t x (I w_t)) * dt
+ *   q_{t+dt} = normalize(q_t + 0.5 * [0, w_{t+dt}] (x) q_t * dt)
+ */
+function stepVPhysics(dt) {
+  const g = -memF32[C_GRAVITY];
+  const linDampFactor = Math.max(0, 1.0 - VPHYS_LIN_DAMP * dt);
+  const angDampFactor = Math.max(0, 1.0 - VPHYS_ANG_DAMP * dt);
+
+  for (let i = 0; i < rigidBodies.length; i++) {
+    const rb = rigidBodies[i];
+    rb.prevPos.copy(rb.pos);
+    rb.prevQuat.copy(rb.quat);
+
+    // Linear velocity & position integration
+    rb.vel.x = rb.vel.x * linDampFactor + (rb.forceExt.x * rb.invMass) * dt;
+    rb.vel.y = rb.vel.y * linDampFactor + (rb.forceExt.y * rb.invMass) * dt;
+    rb.vel.z = rb.vel.z * linDampFactor + (rb.forceExt.z * rb.invMass + g) * dt;
+
+    rb.pos.x += rb.vel.x * dt;
+    rb.pos.y += rb.vel.y * dt;
+    rb.pos.z += rb.vel.z * dt;
+
+    // Angular velocity with gyroscopic term: tau_ext - w x (I w)
+    rb.getWorldInertiaMatrix(_matI);
+    rb.getWorldInvInertiaMatrix(_matInvI);
+    const Iw = rb.omega.clone().applyMatrix3(_matI);
+    const gyro = new THREE.Vector3().crossVectors(rb.omega, Iw);
+    const netTorque = rb.torqueExt.clone().sub(gyro);
+    const alphaAng = netTorque.applyMatrix3(_matInvI);
+
+    rb.omega.multiplyScalar(angDampFactor).addScaledVector(alphaAng, dt);
+
+    // Quaternion derivative integration: q_{t+dt} = normalize(q_t + 0.5 * [0, w] * q_t * dt)
+    _tmpQuat.set(rb.omega.x, rb.omega.y, rb.omega.z, 0).multiply(rb.quat);
+    rb.quat.x += 0.5 * _tmpQuat.x * dt;
+    rb.quat.y += 0.5 * _tmpQuat.y * dt;
+    rb.quat.z += 0.5 * _tmpQuat.z * dt;
+    rb.quat.w += 0.5 * _tmpQuat.w * dt;
+    rb.quat.normalize();
+
+    // Clear external accumulators
+    rb.forceExt.set(0, 0, 0);
+    rb.torqueExt.set(0, 0, 0);
+
+    // Solve world brush contacts
+    solveRigidBodyWorldContacts(rb, dt);
+
+    // Respawn prop if it falls into fail floor
+    if (rb.pos.z < -180) {
+      rb.reset();
+    }
+  }
+
+  solveRigidBodyPairCollisions();
+}
+
+/**
+ * Source Radial Explosion Impulse:
+ *   I_mag = D_max * max(0, 1 - ||x_obj - x_exp|| / R) * k_push
+ *   Delta v = (I_mag / m) * (x_obj - x_exp) / ||x_obj - x_exp||
+ */
+function applyExplosionImpulse(expX, expY, expZ, dMax = 38000, radius = 380) {
+  const kPush = memF32[C_PUSHSCALE];
+  let affected = 0;
+
+  for (const rb of rigidBodies) {
+    const dx = rb.pos.x - expX;
+    const dy = rb.pos.y - expY;
+    const dz = rb.pos.z - expZ;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist >= radius) continue;
+
+    const atten = Math.max(0, 1.0 - dist / radius);
+    const iMag = dMax * atten * kPush;
+    const invDist = dist > 1e-4 ? 1.0 / dist : 0;
+    const dirX = dist > 1e-4 ? dx * invDist : 0;
+    const dirY = dist > 1e-4 ? dy * invDist : 0;
+    const dirZ = dist > 1e-4 ? dz * invDist : 1;
+
+    const dv = iMag * rb.invMass;
+    rb.vel.x += dirX * dv;
+    rb.vel.y += dirY * dv;
+    rb.vel.z += dirZ * dv + 120 * atten;
+
+    // Off-center blast torque for realistic tumble
+    rb.omega.x += (Math.random() - 0.5) * 6.0 * atten;
+    rb.omega.y += (Math.random() - 0.5) * 6.0 * atten;
+    rb.omega.z += (Math.random() - 0.5) * 6.0 * atten;
+    affected++;
+  }
+  return affected;
+}
+
+/* ============================================================================
+ * 9. TRIGGERS & DETERMINISTIC 100HZ SIMULATION TICK
+ * ============================================================================
+ */
+const pushCooldowns = new Map();
+const callbacks = {
+  onLand: null,
+  onJump: null,
+  onStartRun: null,
+  onFinishRun: null,
+  onBoost: null,
+  onTeleport: null
+};
+
+function checkTriggers() {
+  const hz = getHullHalfZ();
+  const pMinX = memF32[S_POS_X] - HULL_STAND_HX;
+  const pMaxX = memF32[S_POS_X] + HULL_STAND_HX;
+  const pMinY = memF32[S_POS_Y] - HULL_STAND_HY;
+  const pMaxY = memF32[S_POS_Y] + HULL_STAND_HY;
+  const pMinZ = memF32[S_POS_Z] - hz;
+  const pMaxZ = memF32[S_POS_Z] + hz;
+  const tick = memI32[I_TICK];
+
+  for (let i = 0; i < worldTriggers.length; i++) {
+    const t = worldTriggers[i];
+    if (
+      pMaxX < t.minX || pMinX > t.maxX ||
+      pMaxY < t.minY || pMinY > t.maxY ||
+      pMaxZ < t.minZ || pMinZ > t.maxZ
+    ) {
+      continue;
+    }
+
+    if (t.type === 'start') {
+      if (callbacks.onStartRun) callbacks.onStartRun();
+    } else if (t.type === 'end') {
+      if (callbacks.onFinishRun) callbacks.onFinishRun();
+    } else if (t.type === 'teleport') {
+      teleportToSpawn(true);
+      return;
+    } else if (t.type === 'push') {
+      const lastTick = pushCooldowns.get(t.id) || -999;
+      if (tick - lastTick >= Math.round(0.22 * currentTickrate)) {
+        pushCooldowns.set(t.id, tick);
+        const m = t.meta;
+        memF32[S_VEL_X] = f32(memF32[S_VEL_X] + m.dirX * m.addSpeed);
+        memF32[S_VEL_Y] = f32(memF32[S_VEL_Y] + m.dirY * m.addSpeed);
+        const curXY = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y]);
+        if (curXY < m.minSpeedXY) {
+          const dirLen = Math.hypot(m.dirX, m.dirY) || 1;
+          memF32[S_VEL_X] = f32((m.dirX / dirLen) * m.minSpeedXY);
+          memF32[S_VEL_Y] = f32((m.dirY / dirLen) * m.minSpeedXY);
+        }
+        const nextZ = Math.max(memF32[S_VEL_Z] + m.dirZ * m.addSpeed, m.minVelZ);
+        memF32[S_VEL_Z] = f32(nextZ);
+        memI32[I_FLAGS] &= ~FL_ONGROUND;
+        CheckVelocity();
+        if (callbacks.onBoost) callbacks.onBoost(t.id);
+      }
+    }
+  }
+}
+
+function teleportToSpawn(isFail = false) {
+  memF32[S_POS_X] = SPAWN_POS.x;
+  memF32[S_POS_Y] = SPAWN_POS.y;
+  memF32[S_POS_Z] = SPAWN_POS.z;
+  memF32[S_PREV_X] = SPAWN_POS.x;
+  memF32[S_PREV_Y] = SPAWN_POS.y;
+  memF32[S_PREV_Z] = SPAWN_POS.z;
+  memF32[S_VEL_X] = f32(0);
+  memF32[S_VEL_Y] = f32(0);
+  memF32[S_VEL_Z] = f32(0);
+  memF32[S_YAW] = SPAWN_POS.yaw;
+  memF32[S_PITCH] = SPAWN_POS.pitchDown;
+  memF32[S_ROLL] = f32(0);
+  memF32[S_VIEW_OFS_Z] = EYE_OFFSET_STAND;
+  memF32[S_PREV_VIEW_OFS_Z] = EYE_OFFSET_STAND;
+  memI32[I_FLAGS] = FL_ONGROUND;
+  memI32[I_MOVESTATE] = STATE_GROUND;
+  pushCooldowns.clear();
+  if (callbacks.onTeleport) callbacks.onTeleport(isFail);
+}
+
+/** Single deterministic simulation tick: CGameMovement + VPhysics */
+function simulateTick() {
+  memF32[S_PREV_X] = memF32[S_POS_X];
+  memF32[S_PREV_Y] = memF32[S_POS_Y];
+  memF32[S_PREV_Z] = memF32[S_POS_Z];
+  memF32[S_PREV_VIEW_OFS_Z] = memF32[S_VIEW_OFS_Z];
+
+  memI32[I_TICK] += 1;
+  memF32[S_SURF_NZ] = f32(0);
+
+  const wasOnGround = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+  const preVelZ = memF32[S_VEL_Z];
+
+  Duck();
+  CategorizePosition();
+
+  // CheckJumpButton: v_z = sqrt(2 * g * h_jump)
+  const buttons = memI32[I_BUTTONS];
+  const prevButtons = memI32[I_PREV_BUTTONS];
+  const autoBhop = memI32[I_AUTOBHOP] === 1;
+  const jumpPressed = (buttons & IN_JUMP) !== 0;
+  const freshJump = jumpPressed && (autoBhop || (prevButtons & IN_JUMP) === 0);
+
+  if (freshJump && (memI32[I_FLAGS] & FL_ONGROUND)) {
+    memI32[I_FLAGS] &= ~FL_ONGROUND;
+    memF32[S_VEL_Z] = f32(Math.sqrt(2.0 * memF32[C_GRAVITY] * memF32[C_JUMP_HEIGHT]));
+    if (callbacks.onJump) callbacks.onJump();
+  }
+
+  // 1. Half-step gravity before TryPlayerMove
+  const isGroundedNow = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+  if (!isGroundedNow) {
+    StartGravity();
+  }
+
+  // Compute AngleVectors & horizontal wish direction w_hat
+  AngleVectors(memF32[U_PITCH], memF32[U_YAW], memF32[U_ROLL]);
+  const fLen = Math.hypot(_fwdVec[0], _fwdVec[1]) || 1;
+  const rLen = Math.hypot(_rightVec[0], _rightVec[1]) || 1;
+  const fxyX = _fwdVec[0] / fLen, fxyY = _fwdVec[1] / fLen;
+  const rxyX = _rightVec[0] / rLen, rxyY = _rightVec[1] / rLen;
+
+  const fmove = memF32[U_FMOVE];
+  const smove = memF32[U_SMOVE];
+  const vMax = (memI32[I_FLAGS] & FL_DUCKING) && isGroundedNow
+    ? f32(memF32[U_MAXSPEED] * 0.34)
+    : memF32[U_MAXSPEED];
+
+  let wX = f32(fmove * fxyX + smove * rxyX);
+  let wY = f32(fmove * fxyY + smove * rxyY);
+  const wNorm = f32(Math.hypot(wX, wY));
+  const vWish = wNorm > vMax ? vMax : wNorm;
+  const wishX = wNorm > 0.0001 ? f32(wX / wNorm) : f32(0);
+  const wishY = wNorm > 0.0001 ? f32(wY / wNorm) : f32(0);
+
+  // 2. Ground vs Airborne/Surf movement
+  let flyBlocked = 0;
+  if (isGroundedNow) {
+    Friction();
+    WalkMove(wishX, wishY, vWish);
+  } else {
+    flyBlocked = AirMove(wishX, wishY, vWish);
+  }
+
+  // 3. Second half of gravity integration
+  CategorizePosition();
+  const landedNow = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+  if (!landedNow) {
+    FinishGravity();
+  } else {
+    memF32[S_VEL_Z] = f32(0);
+    if (!wasOnGround && preVelZ < -140 && callbacks.onLand) {
+      callbacks.onLand(Math.abs(preVelZ));
+    }
+  }
+
+  CheckVelocity();
+
+  if (landedNow) {
+    memI32[I_MOVESTATE] = STATE_GROUND;
+  } else if ((flyBlocked & 4) || (memF32[S_SURF_NZ] > 0.05 && memF32[S_SURF_NZ] < SURF_NORMAL_Z)) {
+    memI32[I_MOVESTATE] = STATE_SURF;
+  } else {
+    memI32[I_MOVESTATE] = STATE_AIR;
+  }
+
+  checkTriggers();
+
+  // Step VPhysics rigid-body solver in lockstep
+  stepVPhysics(FIXED_DT);
+
+  memI32[I_PREV_BUTTONS] = buttons;
+}
+
+/* ============================================================================
+ * 10. PROCEDURAL WEB AUDIO API SOUND ENGINE
+ * ============================================================================
+ */
+class SurfAudioEngine {
+  constructor() {
+    this.ctx = null;
+    this.muted = false;
+    this.ready = false;
+    this.windGain = null;
+    this.windFilter = null;
+    this.slideGain = null;
+    this.slideFilter = null;
+  }
+
+  unlock() {
+    if (this.ready) {
+      if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+      return;
+    }
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      this.ctx = new AudioCtx();
+
+      const len = this.ctx.sampleRate * 2;
+      const noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const data = noiseBuf.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      this.noiseBuf = noiseBuf;
+
+      const windSrc = this.ctx.createBufferSource();
+      windSrc.buffer = noiseBuf;
+      windSrc.loop = true;
+      this.windFilter = this.ctx.createBiquadFilter();
+      this.windFilter.type = 'bandpass';
+      this.windFilter.frequency.value = 320;
+      this.windFilter.Q.value = 1.3;
+      this.windGain = this.ctx.createGain();
+      this.windGain.gain.value = 0;
+      windSrc.connect(this.windFilter).connect(this.windGain).connect(this.ctx.destination);
+      windSrc.start();
+
+      const slideSrc = this.ctx.createBufferSource();
+      slideSrc.buffer = noiseBuf;
+      slideSrc.loop = true;
+      this.slideFilter = this.ctx.createBiquadFilter();
+      this.slideFilter.type = 'bandpass';
+      this.slideFilter.frequency.value = 220;
+      this.slideFilter.Q.value = 4.5;
+      this.slideGain = this.ctx.createGain();
+      this.slideGain.gain.value = 0;
+      slideSrc.connect(this.slideFilter).connect(this.slideGain).connect(this.ctx.destination);
+      slideSrc.start();
+
+      this.ready = true;
+    } catch (err) {
+      console.warn('Web Audio skipped:', err);
+    }
+  }
+
+  setMuted(m) {
+    this.muted = m;
+    if (m && this.ready) {
+      const t = this.ctx.currentTime;
+      this.windGain.gain.setTargetAtTime(0, t, 0.04);
+      this.slideGain.gain.setTargetAtTime(0, t, 0.04);
+    }
+  }
+
+  updateContinuous(speed3D, isSurfing, isPaused) {
+    if (!this.ready || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    if (this.muted || isPaused) {
+      this.windGain.gain.setTargetAtTime(0, t, 0.05);
+      this.slideGain.gain.setTargetAtTime(0, t, 0.05);
+      return;
+    }
+    const windNorm = Math.max(0, Math.min(1, (speed3D - 480) / 3020));
+    this.windGain.gain.setTargetAtTime(windNorm * windNorm * 0.19, t, 0.06);
+    this.windFilter.frequency.setTargetAtTime(260 + windNorm * 1450, t, 0.06);
+
+    const slideTarget = isSurfing ? Math.min(0.11, 0.025 + windNorm * 0.09) : 0;
+    this.slideGain.gain.setTargetAtTime(slideTarget, t, 0.04);
+    this.slideFilter.frequency.setTargetAtTime(160 + windNorm * 420, t, 0.05);
+  }
+
+  playLand(impactSpeed) {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const intensity = Math.min(1, Math.max(0.18, impactSpeed / 650));
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(105, t);
+    osc.frequency.exponentialRampToValueAtTime(38, t + 0.09);
+    gain.gain.setValueAtTime(0.24 * intensity, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.11);
+    osc.connect(gain).connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.12);
+  }
+
+  playJump() {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(120, t);
+    osc.frequency.exponentialRampToValueAtTime(210, t + 0.055);
+    gain.gain.setValueAtTime(0.06, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.065);
+    osc.connect(gain).connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.07);
+  }
+
+  playExplosion() {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(920, t);
+    filter.frequency.exponentialRampToValueAtTime(95, t + 0.35);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.28, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.38);
+    src.connect(filter).connect(gain).connect(this.ctx.destination);
+    src.start(t);
+    src.stop(t + 0.4);
+  }
+
+  playBoost() {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.Q.value = 2.2;
+    filter.frequency.setValueAtTime(280, t);
+    filter.frequency.exponentialRampToValueAtTime(2400, t + 0.28);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.001, t);
+    gain.gain.linearRampToValueAtTime(0.22, t + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.34);
+    src.connect(filter).connect(gain).connect(this.ctx.destination);
+    src.start(t);
+    src.stop(t + 0.36);
+  }
+
+  playTeleport() {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(780, t);
+    osc.frequency.exponentialRampToValueAtTime(160, t + 0.14);
+    osc.frequency.exponentialRampToValueAtTime(520, t + 0.26);
+    const filt = this.ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = 1600;
+    gain.gain.setValueAtTime(0.11, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+    osc.connect(filt).connect(gain).connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.3);
+  }
+
+  playWeaponSwitch() {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(520, t);
+    osc.frequency.exponentialRampToValueAtTime(260, t + 0.045);
+    gain.gain.setValueAtTime(0.045, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    osc.connect(gain).connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.055);
+  }
+
+  playStartBeep() {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(660, t);
+    osc.frequency.setValueAtTime(880, t + 0.06);
+    gain.gain.setValueAtTime(0.09, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+    osc.connect(gain).connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.18);
+  }
+
+  playFinishChime() {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1046.5];
+    notes.forEach((freq, idx) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      const start = t + idx * 0.065;
+      osc.frequency.setValueAtTime(freq, start);
+      gain.gain.setValueAtTime(0.11, start);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.42);
+      osc.connect(gain).connect(this.ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.45);
+    });
+  }
+}
+
+const audio = new SurfAudioEngine();
+
+/* ============================================================================
+ * 11. THREE.JS WORLD, VPHYSICS PROPS & EXPLOSION VISUALS
+ * ============================================================================
+ */
+const canvas = document.getElementById('viewport');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight, false);
+renderer.autoClear = false;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.08;
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x0c1322, 0.000105);
+
+let baseFov = 90;
+const camera = new THREE.PerspectiveCamera(baseFov, window.innerWidth / window.innerHeight, 2, 26000);
+camera.up.set(0, 1, 0);
+
+const vmScene = new THREE.Scene();
+const vmCamera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.05, 20);
+vmScene.add(new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 1.25));
+const vmKeyLight = new THREE.DirectionalLight(0xfff7ed, 1.4);
+vmKeyLight.position.set(2, 4, 3);
+vmScene.add(vmKeyLight);
+
+const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x1e293b, 0.85);
+scene.add(hemiLight);
+const sunLight = new THREE.DirectionalLight(0xfffbeb, 1.35);
+sunLight.position.set(2800, 4600, 1900);
+scene.add(sunLight);
+const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.42);
+fillLight.position.set(-2200, 1400, -2600);
+scene.add(fillLight);
+
+function makeDevGridTexture(baseHex, majorHex, minorHex, accentHex, labelText = '64', chevrons = false) {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 256;
+  const g = c.getContext('2d');
+
+  g.fillStyle = baseHex;
+  g.fillRect(0, 0, 256, 256);
+
+  const grad = g.createLinearGradient(0, 0, 256, 256);
+  grad.addColorStop(0, 'rgba(255,255,255,0.08)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.14)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 256, 256);
+
+  g.strokeStyle = minorHex;
+  g.lineWidth = 1;
+  for (let i = 0; i <= 256; i += 32) {
+    g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 256); g.stroke();
+    g.beginPath(); g.moveTo(0, i); g.lineTo(256, i); g.stroke();
+  }
+
+  if (chevrons) {
+    g.strokeStyle = accentHex;
+    g.lineWidth = 10;
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    for (let y = 40; y < 256; y += 84) {
+      g.beginPath();
+      g.moveTo(46, y + 36);
+      g.lineTo(128, y);
+      g.lineTo(210, y + 36);
+      g.stroke();
+    }
+  }
+
+  g.strokeStyle = majorHex;
+  g.lineWidth = 4;
+  g.strokeRect(2, 2, 252, 252);
+
+  g.fillStyle = accentHex;
+  g.fillRect(0, 0, 14, 4); g.fillRect(0, 0, 4, 14);
+  g.fillRect(242, 252, 14, 4); g.fillRect(252, 242, 4, 14);
+
+  if (labelText && !chevrons) {
+    g.fillStyle = 'rgba(255,255,255,0.24)';
+    g.font = '700 22px JetBrains Mono, monospace';
+    g.fillText(labelText, 16, 32);
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  return tex;
+}
+
+function makeHazardTexture() {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#0f131a';
+  g.fillRect(0, 0, 256, 256);
+  g.fillStyle = '#b45309';
+  for (let i = -256; i < 512; i += 64) {
+    g.beginPath();
+    g.moveTo(i, 0);
+    g.lineTo(i + 28, 0);
+    g.lineTo(i - 228, 256);
+    g.lineTo(i - 256, 256);
+    g.closePath();
+    g.fill();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(60, 45);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const boosterTex = makeDevGridTexture('#083344', '#22d3ee', 'rgba(34,211,238,0.25)', 'rgba(103,232,249,0.9)', '', true);
+const mats = {
+  slate:     new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#1e2634', '#475569', 'rgba(148,163,184,0.12)', '#64748b', '64'), roughness: 0.72, metalness: 0.12 }),
+  ice:       new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#0c4a6e', '#7dd3fc', 'rgba(186,230,253,0.25)', '#38bdf8', 'ICE'), roughness: 0.15, metalness: 0.3 }),
+  rampFace:  new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#c2590c', '#fed7aa', 'rgba(255,237,213,0.18)', '#fbbf24', 'SURF'), roughness: 0.42, metalness: 0.14 }),
+  steepFace: new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#b91c1c', '#fecaca', 'rgba(254,202,202,0.18)', '#fb923c', '60°'), roughness: 0.38, metalness: 0.16 }),
+  walkable:  new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#0f766e', '#99f6e4', 'rgba(153,246,228,0.18)', '#2dd4bf', '30°'), roughness: 0.55, metalness: 0.1 }),
+  booster:   new THREE.MeshStandardMaterial({ map: boosterTex, emissive: 0x0891b2, emissiveIntensity: 0.65, roughness: 0.25, metalness: 0.2 }),
+  finish:    new THREE.MeshStandardMaterial({ map: makeDevGridTexture('#065f46', '#6ee7b7', 'rgba(110,231,183,0.2)', '#34d399', 'FIN'), emissive: 0x059669, emissiveIntensity: 0.35, roughness: 0.45, metalness: 0.15 }),
+};
+
+function buildSkyDome() {
+  const skyGeo = new THREE.SphereGeometry(18000, 32, 20);
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    uniforms: {
+      topColor:     { value: new THREE.Color(0x070b14) },
+      midColor:     { value: new THREE.Color(0x162944) },
+      horizonColor: { value: new THREE.Color(0x2d3a4b) },
+      bottomColor:  { value: new THREE.Color(0x080a10) }
+    },
+    vertexShader: `
+      varying vec3 vWorldPos;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 topColor;
+      uniform vec3 midColor;
+      uniform vec3 horizonColor;
+      uniform vec3 bottomColor;
+      varying vec3 vWorldPos;
+      void main() {
+        float h = normalize(vWorldPos).y;
+        vec3 col = h >= 0.0
+          ? mix(horizonColor, mix(midColor, topColor, smoothstep(0.08, 0.65, h)), smoothstep(0.0, 0.25, h))
+          : mix(horizonColor, bottomColor, smoothstep(0.0, -0.35, h));
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `
+  });
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+}
+buildSkyDome();
+
+const debugGroup = new THREE.Group();
+debugGroup.visible = false;
+scene.add(debugGroup);
+
+const worldMeshes = [];
+
+function buildVisualWorldFromBrushes() {
+  const tileScale = 1 / 128;
+
+  for (const brush of worldBrushes) {
+    const buckets = new Map();
+
+    for (const face of brush.renderFaces) {
+      const isSurfSlope = face.nz > 0.05 && face.nz < SURF_NORMAL_Z;
+      let matKey = 'slate';
+      if (brush.style === 'booster') matKey = 'booster';
+      else if (brush.style === 'finish') matKey = 'finish';
+      else if (brush.style === 'ice') matKey = 'ice';
+      else if (brush.style === 'walkable' && face.nz > 0.4 && face.nz < 0.98) matKey = 'walkable';
+      else if (brush.style === 'steep' && isSurfSlope) matKey = 'steepFace';
+      else if (brush.style === 'ramp' && isSurfSlope) matKey = 'rampFace';
+
+      if (!buckets.has(matKey)) buckets.set(matKey, { pos: [], norm: [], uv: [] });
+      const b = buckets.get(matKey);
+
+      const n3 = new THREE.Vector3(face.nx, face.nz, -face.ny).normalize();
+      const upRef = Math.abs(n3.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+      const uAxis = new THREE.Vector3().crossVectors(upRef, n3).normalize();
+      const vAxis = new THREE.Vector3().crossVectors(n3, uAxis).normalize();
+
+      const vs = face.verts;
+      for (let i = 1; i < vs.length - 1; i++) {
+        const tri = [vs[0], vs[i], vs[i + 1]];
+        for (const v of tri) {
+          const tx = v[0], ty = v[2], tz = -v[1];
+          b.pos.push(tx, ty, tz);
+          b.norm.push(n3.x, n3.y, n3.z);
+          b.uv.push(
+            (tx * uAxis.x + ty * uAxis.y + tz * uAxis.z) * tileScale,
+            (tx * vAxis.x + ty * vAxis.y + tz * vAxis.z) * tileScale
+          );
+        }
+      }
+    }
+
+    for (const [matKey, data] of buckets.entries()) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(data.pos, 3));
+      geo.setAttribute('normal', new THREE.Float32BufferAttribute(data.norm, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(data.uv, 2));
+      const mesh = new THREE.Mesh(geo, mats[matKey]);
+      scene.add(mesh);
+      worldMeshes.push(mesh);
+
+      const edges = new THREE.EdgesGeometry(geo, 24);
+      const edgeColor = matKey === 'rampFace' ? 0xfdba74 : (matKey === 'booster' ? 0x67e8f9 : 0x475569);
+      const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: 0.35 }));
+      scene.add(line);
+
+      const dbgWire = new THREE.LineSegments(
+        edges,
+        new THREE.LineBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.9 })
+      );
+      debugGroup.add(dbgWire);
+    }
+  }
+
+  const failGeo = new THREE.PlaneGeometry(18000, 13000);
+  failGeo.rotateX(-Math.PI / 2);
+  const failMat = new THREE.MeshBasicMaterial({ map: makeHazardTexture(), transparent: true, opacity: 0.75 });
+  const failMesh = new THREE.Mesh(failGeo, failMat);
+  failMesh.position.set(5200, -200, -1400);
+  scene.add(failMesh);
+
+  for (const trig of worldTriggers) {
+    const sx = trig.maxX - trig.minX;
+    const sy = trig.maxY - trig.minY;
+    const sz = trig.maxZ - trig.minZ;
+    const cx = (trig.minX + trig.maxX) * 0.5;
+    const cy = (trig.minY + trig.maxY) * 0.5;
+    const cz = (trig.minZ + trig.maxZ) * 0.5;
+
+    const boxGeo = new THREE.BoxGeometry(sx, sz, sy);
+    const posThree = gsToThree(cx, cy, cz);
+
+    if (trig.type === 'start') {
+      const gate = new THREE.Mesh(boxGeo, new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false }));
+      gate.position.copy(posThree);
+      scene.add(gate);
+    } else if (trig.type === 'push') {
+      const boostField = new THREE.Mesh(boxGeo, new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }));
+      boostField.position.copy(posThree);
+      scene.add(boostField);
+      const wire = new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), new THREE.LineBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.55 }));
+      wire.position.copy(posThree);
+      scene.add(wire);
+    } else if (trig.type === 'end') {
+      const endField = new THREE.Mesh(boxGeo, new THREE.MeshBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }));
+      endField.position.copy(posThree);
+      scene.add(endField);
+    }
+
+    const dbgColors = { start: 0x10b981, end: 0x4ade80, push: 0x22d3ee, teleport: 0xf43f5e };
+    const col = dbgColors[trig.type] || 0xffffff;
+    const dbgMesh = new THREE.Mesh(
+      boxGeo,
+      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: trig.type === 'teleport' ? 0.12 : 0.28, side: THREE.DoubleSide, depthWrite: false })
+    );
+    dbgMesh.position.copy(posThree);
+    debugGroup.add(dbgMesh);
+
+    const dbgEdges = new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), new THREE.LineBasicMaterial({ color: col }));
+    dbgEdges.position.copy(posThree);
+    debugGroup.add(dbgEdges);
+  }
+
+  const pillarMat = new THREE.MeshStandardMaterial({ color: 0x131c2e, roughness: 0.9, metalness: 0.1 });
+  const pillarCoords = [
+    [900, 1200], [2300, -1450], [3700, 900], [4900, -1650],
+    [6600, -900], [5600, 1750], [8200, 500], [7400, 3200], [10400, 2900]
+  ];
+  for (const [px, py] of pillarCoords) {
+    const pMesh = new THREE.Mesh(new THREE.BoxGeometry(220, 2600, 220), pillarMat);
+    pMesh.position.copy(gsToThree(px, py, 400));
+    scene.add(pMesh);
+  }
+}
+
+function createRigidBodyMesh(rb) {
+  let geo;
+  if (rb.shape === 'barrel') {
+    geo = new THREE.CylinderGeometry(rb.hx, rb.hx, rb.hz * 2, 16);
+  } else {
+    geo = new THREE.BoxGeometry(rb.hx * 2, rb.hz * 2, rb.hy * 2);
+  }
+  const mat = new THREE.MeshStandardMaterial({
+    color: rb.colorHex,
+    roughness: 0.42,
+    metalness: 0.28
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geo),
+    new THREE.LineBasicMaterial({ color: 0xf8fafc, transparent: true, opacity: 0.45 })
+  );
+  mesh.add(edges);
+
+  const dbgBox = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(rb.hx * 2, rb.hz * 2, rb.hy * 2)),
+    new THREE.LineBasicMaterial({ color: 0x22d3ee })
+  );
+  mesh.add(dbgBox);
+  rb.debugWire = dbgBox;
+  dbgBox.visible = debugGroup.visible;
+
+  rb.mesh = mesh;
+  scene.add(mesh);
+}
+
+function buildRigidBodyMeshes() {
+  for (const rb of rigidBodies) {
+    createRigidBodyMesh(rb);
+  }
+}
+
+function buildWorldSigns() {
+  for (const s of worldSigns) {
+    const c = document.createElement('canvas');
+    c.width = 640;
+    c.height = 112;
+    const g = c.getContext('2d');
+    g.fillStyle = 'rgba(9, 13, 21, 0.84)';
+    g.fillRect(6, 6, 628, 100);
+    g.strokeStyle = s.color;
+    g.lineWidth = 5;
+    g.strokeRect(6, 6, 628, 100);
+    g.fillStyle = s.color;
+    g.font = '800 32px JetBrains Mono, monospace';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(s.text, 320, 58);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
+    const geo = new THREE.PlaneGeometry(280 * s.scale, 49 * s.scale);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(gsToThree(s.x, s.y, s.z));
+    mesh.rotation.y = s.yaw - Math.PI * 0.5;
+    scene.add(mesh);
+  }
+}
+
+buildVisualWorldFromBrushes();
+buildRigidBodyMeshes();
+buildWorldSigns();
+
+// Explosion shockwave ring visual pool
+const explosionRings = [];
+function spawnExplosionVisual(threePos) {
+  const geo = new THREE.RingGeometry(8, 22, 32);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(threePos);
+  mesh.lookAt(camera.position);
+  scene.add(mesh);
+  explosionRings.push({ mesh, age: 0 });
+}
+
+/* ============================================================================
+ * 12. FIRST-PERSON VIEWMODELS & VPHYSICS INTERACTION
+ * ============================================================================
+ */
+const vmRoot = new THREE.Group();
+vmScene.add(vmRoot);
+
+const gunDarkMat   = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.45, metalness: 0.55 });
+const gunBodyMat   = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.58, metalness: 0.25 });
+const gunSteelMat  = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.28, metalness: 0.85 });
+const gunAccentMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.4, metalness: 0.65 });
+const lensMat      = new THREE.MeshStandardMaterial({ color: 0x0ea5e9, emissive: 0x0284c7, emissiveIntensity: 0.6, roughness: 0.1 });
+const tritiumMat   = new THREE.MeshBasicMaterial({ color: 0x4ade80 });
+
+const vmScout = new THREE.Group();
+{
+  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.14, 0.72), gunBodyMat);
+  stock.position.set(0, -0.04, 0.08);
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.95, 10), gunDarkMat);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 0.02, -0.45);
+  const scopeTube = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.028, 0.42, 12), gunDarkMat);
+  scopeTube.rotation.x = Math.PI / 2;
+  scopeTube.position.set(0, 0.11, -0.14);
+  const scopeLens = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.02, 12), lensMat);
+  scopeLens.rotation.x = Math.PI / 2;
+  scopeLens.position.set(0, 0.11, 0.07);
+  const bolt = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.022, 0.022), gunSteelMat);
+  bolt.position.set(0.06, 0.02, 0.02);
+  vmScout.add(stock, barrel, scopeTube, scopeLens, bolt);
+  vmScout.position.set(0.32, -0.27, -0.58);
+  vmScout.rotation.set(0.03, 0.06, 0);
+}
+
+const vmUsp = new THREE.Group();
+{
+  const slide = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.085, 0.34), gunDarkMat);
+  slide.position.set(0, 0.03, -0.05);
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(0.068, 0.06, 0.31), gunBodyMat);
+  frame.position.set(0, -0.03, -0.03);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.064, 0.21, 0.095), gunBodyMat);
+  grip.position.set(0, -0.13, 0.08);
+  grip.rotation.x = 0.24;
+  const suppressor = new THREE.Mesh(new THREE.CylinderGeometry(0.027, 0.027, 0.34, 12), gunDarkMat);
+  suppressor.rotation.x = Math.PI / 2;
+  suppressor.position.set(0, 0.035, -0.38);
+  const sightL = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.012, 0.012), tritiumMat);
+  sightL.position.set(-0.022, 0.08, 0.10);
+  const sightR = sightL.clone(); sightR.position.x = 0.022;
+  vmUsp.add(slide, frame, grip, suppressor, sightL, sightR);
+  vmUsp.position.set(0.28, -0.25, -0.55);
+  vmUsp.rotation.set(0.02, 0.08, 0);
+}
+
+const vmKnife = new THREE.Group();
+{
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.024, 0.24, 8), gunDarkMat);
+  handle.position.set(0, -0.12, 0);
+  const guard = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.022, 0.04), gunAccentMat);
+  guard.position.set(0, 0.0, 0);
+  const bladeGeo = new THREE.ConeGeometry(0.042, 0.38, 4);
+  bladeGeo.scale(0.32, 1.0, 1.0);
+  const blade = new THREE.Mesh(bladeGeo, gunSteelMat);
+  blade.position.set(0, 0.19, 0.005);
+  vmKnife.add(handle, guard, blade);
+  vmKnife.position.set(0.30, -0.24, -0.54);
+  vmKnife.rotation.set(-0.72, 0.35, 0.42);
+}
+
+const viewmodels = { 1: vmScout, 2: vmUsp, 3: vmKnife };
+vmRoot.add(vmScout, vmUsp, vmKnife);
+vmUsp.visible = false;
+vmKnife.visible = false;
+
+let vmDeployT = 1.0;
+let vmRecoilZ = 0;
+let vmSwayX = 0, vmSwayY = 0;
+let vmBobPhase = 0;
+
+function getActiveWeaponSpeed() {
+  const slot = memI32[I_WEAPON];
+  if (slot === 1 && memI32[I_LEGACY_SCOUT] === 1) return f32(260.0);
+  return f32(250.0);
+}
+
+function selectWeapon(slot) {
+  if (slot < 1 || slot > 3) return;
+  if (memI32[I_WEAPON] === slot) return;
+  memI32[I_WEAPON] = slot;
+  vmDeployT = 0.0;
+  for (const k of [1, 2, 3]) viewmodels[k].visible = (k === slot);
+  document.querySelectorAll('.weapon-slot').forEach(el => {
+    el.classList.toggle('active', Number(el.dataset.slot) === slot);
+  });
+  audio.playWeaponSwitch();
+}
+
+const raycaster = new THREE.Raycaster();
+function triggerVPhysicsBlast() {
+  vmRecoilZ = 0.09;
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const propMeshes = rigidBodies.map(rb => rb.mesh);
+  const hits = raycaster.intersectObjects([...worldMeshes, ...propMeshes], false);
+  let hitThree;
+  if (hits.length > 0 && hits[0].distance < 2800) {
+    hitThree = hits[0].point;
+  } else {
+    hitThree = camera.position.clone().addScaledVector(raycaster.ray.direction, 420);
+  }
+
+  const gsHit = threeToGs(hitThree.x, hitThree.y, hitThree.z);
+  const slot = memI32[I_WEAPON];
+  const dMax = slot === 1 ? 46000 : (slot === 2 ? 26000 : 18000);
+  const rad = slot === 1 ? 420 : (slot === 2 ? 260 : 180);
+
+  const hitCount = applyExplosionImpulse(gsHit[0], gsHit[1], gsHit[2], dMax, rad);
+  spawnExplosionVisual(hitThree);
+  audio.playExplosion();
+  if (hitCount > 0) {
+    showToast(`VPHYSICS EXPLOSION IMPULSE (${hitCount} BODIES)`, 'rgba(245,158,11,0.65)');
+  }
+}
+
+function spawnDynamicPropInFront() {
+  AngleVectors(viewPitchDown, viewYaw, 0);
+  const px = memF32[S_POS_X] + _fwdVec[0] * 115;
+  const py = memF32[S_POS_Y] + _fwdVec[1] * 115;
+  const pz = memF32[S_POS_Z] + memF32[S_VIEW_OFS_Z] + _fwdVec[2] * 115;
+  const isBarrel = Math.random() > 0.5;
+  const rb = new RigidBody(
+    `dyn_${rigidBodies.length}`,
+    isBarrel ? 'barrel' : 'crate',
+    [px, py, pz],
+    isBarrel ? [16, 16, 26] : [20, 20, 20],
+    isBarrel ? 40 : 32,
+    isBarrel ? 0x0ea5e9 : 0xf59e0b
+  );
+  rb.vel.set(_fwdVec[0] * 260, _fwdVec[1] * 260, _fwdVec[2] * 260 + 90);
+  createRigidBodyMesh(rb);
+  rigidBodies.push(rb);
+  document.getElementById('ng-vphys').textContent = `vphys: ${rigidBodies.length} bodies`;
+  showToast(`SPAWNED VPHYSICS ${isBarrel ? 'BARREL' : 'CRATE'}`, 'rgba(34,211,238,0.6)');
+}
+
+/* ============================================================================
+ * 13. RUN TIMER, PERSONAL BESTS & STRAFE SYNC TRACKER
+ * ============================================================================
+ */
+const STORAGE_KEY = 'cs16_surf_sandbox_01_runs_v1';
+let topRuns = [];
+try {
+  const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  if (Array.isArray(saved)) topRuns = saved.filter(n => typeof n === 'number' && n > 0).slice(0, 3);
+} catch (_) { topRuns = []; }
+
+const runTimer = {
+  state: 'READY',
+  startTick: 0,
+  elapsedSec: 0,
+  lastFinishDelta: null
+};
+
+let sessionPeakSpeed = 0;
+let prevHorizSpeed = 0;
+
+const SYNC_WINDOW = 140;
+const syncRing = new Uint8Array(SYNC_WINDOW);
+let syncHead = 0;
+let syncCount = 0;
+let syncHits = 0;
+let accumYawDeltaTick = 0;
+let smoothYawVisual = 0;
+
+function formatTime(sec) {
+  const clamped = Math.max(0, sec);
+  const mins = Math.floor(clamped / 60);
+  const secs = Math.floor(clamped % 60);
+  const cs = Math.floor((clamped * 100) % 100);
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
+
+function updatePbDisplay() {
+  const pbEl = document.getElementById('pb-display');
+  const top3El = document.getElementById('top3-display');
+  if (topRuns.length === 0) {
+    pbEl.textContent = '--:--.--';
+    top3El.textContent = 'TOP 3: --';
+  } else {
+    pbEl.textContent = formatTime(topRuns[0]);
+    top3El.textContent = 'TOP 3: ' + topRuns.map((t, i) => `#${i + 1} ${formatTime(t)}`).join('  •  ');
+  }
+}
+updatePbDisplay();
+
+let toastTimer = null;
+const elToast = document.getElementById('event-toast');
+const elFlash = document.getElementById('screen-flash');
+
+function showToast(msg, borderColor = 'rgba(34,211,238,0.5)') {
+  elToast.textContent = msg;
+  elToast.style.borderColor = borderColor;
+  elToast.classList.add('visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => elToast.classList.remove('visible'), 2200);
+}
+
+function flashScreen(colorRgba) {
+  elFlash.style.background = `radial-gradient(circle, transparent 35%, ${colorRgba} 100%)`;
+  elFlash.style.opacity = '1';
+  requestAnimationFrame(() => {
+    setTimeout(() => { elFlash.style.opacity = '0'; }, 60);
+  });
+}
+
+callbacks.onLand = (impact) => audio.playLand(impact);
+callbacks.onJump = () => audio.playJump();
+callbacks.onBoost = () => {
+  audio.playBoost();
+  flashScreen('rgba(34, 211, 238, 0.35)');
+};
+callbacks.onTeleport = (isFail) => {
+  runTimer.state = 'READY';
+  runTimer.elapsedSec = 0;
+  runTimer.lastFinishDelta = null;
+  if (isFail) {
+    audio.playTeleport();
+    flashScreen('rgba(251, 113, 133, 0.42)');
+    showToast('FAIL ZONE — TELEPORTED TO SPAWN', 'rgba(251,113,133,0.6)');
+  }
+};
+callbacks.onStartRun = () => {
+  if (runTimer.state !== 'RUNNING') {
+    runTimer.state = 'RUNNING';
+    runTimer.startTick = memI32[I_TICK];
+    runTimer.elapsedSec = 0;
+    runTimer.lastFinishDelta = null;
+    audio.playStartBeep();
+    showToast('RUN STARTED — GO!', 'rgba(52,211,153,0.6)');
+  }
+};
+callbacks.onFinishRun = () => {
+  if (runTimer.state !== 'RUNNING') return;
+  runTimer.state = 'FINISHED';
+  const finishSec = (memI32[I_TICK] - runTimer.startTick) * FIXED_DT;
+  runTimer.elapsedSec = finishSec;
+  const oldPb = topRuns.length > 0 ? topRuns[0] : null;
+  runTimer.lastFinishDelta = oldPb !== null ? (finishSec - oldPb) : null;
+
+  topRuns.push(finishSec);
+  topRuns.sort((a, b) => a - b);
+  topRuns = topRuns.slice(0, 3);
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(topRuns)); } catch (_) {}
+  updatePbDisplay();
+
+  audio.playFinishChime();
+  flashScreen('rgba(16, 185, 129, 0.42)');
+  const pbNote = (oldPb === null || finishSec < oldPb) ? ' ★ NEW PERSONAL BEST!' : '';
+  showToast(`FINISHED IN ${formatTime(finishSec)}${pbNote}  (Press R to Restart)`, 'rgba(16,185,129,0.75)');
+};
+
+/* ============================================================================
+ * 14. INPUT PIPELINE & CAMERA ORIENTATION
+ * ============================================================================
+ */
+const keys = { w: false, a: false, s: false, d: false, jump: false, duck: false };
+let scrollJumpQueued = false;
+let isPointerLocked = false;
+let mouseSensitivity = 1.80;
+
+let viewYaw = SPAWN_POS.yaw;
+let viewPitchDown = SPAWN_POS.pitchDown;
+
+function releaseAllKeys() {
+  keys.w = keys.a = keys.s = keys.d = keys.jump = keys.duck = false;
+  scrollJumpQueued = false;
+}
+
+const menuOverlay = document.getElementById('menu-overlay');
+const lockHint = document.getElementById('lock-hint');
+
+function openMenu() {
+  menuOverlay.classList.remove('hidden');
+  releaseAllKeys();
+}
+
+function closeMenu() {
+  menuOverlay.classList.add('hidden');
+  lockHint.textContent = '';
+}
+
+function requestLock() {
+  audio.unlock();
+  try {
+    const p = canvas.requestPointerLock();
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => {
+        lockHint.textContent = 'Browser cooldown active — click again to lock mouse.';
+      });
+    }
+  } catch (_) {
+    lockHint.textContent = 'Click the orange button again to engage Pointer Lock.';
+  }
+}
+
+document.addEventListener('pointerlockchange', () => {
+  isPointerLocked = (document.pointerLockElement === canvas);
+  if (isPointerLocked) closeMenu();
+  else openMenu();
+});
+
+document.addEventListener('pointerlockerror', () => {
+  lockHint.textContent = 'Pointer lock paused briefly by browser — click button again.';
+});
+
+canvas.addEventListener('mousedown', (e) => {
+  if (!isPointerLocked) {
+    if (menuOverlay.classList.contains('hidden')) requestLock();
+    return;
+  }
+  if (e.button === 0) triggerVPhysicsBlast();
+  else if (e.button === 2) spawnDynamicPropInFront();
+});
+
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+document.addEventListener('mousemove', (e) => {
+  if (!isPointerLocked) return;
+  const radPerCount = (0.022 * Math.PI) / 180;
+  const dYaw = -e.movementX * mouseSensitivity * radPerCount;
+  const dPitchDown = e.movementY * mouseSensitivity * radPerCount;
+
+  viewYaw += dYaw;
+  viewPitchDown = Math.max(-1.535, Math.min(1.535, viewPitchDown + dPitchDown));
+
+  accumYawDeltaTick += dYaw;
+  smoothYawVisual = THREE.MathUtils.clamp(smoothYawVisual + dYaw * 14, -1, 1);
+
+  vmSwayX = THREE.MathUtils.clamp(vmSwayX - e.movementX * 0.00028, -0.055, 0.055);
+  vmSwayY = THREE.MathUtils.clamp(vmSwayY + e.movementY * 0.00022, -0.04, 0.04);
+});
+
+window.addEventListener('wheel', () => {
+  if (!isPointerLocked) return;
+  scrollJumpQueued = true;
+}, { passive: true });
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Tab') {
+    e.preventDefault();
+    if (isPointerLocked) document.exitPointerLock();
+    else requestLock();
+    return;
+  }
+
+  if (e.code === 'F2') {
+    e.preventDefault();
+    toggleDebugWireframes(!debugGroup.visible);
+    return;
+  }
+
+  if (!isPointerLocked) return;
+
+  switch (e.code) {
+    case 'KeyW': keys.w = true; break;
+    case 'KeyS': keys.s = true; break;
+    case 'KeyA': keys.a = true; break;
+    case 'KeyD': keys.d = true; break;
+    case 'Space': keys.jump = true; e.preventDefault(); break;
+    case 'ControlLeft':
+    case 'ControlRight':
+    case 'KeyC': keys.duck = true; break;
+    case 'Digit1': selectWeapon(1); break;
+    case 'Digit2': selectWeapon(2); break;
+    case 'Digit3': selectWeapon(3); break;
+    case 'KeyG': spawnDynamicPropInFront(); break;
+    case 'KeyT':
+      for (const rb of rigidBodies) rb.reset();
+      showToast('VPHYSICS PROPS RESET', 'rgba(34,211,238,0.6)');
+      break;
+    case 'KeyR':
+      teleportToSpawn(false);
+      viewYaw = SPAWN_POS.yaw;
+      viewPitchDown = SPAWN_POS.pitchDown;
+      showToast('RUN RESET', 'rgba(245,158,11,0.6)');
+      break;
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  switch (e.code) {
+    case 'KeyW': keys.w = false; break;
+    case 'KeyS': keys.s = false; break;
+    case 'KeyA': keys.a = false; break;
+    case 'KeyD': keys.d = false; break;
+    case 'Space': keys.jump = false; break;
+    case 'ControlLeft':
+    case 'ControlRight':
+    case 'KeyC': keys.duck = false; break;
+  }
+});
+
+window.addEventListener('blur', releaseAllKeys);
+
+/* ============================================================================
+ * 15. MENU CONTROLS & LIVE CVAR BINDINGS
+ * ============================================================================
+ */
+const slAirAccel = document.getElementById('sl-airaccel');
+const slMaxVel   = document.getElementById('sl-maxvel');
+const slGravity  = document.getElementById('sl-gravity');
+const slPushScale= document.getElementById('sl-pushscale');
+const slTickrate = document.getElementById('sl-tickrate');
+const slSens     = document.getElementById('sl-sens');
+const slFov      = document.getElementById('sl-fov');
+
+const valAirAccel = document.getElementById('val-airaccel');
+const valMaxVel   = document.getElementById('val-maxvel');
+const valGravity  = document.getElementById('val-gravity');
+const valPushScale= document.getElementById('val-pushscale');
+const valTickrate = document.getElementById('val-tickrate');
+const valSens     = document.getElementById('val-sens');
+const valFov      = document.getElementById('val-fov');
+
+const btnDefault  = document.getElementById('preset-default');
+const btnHardcore = document.getElementById('preset-hardcore');
+const btnHl2      = document.getElementById('preset-hl2');
+const presetInd   = document.getElementById('preset-indicator');
+const ngCvars     = document.getElementById('ng-cvars');
+const tgHl2Jump   = document.getElementById('tg-hl2jump');
+
+function syncCvarUI() {
+  const aa = Math.round(memF32[C_AIRACCEL]);
+  const mv = Math.round(memF32[C_MAXVEL]);
+  const gv = Math.round(memF32[C_GRAVITY]);
+  const ps = memF32[C_PUSHSCALE];
+  slAirAccel.value = aa; valAirAccel.textContent = aa;
+  slMaxVel.value = mv;   valMaxVel.textContent = mv;
+  slGravity.value = gv;  valGravity.textContent = gv;
+  slPushScale.value = ps.toFixed(2); valPushScale.textContent = ps.toFixed(2);
+  ngCvars.textContent = `aa:${aa} mv:${mv}`;
+
+  const isDef = (aa === 100 && mv === 3500 && gv === 800 && memF32[C_JUMP_HEIGHT] === 45);
+  const isHc  = (aa === 150 && mv === 4500 && gv === 800);
+  const isHl2 = (aa === 10 && memF32[C_JUMP_HEIGHT] === 21);
+
+  btnDefault.classList.toggle('active', isDef);
+  btnHardcore.classList.toggle('active', isHc);
+  btnHl2.classList.toggle('active', isHl2);
+  presetInd.textContent = isDef ? 'SURF 100' : (isHc ? 'HARDCORE' : (isHl2 ? 'VANILLA HL2' : 'CUSTOM'));
+}
+
+function applyPreset(name) {
+  if (name === 'hardcore') {
+    memF32[C_AIRACCEL] = f32(150.0);
+    memF32[C_MAXVEL]   = f32(4500.0);
+    memF32[C_GRAVITY]  = f32(800.0);
+    memF32[C_ACCEL]    = f32(5.0);
+    memF32[C_STOPSPEED]= f32(75.0);
+    memF32[C_JUMP_HEIGHT] = f32(45.0);
+    tgHl2Jump.checked = false;
+  } else if (name === 'hl2') {
+    memF32[C_AIRACCEL] = f32(10.0);
+    memF32[C_MAXVEL]   = f32(3500.0);
+    memF32[C_GRAVITY]  = f32(800.0);
+    memF32[C_ACCEL]    = f32(10.0);
+    memF32[C_STOPSPEED]= f32(100.0);
+    memF32[C_JUMP_HEIGHT] = f32(21.0);
+    tgHl2Jump.checked = true;
+  } else {
+    memF32[C_AIRACCEL] = f32(100.0);
+    memF32[C_MAXVEL]   = f32(3500.0);
+    memF32[C_GRAVITY]  = f32(800.0);
+    memF32[C_ACCEL]    = f32(5.0);
+    memF32[C_STOPSPEED]= f32(75.0);
+    memF32[C_JUMP_HEIGHT] = f32(45.0);
+    tgHl2Jump.checked = false;
+  }
+  syncCvarUI();
+}
+
+btnDefault.addEventListener('click', () => applyPreset('default'));
+btnHardcore.addEventListener('click', () => applyPreset('hardcore'));
+btnHl2.addEventListener('click', () => applyPreset('hl2'));
+
+slAirAccel.addEventListener('input', () => { memF32[C_AIRACCEL] = f32(Number(slAirAccel.value)); syncCvarUI(); });
+slMaxVel.addEventListener('input', () => { memF32[C_MAXVEL] = f32(Number(slMaxVel.value)); syncCvarUI(); });
+slGravity.addEventListener('input', () => { memF32[C_GRAVITY] = f32(Number(slGravity.value)); syncCvarUI(); });
+slPushScale.addEventListener('input', () => { memF32[C_PUSHSCALE] = f32(Number(slPushScale.value)); syncCvarUI(); });
+slTickrate.addEventListener('input', () => {
+  currentTickrate = TICKRATES[Number(slTickrate.value)] || 100;
+  FIXED_DT = f32(1.0 / currentTickrate);
+  valTickrate.textContent = `${currentTickrate} Hz`;
+  document.getElementById('ng-tickrate').textContent = `${currentTickrate} Hz`;
+  document.getElementById('hud-engine-badge').textContent = `surf_sandbox_01 • ${currentTickrate}Hz CGameMovement + VPhysics`;
+});
+slSens.addEventListener('input', () => {
+  mouseSensitivity = Number(slSens.value);
+  valSens.textContent = mouseSensitivity.toFixed(2);
+});
+slFov.addEventListener('input', () => {
+  baseFov = Number(slFov.value);
+  valFov.textContent = `${baseFov}°`;
+});
+
+tgHl2Jump.addEventListener('change', (e) => {
+  memF32[C_JUMP_HEIGHT] = f32(e.target.checked ? 21.0 : 45.0);
+  syncCvarUI();
+});
+document.getElementById('tg-autobhop').addEventListener('change', (e) => {
+  memI32[I_AUTOBHOP] = e.target.checked ? 1 : 0;
+});
+document.getElementById('tg-scout260').addEventListener('change', (e) => {
+  memI32[I_LEGACY_SCOUT] = e.target.checked ? 1 : 0;
+  document.getElementById('spd-slot-1').textContent = e.target.checked ? '260 u/s ★' : '250 u/s';
+});
+document.getElementById('tg-strafe').addEventListener('change', (e) => {
+  document.getElementById('strafe-overlay').classList.toggle('hidden', !e.target.checked);
+});
+
+const tgDebug = document.getElementById('tg-debug');
+const debugPill = document.getElementById('debug-pill');
+function toggleDebugWireframes(enabled) {
+  debugGroup.visible = enabled;
+  for (const rb of rigidBodies) {
+    if (rb.debugWire) rb.debugWire.visible = enabled;
+  }
+  tgDebug.checked = enabled;
+  debugPill.classList.toggle('active', enabled);
+  showToast(enabled ? 'DEBUG WIREFRAMES & OBB BOUNDS: ON' : 'DEBUG WIREFRAMES: OFF', 'rgba(245,158,11,0.65)');
+}
+tgDebug.addEventListener('change', (e) => toggleDebugWireframes(e.target.checked));
+
+document.getElementById('tg-mute').addEventListener('change', (e) => {
+  audio.setMuted(e.target.checked);
+});
+
+document.getElementById('btn-play').addEventListener('click', () => requestLock());
+document.getElementById('btn-restart-menu').addEventListener('click', () => {
+  teleportToSpawn(false);
+  viewYaw = SPAWN_POS.yaw;
+  viewPitchDown = SPAWN_POS.pitchDown;
+  requestLock();
+});
+document.getElementById('btn-reset-props').addEventListener('click', () => {
+  for (const rb of rigidBodies) rb.reset();
+  requestLock();
+});
+
+/* ============================================================================
+ * 16. HUD UPDATE & MAIN ACCUMULATOR LOOP
+ * ============================================================================
+ */
+const elSpeedXY   = document.getElementById('speed-xy');
+const elSpeed3D   = document.getElementById('speed-3d');
+const elSpeedPeak = document.getElementById('speed-peak');
+const elSpeedZ    = document.getElementById('speed-z');
+const elSpeedGain = document.getElementById('speed-gain');
+const elRunTime   = document.getElementById('run-time');
+const elRunDelta  = document.getElementById('run-delta');
+const elTimerState= document.getElementById('timer-state');
+const elSyncPct   = document.getElementById('sync-pct');
+const elSyncBar   = document.getElementById('sync-bar');
+const elYawPip    = document.getElementById('yaw-pip');
+const elNgFps     = document.getElementById('ng-fps');
+const elNgSim     = document.getElementById('ng-sim');
+const elNgState   = document.getElementById('ng-state');
+const elNgHull    = document.getElementById('ng-hull');
+const elNgSync    = document.getElementById('ng-sync');
+
+const elKeys = {
+  w: document.getElementById('key-w'),
+  a: document.getElementById('key-a'),
+  s: document.getElementById('key-s'),
+  d: document.getElementById('key-d'),
+  jump: document.getElementById('key-jump'),
+  duck: document.getElementById('key-duck'),
+};
+
+function updateSpeedColor(speed) {
+  if (speed >= 3000) {
+    elSpeedXY.style.color = '#e879f9';
+    elSpeedXY.style.textShadow = '0 0 18px rgba(232, 121, 249, 0.72)';
+  } else if (speed >= 2000) {
+    elSpeedXY.style.color = '#fbbf24';
+    elSpeedXY.style.textShadow = '0 0 14px rgba(251, 191, 36, 0.55)';
+  } else if (speed >= 1000) {
+    elSpeedXY.style.color = '#22d3ee';
+    elSpeedXY.style.textShadow = '0 0 12px rgba(34, 211, 238, 0.45)';
+  } else {
+    elSpeedXY.style.color = '#f8fafc';
+    elSpeedXY.style.textShadow = '0 2px 10px rgba(0, 0, 0, 0.5)';
+  }
+}
+
+teleportToSpawn(false);
+syncCvarUI();
+
+let lastFrameTime = performance.now();
+let accumulator = 0;
+let simMsAvg = 0.12;
+let fpsCounter = 0;
+let fpsTimer = lastFrameTime;
+let currentFps = 0;
+let currentFov = baseFov;
+let idleClock = 0;
+const _camPos = new THREE.Vector3();
+const _camLook = new THREE.Vector3();
+const _interpGsPos = new THREE.Vector3();
+const _interpGsQuat = new THREE.Quaternion();
+
+function stepPhysicsFromInputs() {
+  const maxSpd = getActiveWeaponSpeed();
+  let fmove = 0, smove = 0;
+  if (keys.w) fmove += maxSpd;
+  if (keys.s) fmove -= maxSpd;
+  if (keys.d) smove += maxSpd;
+  if (keys.a) smove -= maxSpd;
+
+  let buttons = 0;
+  if (keys.jump || scrollJumpQueued) buttons |= IN_JUMP;
+  if (keys.duck) buttons |= IN_DUCK;
+  scrollJumpQueued = false;
+
+  memF32[U_FMOVE] = f32(fmove);
+  memF32[U_SMOVE] = f32(smove);
+  memF32[U_YAW] = f32(viewYaw);
+  memF32[U_PITCH] = f32(viewPitchDown);
+  memF32[U_ROLL] = f32(0);
+  memF32[U_MAXSPEED] = maxSpd;
+  memI32[I_BUTTONS] = buttons;
+
+  const preXY = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y]);
+  const t0 = performance.now();
+  simulateTick();
+  const dtSim = performance.now() - t0;
+  simMsAvg = simMsAvg * 0.92 + dtSim * 0.08;
+
+  const postXY = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y]);
+
+  const airborne = (memI32[I_FLAGS] & FL_ONGROUND) === 0;
+  const holdingLeft = keys.a && !keys.d;
+  const holdingRight = keys.d && !keys.a;
+  if (airborne && (holdingLeft || holdingRight)) {
+    const yawMatches = (holdingLeft && accumYawDeltaTick > 0.00015) ||
+                       (holdingRight && accumYawDeltaTick < -0.00015);
+    const hit = (yawMatches || postXY > preXY + 0.05) ? 1 : 0;
+
+    if (syncCount < SYNC_WINDOW) syncCount++;
+    else syncHits -= syncRing[syncHead];
+
+    syncRing[syncHead] = hit;
+    syncHits += hit;
+    syncHead = (syncHead + 1) % SYNC_WINDOW;
+  }
+  accumYawDeltaTick = 0;
+
+  if (runTimer.state === 'RUNNING') {
+    runTimer.elapsedSec = (memI32[I_TICK] - runTimer.startTick) * FIXED_DT;
+  }
+}
+
+function updateHUD(now) {
+  fpsCounter++;
+  if (now - fpsTimer >= 400) {
+    currentFps = Math.round((fpsCounter * 1000) / (now - fpsTimer));
+    fpsCounter = 0;
+    fpsTimer = now;
+    elNgFps.textContent = currentFps;
+  }
+
+  const vx = memF32[S_VEL_X], vy = memF32[S_VEL_Y], vz = memF32[S_VEL_Z];
+  const spdXY = Math.hypot(vx, vy);
+  const spd3D = Math.hypot(vx, vy, vz);
+  if (spdXY > sessionPeakSpeed) sessionPeakSpeed = spdXY;
+
+  elSpeedXY.textContent = Math.round(spdXY);
+  elSpeed3D.textContent = Math.round(spd3D);
+  elSpeedPeak.textContent = Math.round(sessionPeakSpeed);
+  elSpeedZ.textContent = Math.round(vz);
+  updateSpeedColor(spdXY);
+
+  const dSpd = spdXY - prevHorizSpeed;
+  prevHorizSpeed = spdXY;
+  if (dSpd > 2.5) {
+    elSpeedGain.textContent = '▲';
+    elSpeedGain.style.color = '#34d399';
+  } else if (dSpd < -2.5) {
+    elSpeedGain.textContent = '▼';
+    elSpeedGain.style.color = '#fb7185';
+  } else {
+    elSpeedGain.textContent = '';
+  }
+
+  elKeys.w.classList.toggle('active', keys.w);
+  elKeys.a.classList.toggle('active', keys.a);
+  elKeys.s.classList.toggle('active', keys.s);
+  elKeys.d.classList.toggle('active', keys.d);
+  elKeys.jump.classList.toggle('active', keys.jump);
+  elKeys.duck.classList.toggle('active', keys.duck);
+
+  const pct = syncCount > 0 ? Math.round((syncHits / syncCount) * 100) : 0;
+  elSyncPct.textContent = `${pct}%`;
+  elSyncBar.style.width = `${pct}%`;
+  elNgSync.textContent = `${pct}%`;
+  elYawPip.style.left = `${50 - smoothYawVisual * 45}%`;
+
+  elRunTime.textContent = formatTime(runTimer.elapsedSec);
+  elTimerState.textContent = runTimer.state;
+  elTimerState.className = 'timer-badge' +
+    (runTimer.state === 'RUNNING' ? ' running' : (runTimer.state === 'FINISHED' ? ' finished' : ''));
+
+  if (runTimer.state === 'FINISHED' && runTimer.lastFinishDelta !== null) {
+    const d = runTimer.lastFinishDelta;
+    elRunDelta.textContent = `${d <= 0 ? '' : '+'}${d.toFixed(2)}s`;
+    elRunDelta.className = d <= 0 ? 'delta-ahead' : 'delta-behind';
+  } else if (runTimer.state === 'RUNNING' && topRuns.length > 0) {
+    const diff = runTimer.elapsedSec - topRuns[0];
+    elRunDelta.textContent = `${diff <= 0 ? '' : '+'}${diff.toFixed(2)}s`;
+    elRunDelta.className = diff <= 0 ? 'delta-ahead' : 'delta-behind';
+  } else {
+    elRunDelta.textContent = '--.--';
+    elRunDelta.className = 'delta-neutral';
+  }
+
+  elNgSim.textContent = simMsAvg.toFixed(2);
+  const st = memI32[I_MOVESTATE];
+  if (st === STATE_SURF) {
+    elNgState.textContent = 'SURF';
+    elNgState.className = 'ng-surf';
+  } else if (st === STATE_AIR) {
+    elNgState.textContent = 'AIR';
+    elNgState.className = 'ng-air';
+  } else {
+    elNgState.textContent = 'GROUND';
+    elNgState.className = 'ng-gnd';
+  }
+  elNgHull.textContent = (memI32[I_FLAGS] & FL_DUCKING) ? '36u (DUCK)' : '72u (STAND)';
+}
+
+function updateViewmodel(dtSec, spdXY) {
+  vmDeployT = Math.min(1.0, vmDeployT + dtSec * 4.5);
+  const deployDrop = (1 - vmDeployT) * (1 - vmDeployT) * 0.24;
+  vmRecoilZ = THREE.MathUtils.lerp(vmRecoilZ, 0, Math.min(1, dtSec * 14));
+
+  vmSwayX *= Math.pow(0.001, dtSec);
+  vmSwayY *= Math.pow(0.001, dtSec);
+
+  const grounded = (memI32[I_FLAGS] & FL_ONGROUND) !== 0;
+  let bobX = 0, bobY = 0;
+  if (grounded && spdXY > 15) {
+    vmBobPhase += dtSec * Math.min(13, 6 + spdXY * 0.025);
+    const amp = Math.min(1, spdXY / 250) * 0.015;
+    bobX = Math.cos(vmBobPhase) * amp;
+    bobY = Math.abs(Math.sin(vmBobPhase)) * amp * 0.85;
+  }
+
+  const strafeTilt = ((keys.a ? 1 : 0) - (keys.d ? 1 : 0)) * (grounded ? 0.02 : 0.055);
+  vmRoot.position.set(vmSwayX + bobX, vmSwayY - bobY - deployDrop, vmRecoilZ);
+  vmRoot.rotation.z = THREE.MathUtils.lerp(vmRoot.rotation.z, strafeTilt, Math.min(1, dtSec * 10));
+}
+
+/** Sync interpolated VPhysics rigid-body poses from Source Z-up to Three.js Y-up */
+function syncRigidBodyVisuals(alpha, dtSec) {
+  for (let i = 0; i < rigidBodies.length; i++) {
+    const rb = rigidBodies[i];
+    if (!rb.mesh) continue;
+    _interpGsPos.lerpVectors(rb.prevPos, rb.pos, alpha);
+    _interpGsQuat.slerpQuaternions(rb.prevQuat, rb.quat, alpha);
+
+    gsToThree(_interpGsPos.x, _interpGsPos.y, _interpGsPos.z, rb.mesh.position);
+    // Orientation-preserving conjugation from Z-up (x, y, z) to Y-up (x, z, -y)
+    rb.mesh.quaternion.set(_interpGsQuat.x, _interpGsQuat.z, -_interpGsQuat.y, _interpGsQuat.w);
+  }
+
+  for (let i = explosionRings.length - 1; i >= 0; i--) {
+    const er = explosionRings[i];
+    er.age += dtSec;
+    const s = 1 + er.age * 16;
+    er.mesh.scale.set(s, s, s);
+    er.mesh.material.opacity = Math.max(0, 1.0 - er.age * 3.2);
+    if (er.age > 0.32) {
+      scene.remove(er.mesh);
+      er.mesh.geometry.dispose();
+      er.mesh.material.dispose();
+      explosionRings.splice(i, 1);
+    }
+  }
+}
+
+function animate(now) {
+  requestAnimationFrame(animate);
+
+  const frameDt = Math.min(0.05, (now - lastFrameTime) * 0.001);
+  lastFrameTime = now;
+  idleClock += frameDt;
+
+  boosterTex.offset.y -= frameDt * 1.45;
+  smoothYawVisual *= Math.pow(0.0005, frameDt);
+
+  if (isPointerLocked) {
+    accumulator += frameDt;
+    let substeps = 0;
+    while (accumulator >= FIXED_DT && substeps < 8) {
+      stepPhysicsFromInputs();
+      accumulator -= FIXED_DT;
+      substeps++;
+    }
+    if (substeps === 8) accumulator = 0;
+  } else {
+    accumulator = 0;
+  }
+
+  const alpha = isPointerLocked ? (accumulator / FIXED_DT) : 1.0;
+  const rx = memF32[S_PREV_X] + (memF32[S_POS_X] - memF32[S_PREV_X]) * alpha;
+  const ry = memF32[S_PREV_Y] + (memF32[S_POS_Y] - memF32[S_PREV_Y]) * alpha;
+  const rz = memF32[S_PREV_Z] + (memF32[S_POS_Z] - memF32[S_PREV_Z]) * alpha;
+  const rEye = memF32[S_PREV_VIEW_OFS_Z] + (memF32[S_VIEW_OFS_Z] - memF32[S_PREV_VIEW_OFS_Z]) * alpha;
+
+  const renderYaw = isPointerLocked ? viewYaw : (viewYaw + Math.sin(idleClock * 0.45) * 0.08);
+  const renderPitchDown = isPointerLocked ? viewPitchDown : (viewPitchDown + Math.cos(idleClock * 0.35) * 0.025);
+
+  // Source AngleVectors camera forward basis
+  AngleVectors(renderPitchDown, renderYaw, 0);
+  gsToThree(rx, ry, rz + rEye, _camPos);
+  gsToThree(rx + _fwdVec[0] * 100, ry + _fwdVec[1] * 100, rz + rEye + _fwdVec[2] * 100, _camLook);
+  camera.position.copy(_camPos);
+  camera.lookAt(_camLook);
+
+  const spdXY = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y]);
+  const spd3D = Math.hypot(memF32[S_VEL_X], memF32[S_VEL_Y], memF32[S_VEL_Z]);
+  const fovBoost = THREE.MathUtils.clamp((spdXY - 450) / 2550, 0, 1) * 22.0;
+  const targetFov = baseFov + fovBoost;
+  if (Math.abs(currentFov - targetFov) > 0.02) {
+    currentFov = THREE.MathUtils.lerp(currentFov, targetFov, Math.min(1, frameDt * 7.5));
+    camera.fov = currentFov;
+    camera.updateProjectionMatrix();
+  }
+
+  syncRigidBodyVisuals(alpha, frameDt);
+  updateViewmodel(frameDt, spdXY);
+  audio.updateContinuous(spd3D, memI32[I_MOVESTATE] === STATE_SURF, !isPointerLocked);
+  updateHUD(now);
+
+  renderer.clear();
+  renderer.render(scene, camera);
+  renderer.clearDepth();
+  renderer.render(vmScene, vmCamera);
+}
+
+window.addEventListener('resize', () => {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  vmCamera.aspect = w / h;
+  vmCamera.updateProjectionMatrix();
+  renderer.setSize(w, h, false);
+});
+
+window.addEventListener('load', () => {
+  lastFrameTime = performance.now();
+  requestAnimationFrame(animate);
+});
