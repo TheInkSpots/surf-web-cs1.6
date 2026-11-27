@@ -19,6 +19,7 @@ import {
   IN_RELOAD,
   IN_USE,
   LadderVolume,
+  Quat,
   SourceJoint,
   SourceRigidBody,
   SourceRope,
@@ -49,6 +50,21 @@ interface SubsystemMapExtensions {
 
 type ExtendedMapBuildResult = MapBuildResult & SubsystemMapExtensions;
 
+function wrapAngleRad(a: number): number {
+  let r = a;
+  while (r > Math.PI) r -= Math.PI * 2;
+  while (r < -Math.PI) r += Math.PI * 2;
+  return r;
+}
+
+/** Extract horizontal heading yaw from a Hammer Z-up chassis quaternion */
+function getChassisYaw(q: Quat, fallbackYaw: number): number {
+  const fwdX = 1 - 2 * (q.y * q.y + q.z * q.z);
+  const fwdY = 2 * (q.x * q.y + q.w * q.z);
+  if (Math.hypot(fwdX, fwdY) < 0.2) return fallbackYaw;
+  return Math.atan2(fwdY, fwdX);
+}
+
 export class SurfApp {
   private readonly canvas: HTMLCanvasElement;
   private readonly abi = new PhysicsMemoryAbi(2);
@@ -75,6 +91,12 @@ export class SurfApp {
   // Subsystem interaction states
   private gravityGunActive = false;
   private drivingVehicleId: string | null = null;
+  private vehicleCameraMode: 'first' | 'chase' = 'chase';
+  private prevChassisYaw: number | null = null;
+  private lastAppliedViewYaw = 0;
+  private lastAppliedViewPitch = 0;
+  private vehicleFreeLookUntil = 0;
+  private readonly chaseRayIgnore = new Set<string>();
 
   private currentBaseFov = 95;
   private currentDebugVisible = false;
@@ -124,7 +146,7 @@ export class SurfApp {
           return;
         }
         if (this.drivingVehicleId) {
-          this.exitVehicle();
+          this.exitVehicle(true);
           return;
         }
         if (this.gravityGunActive) {
@@ -199,6 +221,7 @@ export class SurfApp {
     this.visitedCheckpoints.clear();
     this.spawnedPropCount = 0;
     this.drivingVehicleId = null;
+    this.prevChassisYaw = null;
     this.gravityGunActive = false;
     this.runTracker.reset();
 
@@ -213,6 +236,7 @@ export class SurfApp {
     );
     this.renderer.baseFov = this.currentBaseFov;
     this.renderer.setDebugVisible(this.currentDebugVisible);
+    this.renderer.resetVehicleChaseCamera();
 
     this.physics = new GoldSrcPhysicsEngine(
       this.abi,
@@ -273,8 +297,11 @@ export class SurfApp {
           );
         },
         onPlayerDeath: (source) => {
-          if (this.drivingVehicleId) this.exitVehicle(false);
-          else this.physics.setDrivenVehicle(null);
+          if (this.drivingVehicleId) {
+            this.exitVehicle(false);
+          } else {
+            this.physics.setDrivenVehicle(null);
+          }
           this.audio.playPlayerDeath();
           this.hud.flashScreen('rgba(153, 27, 27, 0.72)');
           this.hud.showToast(
@@ -305,8 +332,11 @@ export class SurfApp {
         },
         onTeleport: (isFail) => {
           if (isFail) {
-            if (this.drivingVehicleId) this.exitVehicle(false);
-            else this.physics.setDrivenVehicle(null);
+            if (this.drivingVehicleId) {
+              this.exitVehicle(false);
+            } else {
+              this.physics.setDrivenVehicle(null);
+            }
             this.audio.playTeleport();
             this.hud.flashScreen('rgba(251, 113, 133, 0.42)');
 
@@ -411,6 +441,8 @@ export class SurfApp {
   private resetSubsystemsAndProps(): void {
     if (this.drivingVehicleId) {
       this.exitVehicle(false);
+    } else {
+      this.physics.setDrivenVehicle(null);
     }
     this.physics.releaseHeldBody(0);
 
@@ -586,10 +618,98 @@ export class SurfApp {
     return best;
   }
 
-  private enterVehicle(vehicleId: string): void { const veh = this.physics.getVehicles().find((v) => v.id === vehicleId); const chassis = veh ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId) : undefined; if (!veh || !chassis) return; this.physics.releaseHeldBody(0); this.renderer.setScopeZoom(0); this.drivingVehicleId = vehicleId; this.physics.setDrivenVehicle(vehicleId); this.physics.setVehicleControls(vehicleId, 0, 0, 0); this.viewmodel.root.visible = false; const vf = this.abi.f32; vf[F32.POS_X] = vf[F32.PREV_X] = f32(chassis.pos.x); vf[F32.POS_Y] = vf[F32.PREV_Y] = f32(chassis.pos.y); vf[F32.POS_Z] = vf[F32.PREV_Z] = f32(chassis.pos.z + 36); this.audio.playWeaponSwitch(); this.hud.showToast( 'DRIVING 4WD BUGGY • [WASD] DRIVE • [SPACE] HANDBRAKE • [E] EXIT', 'rgba(251, 191, 36, 0.85)', ); } private exitVehicle(announce = true): void { const vehicleId = this.drivingVehicleId ?? this.physics.getDrivenVehicleId(); this.physics.setDrivenVehicle(null); this.drivingVehicleId = null; this.viewmodel.root.visible = !this.gravityGunActive; if (!vehicleId) return; const veh = this.physics.getVehicles().find((v) => v.id === vehicleId); const chassis = veh ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId) : undefined; this.physics.setVehicleControls(vehicleId, 0, 0, 1); if (chassis) { const vf = this.abi.f32; vf[F32.POS_X] = f32(chassis.pos.x); vf[F32.POS_Y] = f32(chassis.pos.y + chassis.hy + 38); vf[F32.POS_Z] = f32(chassis.pos.z + 36); vf[F32.PREV_X] = vf[F32.POS_X]; vf[F32.PREV_Y] = vf[F32.POS_Y]; vf[F32.PREV_Z] = vf[F32.POS_Z]; vf[F32.VEL_X] = f32(chassis.vel.x * 0.35); vf[F32.VEL_Y] = f32(chassis.vel.y * 0.35); vf[F32.VEL_Z] = f32(120); } if (announce) { this.audio.playWeaponSwitch(); this.hud.showToast('EXITED VEHICLE', 'rgba(148,163,184,0.7)'); } }
+  private enterVehicle(vehicleId: string): void {
+    const veh = this.physics.getVehicles().find((v) => v.id === vehicleId);
+    const chassis = veh
+      ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId)
+      : undefined;
+    if (!veh || !chassis) return;
+
+    this.physics.releaseHeldBody(0);
+    this.renderer.setScopeZoom(0);
+    this.renderer.resetVehicleChaseCamera();
+    this.drivingVehicleId = vehicleId;
+    this.physics.setDrivenVehicle(vehicleId);
+    this.physics.setVehicleControls(vehicleId, 0, 0, 0);
+    this.viewmodel.root.visible = false;
+
+    // Align initial camera heading with the buggy chassis
+    const chassisYaw = getChassisYaw(chassis.quat, this.input.viewYaw);
+    const initPitch = this.vehicleCameraMode === 'chase' ? -0.22 : -0.05;
+    this.prevChassisYaw = chassisYaw;
+    this.lastAppliedViewYaw = chassisYaw;
+    this.lastAppliedViewPitch = initPitch;
+    this.vehicleFreeLookUntil = 0;
+    this.input.resetView(chassisYaw, initPitch);
+
+    const vf = this.abi.f32;
+    vf[F32.POS_X] = vf[F32.PREV_X] = f32(chassis.pos.x);
+    vf[F32.POS_Y] = vf[F32.PREV_Y] = f32(chassis.pos.y);
+    vf[F32.POS_Z] = vf[F32.PREV_Z] = f32(chassis.pos.z + 36);
+
+    this.audio.playWeaponSwitch();
+    this.hud.showToast(
+      `DRIVING 4WD BUGGY (${this.vehicleCameraMode === 'chase' ? 'CHASE' : 'COCKPIT'})  •  [WASD] DRIVE  •  [C] CAM  •  [E] EXIT`,
+      'rgba(251, 191, 36, 0.85)',
+    );
+  }
+
+  private exitVehicle(announce = true): void {
+    const vehicleId = this.drivingVehicleId ?? this.physics.getDrivenVehicleId();
+    this.physics.setDrivenVehicle(null);
+    this.drivingVehicleId = null;
+    this.prevChassisYaw = null;
+    this.renderer.resetVehicleChaseCamera();
+    this.viewmodel.root.visible = !this.gravityGunActive;
+
+    if (!vehicleId) return;
+
+    const veh = this.physics.getVehicles().find((v) => v.id === vehicleId);
+    const chassis = veh
+      ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId)
+      : undefined;
+
+    this.physics.setVehicleControls(vehicleId, 0, 0, 1);
+
+    if (chassis) {
+      const vf = this.abi.f32;
+      vf[F32.POS_X] = f32(chassis.pos.x);
+      vf[F32.POS_Y] = f32(chassis.pos.y + chassis.hy + 38);
+      vf[F32.POS_Z] = f32(chassis.pos.z + 36);
+      vf[F32.PREV_X] = vf[F32.POS_X];
+      vf[F32.PREV_Y] = vf[F32.POS_Y];
+      vf[F32.PREV_Z] = vf[F32.POS_Z];
+      vf[F32.VEL_X] = f32(chassis.vel.x * 0.35);
+      vf[F32.VEL_Y] = f32(chassis.vel.y * 0.35);
+      vf[F32.VEL_Z] = f32(120);
+    }
+
+    if (announce) {
+      this.audio.playWeaponSwitch();
+      this.hud.showToast('EXITED VEHICLE', 'rgba(148,163,184,0.7)');
+    }
+  }
 
   private handleSandboxHotkey = (e: KeyboardEvent): void => {
     if (!this.input.isPointerLocked || e.repeat) return;
+
+    if (this.drivingVehicleId && e.code === 'KeyC') {
+      this.vehicleCameraMode = this.vehicleCameraMode === 'chase' ? 'first' : 'chase';
+      this.renderer.resetVehicleChaseCamera();
+      this.vehicleFreeLookUntil = 0;
+      const targetPitch = this.vehicleCameraMode === 'chase' ? -0.22 : -0.05;
+      this.input.resetView(this.input.viewYaw, targetPitch);
+      this.lastAppliedViewYaw = this.input.viewYaw;
+      this.lastAppliedViewPitch = targetPitch;
+      this.audio.playWeaponSwitch();
+      this.hud.showToast(
+        this.vehicleCameraMode === 'chase'
+          ? 'VEHICLE CAMERA: 3RD PERSON CHASE [C]'
+          : 'VEHICLE CAMERA: COCKPIT [C]',
+        'rgba(56, 189, 248, 0.82)',
+      );
+      return;
+    }
 
     if (e.code === 'Digit4') {
       if (!this.drivingVehicleId) {
@@ -693,7 +813,10 @@ export class SurfApp {
 
   private computeInteractPrompt(): InteractPrompt | null {
     if (this.drivingVehicleId) {
-      return { key: 'E', label: 'EXIT 4WD BUGGY' };
+      return {
+        key: 'E / C',
+        label: this.vehicleCameraMode === 'chase' ? 'EXIT BUGGY • COCKPIT CAM' : 'EXIT BUGGY • CHASE CAM',
+      };
     }
 
     if (this.physics.getGravityGunState().heldBodyId) {
@@ -824,25 +947,12 @@ export class SurfApp {
     const dtSim = performance.now() - t0;
     this.simMsAvg = this.simMsAvg * 0.92 + dtSim * 0.08;
 
-    // Pin player seat pose to chassis after physics tick while driving
-    if (this.drivingVehicleId) {
-      const veh = this.physics.getVehicles().find((v) => v.id === this.drivingVehicleId);
-      const chassis = veh
-        ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId)
-        : undefined;
-      if (chassis) {
-        vf[F32.POS_X] = f32(chassis.pos.x);
-        vf[F32.POS_Y] = f32(chassis.pos.y);
-        vf[F32.POS_Z] = f32(chassis.pos.z + 28);
-        vf[F32.VEL_X] = chassis.vel.x;
-        vf[F32.VEL_Y] = chassis.vel.y;
-        vf[F32.VEL_Z] = chassis.vel.z;
-        vi[I32.FLAGS] |= FL_ONGROUND;
-        vi[I32.MOVESTATE] = MoveState.GROUND;
-      } else {
-        this.drivingVehicleId = null;
-        this.viewmodel.root.visible = !this.gravityGunActive;
-      }
+    // Sync driving state if chassis was removed/destroyed during simulateTick()
+    if (this.drivingVehicleId && !this.physics.getDrivenVehicleId()) {
+      this.drivingVehicleId = null;
+      this.prevChassisYaw = null;
+      this.renderer.resetVehicleChaseCamera();
+      this.viewmodel.root.visible = !this.gravityGunActive;
     }
 
     const postXY = Math.hypot(vf[F32.VEL_X], vf[F32.VEL_Y]);
@@ -850,6 +960,76 @@ export class SurfApp {
     const yawDelta = this.input.consumeTickYawDelta();
     this.strafeSync.recordTick(airborne, keys.a, keys.d, yawDelta, preXY, postXY);
     this.runTracker.tick(vi[I32.TICK]);
+  }
+
+  /**
+   * Smoothly rotates view yaw with the buggy chassis + subtle apex look-in,
+   * while yielding immediately whenever the player free-looks with the mouse.
+   */
+  private updateVehicleSteeringCamera(frameDt: number, nowSec: number): void {
+    if (!this.drivingVehicleId) return;
+
+    const veh = this.physics.getVehicles().find((v) => v.id === this.drivingVehicleId);
+    const chassis = veh
+      ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId)
+      : undefined;
+    if (!veh || !chassis) return;
+
+    let yaw = this.input.viewYaw;
+    let pitch = this.input.viewPitch;
+
+    // Detect manual mouse movement since the previous frame
+    const mouseMoved =
+      Math.abs(wrapAngleRad(yaw - this.lastAppliedViewYaw)) > 1e-4 ||
+      Math.abs(pitch - this.lastAppliedViewPitch) > 1e-4;
+    if (mouseMoved) {
+      this.vehicleFreeLookUntil = nowSec + 1.15;
+    }
+
+    const chassisYaw = getChassisYaw(chassis.quat, this.prevChassisYaw ?? yaw);
+    if (this.prevChassisYaw === null) {
+      this.prevChassisYaw = chassisYaw;
+    }
+
+    // 1. Inherit chassis turn delta so turning naturally carries the view
+    const dChassisYaw = wrapAngleRad(chassisYaw - this.prevChassisYaw);
+    this.prevChassisYaw = chassisYaw;
+    const inheritScale = this.vehicleCameraMode === 'first' ? 1.0 : 0.85;
+    yaw = wrapAngleRad(yaw + dChassisYaw * inheritScale);
+
+    // 2. Smoothly re-center behind the chassis after free-look timeout
+    if (nowSec >= this.vehicleFreeLookUntil) {
+      const fwdX = Math.cos(chassisYaw);
+      const fwdY = Math.sin(chassisYaw);
+      const fwdSpeed = chassis.vel.x * fwdX + chassis.vel.y * fwdY;
+      const horizSpeed = Math.hypot(chassis.vel.x, chassis.vel.y);
+      const activelyDriving =
+        Math.abs(veh.throttle) > 0.05 || Math.abs(veh.steer) > 0.05 || horizSpeed > 25;
+
+      if (activelyDriving) {
+        // Subtle ~8 deg apex look-in when steering forward
+        const apexOffset = fwdSpeed >= -15 ? veh.steer * 0.14 : 0;
+        const targetYaw = wrapAngleRad(chassisYaw + apexOffset);
+        const speedFactor = Math.min(1.6, 0.55 + horizSpeed / 450);
+        const baseRate = this.vehicleCameraMode === 'chase' ? 5.2 : 3.8;
+        const alignRate = (fwdSpeed < -30 ? baseRate * 0.35 : baseRate) * speedFactor;
+        const yawAlpha = 1 - Math.exp(-alignRate * frameDt);
+        yaw = wrapAngleRad(yaw + wrapAngleRad(targetYaw - yaw) * yawAlpha);
+
+        const targetPitch = this.vehicleCameraMode === 'chase' ? -0.22 : -0.05;
+        const pitchAlpha = 1 - Math.exp(-3.2 * frameDt);
+        pitch = pitch + (targetPitch - pitch) * pitchAlpha;
+      }
+    }
+
+    // Clamp pitch tighter in chase cam so it won't burrow under the floor
+    const minPitch = this.vehicleCameraMode === 'chase' ? -0.68 : -1.45;
+    const maxPitch = this.vehicleCameraMode === 'chase' ? 0.35 : 1.45;
+    pitch = Math.max(minPitch, Math.min(maxPitch, pitch));
+
+    this.input.resetView(yaw, pitch);
+    this.lastAppliedViewYaw = yaw;
+    this.lastAppliedViewPitch = pitch;
   }
 
   public start(): void {
@@ -882,6 +1062,10 @@ export class SurfApp {
       this.accumulator = 0;
     }
 
+    if (locked && this.drivingVehicleId) {
+      this.updateVehicleSteeringCamera(frameDt, nowSec);
+    }
+
     const alpha = locked ? this.accumulator / FIXED_DT : 1.0;
     const { f32: vf, i32: vi } = this.abi;
 
@@ -909,7 +1093,45 @@ export class SurfApp {
       this.input.vmSwayY,
     );
 
-    const eyePos = { x: rx, y: ry, z: rz + rEye };
+    let camX = rx;
+    let camY = ry;
+    let camZ = rz + rEye;
+
+    if (this.drivingVehicleId && this.vehicleCameraMode === 'chase') {
+      const veh = this.physics.getVehicles().find((v) => v.id === this.drivingVehicleId);
+      const pivot = { x: rx, y: ry, z: rz + 14 };
+      const { forward } = computeAngleVectors(-renderPitch, renderYaw, 0);
+      const desiredDist = 210 + Math.min(45, spdXY * 0.045);
+
+      this.chaseRayIgnore.clear();
+      if (veh) this.chaseRayIgnore.add(veh.chassisId);
+
+      const wallHit = this.physics.traceRay(
+        pivot,
+        { x: -forward.x, y: -forward.y, z: -forward.z },
+        desiredDist,
+        this.chaseRayIgnore,
+      );
+      const clampedDist = wallHit.hit ? Math.max(54, wallHit.distance - 16) : desiredDist;
+
+      const chasePos = this.renderer.resolveVehicleChaseCamera(frameDt, {
+        pivotX: pivot.x,
+        pivotY: pivot.y,
+        pivotZ: pivot.z,
+        forwardX: forward.x,
+        forwardY: forward.y,
+        forwardZ: forward.z,
+        clampedDist,
+        speedXY: spdXY,
+      });
+      camX = chasePos.x;
+      camY = chasePos.y;
+      camZ = chasePos.z;
+    } else {
+      this.renderer.resetVehicleChaseCamera();
+    }
+
+    const eyePos = { x: camX, y: camY, z: camZ };
 
     this.audio.updateListener({
       pos: eyePos,
@@ -919,7 +1141,7 @@ export class SurfApp {
     });
     this.audio.updateContinuous(spd3D, vi[I32.MOVESTATE] === MoveState.SURF, !locked, vf[F32.SURF_NZ]);
 
-    this.renderer.update(frameDt, rx, ry, rz + rEye, renderYaw, renderPitch, spdXY);
+    this.renderer.update(frameDt, camX, camY, camZ, renderYaw, renderPitch, spdXY);
 
     const subsystems = this.buildSubsystemTelemetry();
     this.hud.update({

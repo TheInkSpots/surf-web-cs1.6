@@ -50,6 +50,16 @@ interface VehicleWheelVisual {
   wheelMeshes: THREE.Group[];
   strutLines: THREE.Line[];
 }
+export interface VehicleChaseCamInput {
+  pivotX: number;
+  pivotY: number;
+  pivotZ: number;
+  forwardX: number;
+  forwardY: number;
+  forwardZ: number;
+  clampedDist: number;
+  speedXY: number;
+}
 
 export class WorldRenderer {
   private readonly renderer: THREE.WebGLRenderer;
@@ -107,7 +117,64 @@ export class WorldRenderer {
   private readonly tmpVecA = new THREE.Vector3();
   private readonly tmpVecB = new THREE.Vector3();
   private readonly tmpVecC = new THREE.Vector3();
+  // Third-person vehicle chase camera spring-arm state (Hammer Z-up space)
+    private chaseInitialized = false;
+    private chaseCurrentDist = 210;
+    private chasePos = { x: 0, y: 0, z: 0 };
+    private chaseFovOffset = 0;
 
+    public resetVehicleChaseCamera(): void {
+      this.chaseInitialized = false;
+      this.chaseFovOffset = 0;
+    }
+
+    /**
+     * Computes smoothed third-person chase camera coordinates in Hammer Z-up space.
+     * Retracts fast when wall-clamped and extends smoothly when clear.
+     */
+    public resolveVehicleChaseCamera(
+      dt: number,
+      input: VehicleChaseCamInput,
+    ): { x: number; y: number; z: number } {
+      const clampedDt = Math.min(0.05, Math.max(0, dt));
+
+      // Snap inward quickly on wall collision; ease outward smoothly when clear
+      const distRate = input.clampedDist < this.chaseCurrentDist ? 26 : 7.5;
+      const distAlpha = 1 - Math.exp(-distRate * clampedDt);
+      this.chaseCurrentDist = this.chaseInitialized
+        ? this.chaseCurrentDist + (input.clampedDist - this.chaseCurrentDist) * distAlpha
+        : input.clampedDist;
+
+      // Subtle lift above the sightline so the roof/hood stays cleanly framed
+      const liftZ = 14 + (this.chaseCurrentDist / 220) * 10;
+      const targetX = input.pivotX - input.forwardX * this.chaseCurrentDist;
+      const targetY = input.pivotY - input.forwardY * this.chaseCurrentDist;
+      const targetZ = input.pivotZ - input.forwardZ * this.chaseCurrentDist + liftZ;
+
+      if (!this.chaseInitialized) {
+        this.chasePos.x = targetX;
+        this.chasePos.y = targetY;
+        this.chasePos.z = targetZ;
+        this.chaseInitialized = true;
+      } else {
+        // Tighten tracking when wall-blocked so the spring never lags behind geometry
+        const posRate = input.clampedDist < 120 ? 28 : 14;
+        const posAlpha = 1 - Math.exp(-posRate * clampedDt);
+        this.chasePos.x += (targetX - this.chasePos.x) * posAlpha;
+        this.chasePos.y += (targetY - this.chasePos.y) * posAlpha;
+        this.chasePos.z += (targetZ - this.chasePos.z) * posAlpha;
+      }
+
+      // Optional speed FOV punch (+0..10 deg) you can add to your camera FOV in update()
+      const targetFovBoost = Math.min(10, Math.max(0, (input.speedXY - 220) * 0.014));
+      this.chaseFovOffset += (targetFovBoost - this.chaseFovOffset) * (1 - Math.exp(-6 * clampedDt));
+
+      return this.chasePos;
+    }
+
+    public getVehicleChaseFovOffset(): number {
+      return this.chaseFovOffset;
+    }
   constructor(
     canvas: HTMLCanvasElement,
     brushes: ConvexBrush[],
