@@ -157,7 +157,13 @@ export interface SourceRigidBody {
   angularDrag?: number;
   enableCcd?: boolean;
 }
-
+interface WaterTriggerMeta {
+  water?: boolean;
+  surfaceZ?: number;
+  density?: number;
+  linearDrag?: number;
+  angularDrag?: number;
+}
 export interface SourceJoint {
   id: string;
   kind: JointKind;
@@ -1390,24 +1396,26 @@ export class GoldSrcPhysicsEngine {
     };
 
     // Auto-register any trigger volumes tagged as water
-    for (let i = 0; i < triggers.length; i++) {
-      const t = triggers[i];
-      if ((t.type as string) === 'water' || t.meta?.water === true) {
-        this.waterVolumes.push({
-          id: t.id,
-          minX: t.minX,
-          minY: t.minY,
-          minZ: t.minZ,
-          maxX: t.maxX,
-          maxY: t.maxY,
-          maxZ: t.maxZ,
-          surfaceZ: (t.meta?.surfaceZ as number | undefined) ?? t.maxZ,
-          density: (t.meta?.density as number | undefined) ?? 1.0,
-          linearDrag: (t.meta?.linearDrag as number | undefined) ?? 2.2,
-          angularDrag: (t.meta?.angularDrag as number | undefined) ?? 2.6,
-        });
-      }
-    }
+    // Auto-register any trigger volumes tagged as water
+        for (let i = 0; i < triggers.length; i++) {
+          const t = triggers[i];
+          const meta = t.meta as WaterTriggerMeta | undefined;
+          if ((t.type as string) === 'water' || meta?.water === true) {
+            this.waterVolumes.push({
+              id: t.id,
+              minX: t.minX,
+              minY: t.minY,
+              minZ: t.minZ,
+              maxX: t.maxX,
+              maxY: t.maxY,
+              maxZ: t.maxZ,
+              surfaceZ: meta?.surfaceZ ?? t.maxZ,
+              density: meta?.density ?? 1.0,
+              linearDrag: meta?.linearDrag ?? 2.2,
+              angularDrag: meta?.angularDrag ?? 2.6,
+            });
+          }
+        }
   }
 
   /** Rebuild static brush BVH if map brushes were mutated externally */
