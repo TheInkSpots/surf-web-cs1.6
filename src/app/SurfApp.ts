@@ -11,13 +11,19 @@ import {
 import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
 import {
   CheckpointState,
+  computeAngleVectors,
   createBoxRigidBody,
   GoldSrcPhysicsEngine,
   IN_ATTACK,
   IN_ATTACK2,
   IN_RELOAD,
   IN_USE,
+  LadderVolume,
+  SourceJoint,
   SourceRigidBody,
+  SourceRope,
+  SourceVehicle,
+  WaterVolume,
 } from '../physics/GoldSrcPhysicsEngine';
 import { MapBuildResult } from '../maps/surfSandbox01';
 import { DEFAULT_MAP_ID, getMapById, MapId } from '../maps/mapRegistry';
@@ -28,9 +34,20 @@ import { InputController } from '../gameplay/InputController';
 import { RunTracker } from '../gameplay/RunTracker';
 import { StrafeSyncTracker } from '../gameplay/StrafeSyncTracker';
 import { WeaponSystem } from '../gameplay/WeaponSystem';
-import { HudController } from '../ui/HudController';
+import { HudController, InteractPrompt, SubsystemTelemetry } from '../ui/HudController';
 import { CombatHudOverlay } from '../ui/CombatHudOverlay';
 import { MenuController } from '../ui/MenuController';
+
+/** Optional subsystem hooks provided by subsystem-enabled maps (e.g., surfSandbox04) */
+interface SubsystemMapExtensions {
+  createJoints?: () => SourceJoint[];
+  createRopes?: () => SourceRope[];
+  createWaterVolumes?: () => WaterVolume[];
+  createVehicles?: () => SourceVehicle[];
+  ladders?: LadderVolume[];
+}
+
+type ExtendedMapBuildResult = MapBuildResult & SubsystemMapExtensions;
 
 export class SurfApp {
   private readonly canvas: HTMLCanvasElement;
@@ -45,7 +62,7 @@ export class SurfApp {
   private readonly menu: MenuController;
 
   private currentMapId: MapId = DEFAULT_MAP_ID;
-  private currentMapData!: MapBuildResult;
+  private currentMapData!: ExtendedMapBuildResult;
   private createInitialRigidBodies!: () => SourceRigidBody[];
   private physics!: GoldSrcPhysicsEngine;
   private renderer!: WorldRenderer;
@@ -54,6 +71,10 @@ export class SurfApp {
   private activeCheckpoint: CheckpointState | null = null;
   private customCheckpoint: CheckpointState | null = null;
   private readonly visitedCheckpoints = new Set<number>();
+
+  // Subsystem interaction states
+  private gravityGunActive = false;
+  private drivingVehicleId: string | null = null;
 
   private currentBaseFov = 95;
   private currentDebugVisible = false;
@@ -68,23 +89,46 @@ export class SurfApp {
     this.currentMapId = initialMapId;
     this.hud = new HudController(this.runTracker);
 
-    const initialMap = getMapById(initialMapId).build();
+    const initialMap = getMapById(initialMapId).build() as ExtendedMapBuildResult;
 
     this.input = new InputController(canvas, initialMap.spawn, {
       onUnlockRequest: () => this.audio.unlock(),
-      onSelectWeapon: (slot) => this.weapons.selectSlot(slot),
-      onQuickSwitch: () => this.weapons.quickSwitch(),
-      onDropWeapon: () => this.weapons.dropActiveWeapon(),
-      onPickupWeapon: () => {
-        if (!this.weapons.tryPickupLookedWeapon()) {
-          this.hud.showToast('AIM AT A GROUND WEAPON TO PICK UP', 'rgba(148,163,184,0.65)');
-        }
+      onSelectWeapon: (slot) => {
+        if (this.drivingVehicleId) return;
+        this.setGravityGunMode(false);
+        this.weapons.selectSlot(slot);
       },
-      onAttack1Press: () => this.weapons.handlePrimaryPress(performance.now() * 0.001),
-      onAttack2Press: () => this.weapons.handleSecondaryPress(performance.now() * 0.001),
+      onQuickSwitch: () => {
+        if (this.drivingVehicleId) return;
+        if (this.gravityGunActive) {
+          this.setGravityGunMode(false);
+          this.hud.setActiveWeaponSlot(this.weapons.getActiveSlot());
+          return;
+        }
+        this.weapons.quickSwitch();
+      },
+      onDropWeapon: () => {
+        if (this.drivingVehicleId) return;
+        if (this.physics.getGravityGunState().heldBodyId) {
+          this.physics.releaseHeldBody(0);
+          return;
+        }
+        this.weapons.dropActiveWeapon();
+      },
+      onPickupWeapon: () => this.handleUseAction(),
+      onAttack1Press: () => this.handlePrimaryAction(),
+      onAttack2Press: () => this.handleSecondaryAction(),
       onReloadOrReset: () => {
         if (this.physics.getVitals().dead) {
           this.fullReset();
+          return;
+        }
+        if (this.drivingVehicleId) {
+          this.exitVehicle();
+          return;
+        }
+        if (this.gravityGunActive) {
+          this.physics.releaseHeldBody(0);
           return;
         }
         const startedReload = this.weapons.tryReload(performance.now() * 0.001);
@@ -144,7 +188,7 @@ export class SurfApp {
 
   public loadMap(mapId: MapId, prebuilt?: MapBuildResult, announce = true): void {
     const def = getMapById(mapId);
-    const mapData = prebuilt ?? def.build();
+    const mapData = (prebuilt ?? def.build()) as ExtendedMapBuildResult;
 
     this.currentMapId = mapId;
     this.currentMapData = mapData;
@@ -154,10 +198,11 @@ export class SurfApp {
     this.customCheckpoint = null;
     this.visitedCheckpoints.clear();
     this.spawnedPropCount = 0;
+    this.drivingVehicleId = null;
+    this.gravityGunActive = false;
     this.runTracker.reset();
 
-    // Dispose prior renderer resources if WorldRenderer exposes a dispose() hook
-    (this.renderer as { dispose?: () => void } | undefined)?.dispose?.();
+    this.renderer?.dispose();
 
     this.renderer = new WorldRenderer(
       this.canvas,
@@ -204,6 +249,21 @@ export class SurfApp {
             this.hud.showToast('CRATE DESTROYED', 'rgba(251, 191, 36, 0.8)');
           }
         },
+        onJointBroken: (jointId, pos) => {
+          this.renderer.spawnImpactEffect(pos, { x: 0, y: 0, z: 1 }, 'prop');
+          this.audio.playImpact(pos, 'prop', 2400);
+          this.hud.showToast(`JOINT SEVERED: ${jointId.toUpperCase()}`, 'rgba(248, 113, 113, 0.8)');
+        },
+        onGravityGunGrab: (bodyId) => {
+          this.audio.playWeaponSwitch();
+          this.hud.showToast(`PID LOCK: ${bodyId.toUpperCase()}`, 'rgba(34, 211, 238, 0.72)');
+        },
+        onGravityGunRelease: (bodyId, punted) => {
+          if (punted) {
+            this.audio.playBoost();
+            this.hud.showToast(`PUNTED: ${bodyId.toUpperCase()}`, 'rgba(251, 191, 36, 0.75)');
+          }
+        },
         onPlayerDamage: (amount, source, bloodLostMl) => {
           this.audio.playPlayerHurt(amount);
           this.hud.flashScreen('rgba(220, 38, 38, 0.48)');
@@ -213,6 +273,7 @@ export class SurfApp {
           );
         },
         onPlayerDeath: (source) => {
+          this.drivingVehicleId = null;
           this.audio.playPlayerDeath();
           this.hud.flashScreen('rgba(153, 27, 27, 0.72)');
           this.hud.showToast(
@@ -243,6 +304,7 @@ export class SurfApp {
         },
         onTeleport: (isFail) => {
           if (isFail) {
+            this.drivingVehicleId = null;
             this.audio.playTeleport();
             this.hud.flashScreen('rgba(251, 113, 133, 0.42)');
 
@@ -295,6 +357,8 @@ export class SurfApp {
       this.createInitialRigidBodies(),
     );
 
+    this.registerMapSubsystems(mapData);
+
     this.weapons = new WeaponSystem(
       this.abi,
       this.physics,
@@ -305,7 +369,11 @@ export class SurfApp {
       {
         onToast: (msg, color) => this.hud.showToast(msg, color),
         onHitMarker: (isBlood, isKill) => this.combatHud.triggerHitMarker(isBlood, isKill),
-        onActiveSlotChanged: (slot) => this.hud.setActiveWeaponSlot(slot),
+        onActiveSlotChanged: (slot) => {
+          if (!this.gravityGunActive) {
+            this.hud.setActiveWeaponSlot(slot);
+          }
+        },
       },
     );
 
@@ -319,25 +387,262 @@ export class SurfApp {
     }
   }
 
+  private registerMapSubsystems(mapData: ExtendedMapBuildResult): void {
+    const joints = mapData.createJoints?.() ?? [];
+    for (let i = 0; i < joints.length; i++) this.physics.addJoint(joints[i]);
+
+    const ropes = mapData.createRopes?.() ?? [];
+    for (let i = 0; i < ropes.length; i++) this.physics.addRope(ropes[i]);
+
+    const waters = mapData.createWaterVolumes?.() ?? [];
+    for (let i = 0; i < waters.length; i++) this.physics.addWaterVolume(waters[i]);
+    this.renderer.setWaterVolumes(this.physics.getWaterVolumes());
+
+    const vehicles = mapData.createVehicles?.() ?? [];
+    for (let i = 0; i < vehicles.length; i++) this.physics.addVehicle(vehicles[i]);
+
+    const ladders = mapData.ladders ?? [];
+    for (let i = 0; i < ladders.length; i++) this.physics.addLadder(ladders[i]);
+    this.renderer.setLadders(ladders);
+  }
+
+  private resetSubsystemsAndProps(): void {
+    if (this.drivingVehicleId) {
+      this.exitVehicle(false);
+    }
+    this.physics.releaseHeldBody(0);
+
+    // Clear existing joints, ropes, vehicles before repopulating
+    const oldJointIds = this.physics.getJoints().map((j) => j.id);
+    for (let i = 0; i < oldJointIds.length; i++) this.physics.removeJoint(oldJointIds[i]);
+
+    const oldRopeIds = this.physics.getRopes().map((r) => r.id);
+    for (let i = 0; i < oldRopeIds.length; i++) this.physics.removeRope(oldRopeIds[i]);
+
+    const oldVehicleIds = this.physics.getVehicles().map((v) => v.id);
+    for (let i = 0; i < oldVehicleIds.length; i++) this.physics.removeVehicle(oldVehicleIds[i]);
+
+    this.physics.setRigidBodies(this.createInitialRigidBodies());
+
+    const joints = this.currentMapData.createJoints?.() ?? [];
+    for (let i = 0; i < joints.length; i++) this.physics.addJoint(joints[i]);
+
+    const ropes = this.currentMapData.createRopes?.() ?? [];
+    for (let i = 0; i < ropes.length; i++) this.physics.addRope(ropes[i]);
+
+    const vehicles = this.currentMapData.createVehicles?.() ?? [];
+    for (let i = 0; i < vehicles.length; i++) this.physics.addVehicle(vehicles[i]);
+  }
+
   private fullReset(): void {
     this.activeCheckpoint = null;
     this.visitedCheckpoints.clear();
+    this.setGravityGunMode(false);
     this.physics.restoreVitals();
-    this.physics.setRigidBodies(this.createInitialRigidBodies());
+    this.resetSubsystemsAndProps();
     this.physics.teleportToSpawn(false);
     this.weapons.resetLoadout();
     this.input.resetView(this.currentMapData.spawn.yaw, this.currentMapData.spawn.pitch);
-    this.hud.showToast('FULL RUN & LOADOUT RESET', 'rgba(245,158,11,0.65)');
+    this.hud.showToast('FULL RUN, PROPS & SUBSYSTEMS RESET', 'rgba(245,158,11,0.65)');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gravity Gun, Tactile Pickup & Vehicle Driving Actions
+  // ---------------------------------------------------------------------------
+
+  private setGravityGunMode(enabled: boolean): void {
+    if (this.gravityGunActive === enabled) return;
+    this.gravityGunActive = enabled;
+    if (!enabled && this.physics.getGravityGunState().heldBodyId) {
+      this.physics.releaseHeldBody(0);
+    }
+    this.viewmodel.root.visible = !enabled && !this.drivingVehicleId;
+    if (enabled) {
+      this.renderer.setScopeZoom(0);
+      this.hud.setActiveWeaponSlot(4);
+      this.audio.playWeaponSwitch();
+      this.hud.showToast('PHYS GUN (PID)  •  [RMB] GRAB/DROP  •  [LMB] PUNT', 'rgba(34,211,238,0.75)');
+    } else {
+      this.hud.setActiveWeaponSlot(this.weapons.getActiveSlot());
+    }
+  }
+
+  private handlePrimaryAction(): void {
+    if (this.drivingVehicleId) return;
+
+    const heldId = this.physics.getGravityGunState().heldBodyId;
+    if (heldId) {
+      const eye = this.physics.getPlayerEyePosition();
+      const { forward } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
+      const heldBody = this.physics.getRigidBodies().find((b) => b.id === heldId);
+      const puntJ = Math.min(95000, Math.max(18000, (heldBody?.mass ?? 30) * 1150));
+      this.physics.releaseHeldBody(puntJ, forward);
+      this.renderer.spawnBulletTracer(
+        eye,
+        {
+          x: eye.x + forward.x * 160,
+          y: eye.y + forward.y * 160,
+          z: eye.z + forward.z * 160,
+        },
+        0x22d3ee,
+      );
+      return;
+    }
+
+    if (this.gravityGunActive) {
+      // Direct Gravity Gun punt impulse on looked-at rigid body
+      const eye = this.physics.getPlayerEyePosition();
+      const { forward } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
+      const hit = this.physics.traceRay(eye, forward, 420);
+      if (hit.hit && hit.kind === 'rigidBody' && hit.body) {
+        const puntJ = Math.min(85000, Math.max(16000, hit.body.mass * 950));
+        this.physics.applyPointImpulse(hit.body, hit.point, forward, puntJ, 0);
+        this.renderer.spawnBulletTracer(eye, hit.point, 0xfbbf24);
+        this.renderer.spawnImpactEffect(hit.point, hit.normal, 'prop');
+        this.audio.playBoost();
+      }
+      return;
+    }
+
+    this.weapons.handlePrimaryPress(performance.now() * 0.001);
+  }
+
+  private handleSecondaryAction(): void {
+    if (this.drivingVehicleId) return;
+
+    if (this.physics.getGravityGunState().heldBodyId) {
+      this.physics.releaseHeldBody(0);
+      return;
+    }
+
+    if (this.gravityGunActive) {
+      const eye = this.physics.getPlayerEyePosition();
+      const { forward } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
+      const grabbed = this.physics.tryGrabRigidBody(eye, forward, 380, 260, 124);
+      if (!grabbed) {
+        this.hud.showToast('NO GRABBABLE PROP (MAX 260 kg)', 'rgba(148,163,184,0.65)');
+      }
+      return;
+    }
+
+    this.weapons.handleSecondaryPress(performance.now() * 0.001);
+  }
+
+  private handleUseAction(): void {
+    // 1. Exit vehicle if currently driving
+    if (this.drivingVehicleId) {
+      this.exitVehicle(true);
+      return;
+    }
+
+    // 2. Drop held prop if carrying one
+    if (this.physics.getGravityGunState().heldBodyId) {
+      this.physics.releaseHeldBody(0);
+      return;
+    }
+
+    // 3. Enter nearby vehicle
+    const nearVehicle = this.findNearbyVehicle(165);
+    if (nearVehicle) {
+      this.enterVehicle(nearVehicle.id);
+      return;
+    }
+
+    // 4. Pick up looked-at weapon
+    if (this.weapons.tryPickupLookedWeapon()) {
+      return;
+    }
+
+    // 5. Tactile quick-pickup for nearby physics prop via Gravity Gun PID
+    const eye = this.physics.getPlayerEyePosition();
+    const { forward } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
+    const grabbed = this.physics.tryGrabRigidBody(eye, forward, 240, 260, 112);
+    if (grabbed) return;
+
+    this.hud.showToast('AIM AT A WEAPON, PROP, OR VEHICLE', 'rgba(148,163,184,0.65)');
+  }
+
+  private findNearbyVehicle(maxRange: number): SourceVehicle | null {
+    const vehicles = this.physics.getVehicles();
+    if (vehicles.length === 0) return null;
+
+    const eye = this.physics.getPlayerEyePosition();
+    const bodies = this.physics.getRigidBodies();
+    let best: SourceVehicle | null = null;
+    let bestDist = maxRange;
+
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = vehicles[i];
+      const chassis = bodies.find((b) => b.id === v.chassisId);
+      if (!chassis) continue;
+      const dist = Math.hypot(chassis.pos.x - eye.x, chassis.pos.y - eye.y, chassis.pos.z - eye.z);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  private enterVehicle(vehicleId: string): void {
+    this.physics.setDrivenVehicle(vehicleId);
+    const veh = this.physics.getVehicles().find((v) => v.id === vehicleId);
+    const chassis = veh ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId) : undefined;
+    if (chassis) {
+      const vf = this.abi.f32;
+      vf[F32.POS_X] = vf[F32.PREV_X] = f32(chassis.pos.x);
+      vf[F32.POS_Y] = vf[F32.PREV_Y] = f32(chassis.pos.y);
+      vf[F32.POS_Z] = vf[F32.PREV_Z] = f32(chassis.pos.z + 36);
+    }
+  }
+
+  private exitVehicle(announce = true): void {
+    //this.physics.setDrivenVehicle(null);
+    if (!this.drivingVehicleId) return;
+    const veh = this.physics.getVehicles().find((v) => v.id === this.drivingVehicleId);
+    const chassis = veh
+      ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId)
+      : undefined;
+
+    this.physics.setVehicleControls(this.drivingVehicleId, 0, 0, 1);
+    this.drivingVehicleId = null;
+    this.viewmodel.root.visible = !this.gravityGunActive;
+
+    if (chassis) {
+      const vf = this.abi.f32;
+      vf[F32.POS_X] = f32(chassis.pos.x);
+      vf[F32.POS_Y] = f32(chassis.pos.y + chassis.hy + 38);
+      vf[F32.POS_Z] = f32(chassis.pos.z + 36);
+      vf[F32.PREV_X] = vf[F32.POS_X];
+      vf[F32.PREV_Y] = vf[F32.POS_Y];
+      vf[F32.PREV_Z] = vf[F32.POS_Z];
+      vf[F32.VEL_X] = f32(chassis.vel.x * 0.35);
+      vf[F32.VEL_Y] = f32(chassis.vel.y * 0.35);
+      vf[F32.VEL_Z] = f32(120);
+    }
+
+    if (announce) {
+      this.audio.playWeaponSwitch();
+      this.hud.showToast('EXITED VEHICLE', 'rgba(148,163,184,0.7)');
+    }
   }
 
   private handleSandboxHotkey = (e: KeyboardEvent): void => {
     if (!this.input.isPointerLocked || e.repeat) return;
+
+    if (e.code === 'Digit4') {
+      if (!this.drivingVehicleId) {
+        this.setGravityGunMode(!this.gravityGunActive);
+      }
+      return;
+    }
 
     if (e.code === 'KeyB') {
       if (!this.activeCheckpoint) {
         this.hud.showToast('NO STAGE CHECKPOINT REACHED YET', 'rgba(148,163,184,0.6)');
         return;
       }
+      if (this.drivingVehicleId) this.exitVehicle(false);
       this.runTracker.invalidateRankedRun();
       this.physics.restoreVitals();
       this.physics.teleportToCheckpoint(this.activeCheckpoint);
@@ -354,6 +659,7 @@ export class SurfApp {
         this.hud.showToast('NO PRACTICE SAVE (Press C First)', 'rgba(148,163,184,0.6)');
         return;
       }
+      if (this.drivingVehicleId) this.exitVehicle(false);
       this.runTracker.invalidateRankedRun();
       this.physics.restoreVitals();
       this.physics.teleportToCheckpoint(this.customCheckpoint);
@@ -365,8 +671,8 @@ export class SurfApp {
     } else if (e.code === 'KeyF') {
       this.detonateBlastAhead();
     } else if (e.code === 'KeyX') {
-      this.physics.setRigidBodies(this.createInitialRigidBodies());
-      this.hud.showToast('PROPS, TARGETS & GROUND WEAPONS RESET', 'rgba(251,191,36,0.65)');
+      this.resetSubsystemsAndProps();
+      this.hud.showToast('PROPS, RAGDOLLS, JOINTS & VEHICLES RESET', 'rgba(251,191,36,0.65)');
     }
   };
 
@@ -424,6 +730,96 @@ export class SurfApp {
     this.physics.applyExplosionImpulse(origin, 72000, 620, 1.25, 'hotkey_blast');
   }
 
+  private computeInteractPrompt(): InteractPrompt | null {
+    if (this.drivingVehicleId) {
+      return { key: 'E', label: 'EXIT 4WD BUGGY' };
+    }
+
+    if (this.physics.getGravityGunState().heldBodyId) {
+      return null;
+    }
+
+    if (this.physics.getActiveLadder()) {
+      return { key: 'SPACE', label: 'JUMP OFF LADDER' };
+    }
+
+    const nearVeh = this.findNearbyVehicle(165);
+    if (nearVeh) {
+      return { key: 'E', label: 'ENTER 4WD BUGGY' };
+    }
+
+    const eye = this.physics.getPlayerEyePosition();
+    const { forward } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
+
+    const nearWeapon = this.physics.findNearbyWeapon(135, eye, forward, 0.78, false);
+    if (nearWeapon?.weaponData) {
+      const name = nearWeapon.weaponData.slot === 1 ? 'SCOUT' : 'USP .45';
+      return { key: 'E', label: `PICK UP ${name}` };
+    }
+
+    const hit = this.physics.traceRay(eye, forward, this.gravityGunActive ? 380 : 240);
+    if (hit.hit && hit.kind === 'rigidBody' && hit.body && hit.body.mass > 0 && hit.body.mass <= 260) {
+      return {
+        key: this.gravityGunActive ? 'RMB' : 'E',
+        label: `GRAB ${hit.body.id.toUpperCase()} (${Math.round(hit.body.mass)} kg)`,
+      };
+    }
+
+    return null;
+  }
+
+  private buildSubsystemTelemetry(): SubsystemTelemetry {
+    const bodies = this.physics.getRigidBodies();
+    const joints = this.physics.getJoints();
+    const grav = this.physics.getGravityGunState();
+    const heldBody = grav.heldBodyId ? bodies.find((b) => b.id === grav.heldBodyId) ?? null : null;
+    const activeLad = this.physics.getActiveLadder();
+    const activeVeh = this.drivingVehicleId
+      ? this.physics.getVehicles().find((v) => v.id === this.drivingVehicleId) ?? null
+      : null;
+    const vehChassis = activeVeh ? bodies.find((b) => b.id === activeVeh.chassisId) ?? null : null;
+
+    let activeBodies = 0;
+    for (let i = 0; i < bodies.length; i++) {
+      if (!bodies[i].sleeping) activeBodies++;
+    }
+    let intactJoints = 0;
+    for (let i = 0; i < joints.length; i++) {
+      if (!joints[i].broken) intactJoints++;
+    }
+
+    const vf = this.abi.f32;
+    return {
+      activeBodies,
+      totalBodies: bodies.length,
+      intactJoints,
+      totalJoints: joints.length,
+      waterSubmersion: this.physics.getPlayerWaterSubmersion(),
+      heldProp: heldBody
+        ? { id: heldBody.id, mass: heldBody.mass, holdDistance: grav.holdDistance }
+        : null,
+      ladder: activeLad
+        ? {
+            id: activeLad.id,
+            posZ: vf[F32.POS_Z],
+            velZ: vf[F32.VEL_Z],
+            progressPct:
+              ((vf[F32.POS_Z] - activeLad.minZ) / Math.max(1, activeLad.maxZ - activeLad.minZ)) *
+              100,
+          }
+        : null,
+      drivingVehicle:
+        activeVeh && vehChassis
+          ? {
+              vehicle: activeVeh,
+              speedUnits: Math.hypot(vehChassis.vel.x, vehChassis.vel.y, vehChassis.vel.z),
+            }
+          : null,
+      interactPrompt: this.computeInteractPrompt(),
+      vitals: this.physics.getVitals(),
+    };
+  }
+
   private stepPhysicsTick(): void {
     const { f32: vf, i32: vi } = this.abi;
     const keys = this.input.keys;
@@ -431,18 +827,28 @@ export class SurfApp {
 
     let fmove = 0;
     let smove = 0;
-    if (keys.w) fmove += maxSpd;
-    if (keys.s) fmove -= maxSpd;
-    if (keys.d) smove += maxSpd;
-    if (keys.a) smove -= maxSpd;
-
     let buttons = 0;
-    if (keys.jump || this.input.consumeScrollJump()) buttons |= IN_JUMP;
-    if (keys.duck) buttons |= IN_DUCK;
-    if (keys.attack1) buttons |= IN_ATTACK;
-    if (keys.attack2) buttons |= IN_ATTACK2;
-    if (keys.reload) buttons |= IN_RELOAD;
-    if (keys.use) buttons |= IN_USE;
+
+    if (this.drivingVehicleId) {
+      // Route WASD + Space into 4-wheel raycast vehicle controller
+      const throttle = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
+      const steer = (keys.a ? 1 : 0) - (keys.d ? 1 : 0);
+      const handbrake = keys.jump ? 1 : 0;
+      this.physics.setVehicleControls(this.drivingVehicleId, throttle, steer, handbrake);
+      this.input.consumeScrollJump();
+    } else {
+      if (keys.w) fmove += maxSpd;
+      if (keys.s) fmove -= maxSpd;
+      if (keys.d) smove += maxSpd;
+      if (keys.a) smove -= maxSpd;
+
+      if (keys.jump || this.input.consumeScrollJump()) buttons |= IN_JUMP;
+      if (keys.duck) buttons |= IN_DUCK;
+      if (keys.attack1) buttons |= IN_ATTACK;
+      if (keys.attack2) buttons |= IN_ATTACK2;
+      if (keys.reload) buttons |= IN_RELOAD;
+      if (keys.use) buttons |= IN_USE;
+    }
 
     vf[F32.CMD_FMOVE] = f32(fmove);
     vf[F32.CMD_SMOVE] = f32(smove);
@@ -456,6 +862,27 @@ export class SurfApp {
     this.physics.simulateTick();
     const dtSim = performance.now() - t0;
     this.simMsAvg = this.simMsAvg * 0.92 + dtSim * 0.08;
+
+    // Pin player seat pose to chassis after physics tick while driving
+    if (this.drivingVehicleId) {
+      const veh = this.physics.getVehicles().find((v) => v.id === this.drivingVehicleId);
+      const chassis = veh
+        ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId)
+        : undefined;
+      if (chassis) {
+        vf[F32.POS_X] = f32(chassis.pos.x);
+        vf[F32.POS_Y] = f32(chassis.pos.y);
+        vf[F32.POS_Z] = f32(chassis.pos.z + 28);
+        vf[F32.VEL_X] = chassis.vel.x;
+        vf[F32.VEL_Y] = chassis.vel.y;
+        vf[F32.VEL_Z] = chassis.vel.z;
+        vi[I32.FLAGS] |= FL_ONGROUND;
+        vi[I32.MOVESTATE] = MoveState.GROUND;
+      } else {
+        this.drivingVehicleId = null;
+        this.viewmodel.root.visible = !this.gravityGunActive;
+      }
+    }
 
     const postXY = Math.hypot(vf[F32.VEL_X], vf[F32.VEL_Y]);
     const airborne = (vi[I32.FLAGS] & FL_ONGROUND) === 0;
@@ -487,7 +914,9 @@ export class SurfApp {
         substeps++;
       }
       if (substeps === 6) this.accumulator = 0;
-      this.weapons.update(nowSec);
+      if (!this.drivingVehicleId && !this.gravityGunActive) {
+        this.weapons.update(nowSec);
+      }
     } else {
       this.accumulator = 0;
     }
@@ -519,8 +948,10 @@ export class SurfApp {
       this.input.vmSwayY,
     );
 
+    const eyePos = { x: rx, y: ry, z: rz + rEye };
+
     this.audio.updateListener({
-      pos: { x: rx, y: ry, z: rz + rEye },
+      pos: eyePos,
       vel: { x: vf[F32.VEL_X], y: vf[F32.VEL_Y], z: vf[F32.VEL_Z] },
       yaw: renderYaw,
       pitch: renderPitch,
@@ -529,6 +960,7 @@ export class SurfApp {
 
     this.renderer.update(frameDt, rx, ry, rz + rEye, renderYaw, renderPitch, spdXY);
 
+    const subsystems = this.buildSubsystemTelemetry();
     this.hud.update({
       now,
       spdXY,
@@ -541,11 +973,23 @@ export class SurfApp {
       ducking,
       keys: this.input.keys,
       cvarLabel: `${this.currentMapId} | aa:${Math.round(vf[F32.CVAR_AIRACCEL])} mv:${Math.round(vf[F32.CVAR_MAXVEL])}`,
+      subsystems,
     });
 
     this.combatHud.update(frameDt, this.physics.getVitals(), this.weapons.getHudSnapshot(nowSec));
 
-    this.renderer.syncRigidBodies(this.physics.getRigidBodies());
+    const bodies = this.physics.getRigidBodies();
+    const heldId = this.physics.getGravityGunState().heldBodyId;
+    const heldBody = heldId ? bodies.find((b) => b.id === heldId) ?? null : null;
+
+    this.renderer.syncSubsystems(
+      bodies,
+      this.physics.getRopes(),
+      this.physics.getVehicles(),
+      this.physics.getJoints(),
+      heldBody ? eyePos : null,
+      heldBody,
+    );
     this.renderer.render();
   };
 }

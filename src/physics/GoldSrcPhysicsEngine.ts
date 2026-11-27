@@ -297,6 +297,25 @@ export interface PhysicsCallbacks {
   onGravityGunRelease?: (bodyId: string, punted: boolean) => void;
 }
 
+export interface LadderVolume {
+  id: string;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  /** Outward unit normal pointing away from the ladder face toward the climber */
+  normalX: number;
+  normalY: number;
+  normalZ?: number;
+  climbSpeed?: number;
+}
+
+export interface RagdollBundle {
+  bodies: SourceRigidBody[];
+  joints: SourceJoint[];
+}
 interface TraceResult {
   fraction: number;
   endX: number;
@@ -378,6 +397,129 @@ export function computeAngleVectors(
       z: f32(cr * cp),
     },
   };
+}
+
+/**
+ * 6-segment articulated ragdoll (pelvis, torso, head, L/R arms, L/R legs)
+ * linked via ball/hinge joints with breakable impulse thresholds.
+ */
+export function createArticulatedRagdoll(
+  idPrefix: string,
+  footOrigin: Vec3,
+  opts: { breakForce?: number; massScale?: number } = {},
+): RagdollBundle {
+  const m = opts.massScale ?? 1.0;
+  const bf = opts.breakForce ?? 3200;
+  const x = footOrigin.x;
+  const y = footOrigin.y;
+  const z = footOrigin.z;
+
+  const legL = createBoxRigidBody(
+    `${idPrefix}_leg_l`,
+    { x, y: y + 7, z: z + 17 },
+    { x: 5.5, y: 5.5, z: 16 },
+    12 * m,
+    { kind: 'target', hp: 90, bleeds: true, restitution: 0.15, surfaceFriction: 1.4 },
+  );
+  const legR = createBoxRigidBody(
+    `${idPrefix}_leg_r`,
+    { x, y: y - 7, z: z + 17 },
+    { x: 5.5, y: 5.5, z: 16 },
+    12 * m,
+    { kind: 'target', hp: 90, bleeds: true, restitution: 0.15, surfaceFriction: 1.4 },
+  );
+  const torso = createBoxRigidBody(
+    `${idPrefix}_torso`,
+    { x, y, z: z + 47 },
+    { x: 9, y: 12, z: 14 },
+    28 * m,
+    { kind: 'target', hp: 140, bleeds: true, restitution: 0.18, surfaceFriction: 1.35 },
+  );
+  const head = createBoxRigidBody(
+    `${idPrefix}_head`,
+    { x, y, z: z + 69 },
+    { x: 7, y: 7, z: 7.5 },
+    6 * m,
+    { kind: 'target', hp: 60, bleeds: true, restitution: 0.22, surfaceFriction: 1.2 },
+  );
+  const armL = createBoxRigidBody(
+    `${idPrefix}_arm_l`,
+    { x, y: y + 18, z: z + 48 },
+    { x: 4.5, y: 4.5, z: 13 },
+    6 * m,
+    { kind: 'target', hp: 70, bleeds: true, restitution: 0.15, surfaceFriction: 1.3 },
+  );
+  const armR = createBoxRigidBody(
+    `${idPrefix}_arm_r`,
+    { x, y: y - 18, z: z + 48 },
+    { x: 4.5, y: 4.5, z: 13 },
+    6 * m,
+    { kind: 'target', hp: 70, bleeds: true, restitution: 0.15, surfaceFriction: 1.3 },
+  );
+
+  const joints: SourceJoint[] = [
+    {
+      id: `${idPrefix}_jt_neck`,
+      kind: 'ball',
+      bodyAId: torso.id,
+      bodyBId: head.id,
+      localAnchorA: { x: 0, y: 0, z: 14.5 },
+      localAnchorB: { x: 0, y: 0, z: -7.5 },
+      frequencyHz: 22,
+      dampingRatio: 1.0,
+      breakForce: bf * 0.75,
+    },
+    {
+      id: `${idPrefix}_jt_hip_l`,
+      kind: 'hinge',
+      bodyAId: torso.id,
+      bodyBId: legL.id,
+      localAnchorA: { x: 0, y: 7, z: -14 },
+      localAnchorB: { x: 0, y: 0, z: 16 },
+      localAxisA: { x: 0, y: 1, z: 0 },
+      localAxisB: { x: 0, y: 1, z: 0 },
+      frequencyHz: 24,
+      dampingRatio: 1.0,
+      breakForce: bf,
+    },
+    {
+      id: `${idPrefix}_jt_hip_r`,
+      kind: 'hinge',
+      bodyAId: torso.id,
+      bodyBId: legR.id,
+      localAnchorA: { x: 0, y: -7, z: -14 },
+      localAnchorB: { x: 0, y: 0, z: 16 },
+      localAxisA: { x: 0, y: 1, z: 0 },
+      localAxisB: { x: 0, y: 1, z: 0 },
+      frequencyHz: 24,
+      dampingRatio: 1.0,
+      breakForce: bf,
+    },
+    {
+      id: `${idPrefix}_jt_shoulder_l`,
+      kind: 'ball',
+      bodyAId: torso.id,
+      bodyBId: armL.id,
+      localAnchorA: { x: 0, y: 13, z: 10 },
+      localAnchorB: { x: 0, y: -4.5, z: 10 },
+      frequencyHz: 20,
+      dampingRatio: 1.0,
+      breakForce: bf * 0.8,
+    },
+    {
+      id: `${idPrefix}_jt_shoulder_r`,
+      kind: 'ball',
+      bodyAId: torso.id,
+      bodyBId: armR.id,
+      localAnchorA: { x: 0, y: -13, z: 10 },
+      localAnchorB: { x: 0, y: 4.5, z: 10 },
+      frequencyHz: 20,
+      dampingRatio: 1.0,
+      breakForce: bf * 0.8,
+    },
+  ];
+
+  return { bodies: [legL, legR, torso, head, armL, armR], joints };
 }
 
 /** Create a box rigid body with exact cuboid principal inertia tensor I = (m/12) * (w^2 + h^2) */
@@ -1076,6 +1218,129 @@ export class GoldSrcPhysicsEngine {
     allSolid: false,
     brushId: '',
   };
+  // src/physics/GoldSrcPhysicsEngine.ts — add field & setter:
+  private drivenVehicleId: string | null = null;
+
+  public setDrivenVehicle(vehicleId: string | null): void {
+    this.drivenVehicleId = vehicleId;
+    if (vehicleId) {
+      const veh = this.vehicles.find((v) => v.id === vehicleId);
+      if (veh) this.wakeBodyById(veh.chassisId);
+    }
+  }
+
+  // Add to class fields:
+    private readonly ladders: LadderVolume[] = [];
+    private activeLadder: LadderVolume | null = null;
+    private ladderDetachUntilTick = 0;
+
+    // Add to public subsystem APIs:
+    public addLadder(ladder: LadderVolume): void {
+      this.ladders.push(ladder);
+    }
+
+    public clearLadders(): void {
+      this.ladders.length = 0;
+      this.activeLadder = null;
+    }
+
+    public getLadders(): readonly LadderVolume[] {
+      return this.ladders;
+    }
+
+    public getActiveLadder(): Readonly<LadderVolume> | null {
+      return this.activeLadder;
+    }
+
+    public getPlayerWaterSubmersion(): number {
+      return this.playerWaterSubmersion;
+    }
+
+    /** Detect overlap with any registered LadderVolume */
+    private findTouchingLadder(): LadderVolume | null {
+      const { f32: vf, i32: vi } = this.abi;
+      if (vi[I32.TICK] < this.ladderDetachUntilTick) return null;
+      const hz = this.getHullHalfZ();
+      const px = vf[F32.POS_X];
+      const py = vf[F32.POS_Y];
+      const pz = vf[F32.POS_Z];
+      const pad = 4.0;
+
+      for (let i = 0; i < this.ladders.length; i++) {
+        const l = this.ladders[i];
+        if (
+          px + HULL_STAND.hx + pad < l.minX ||
+          px - HULL_STAND.hx - pad > l.maxX ||
+          py + HULL_STAND.hy + pad < l.minY ||
+          py - HULL_STAND.hy - pad > l.maxY ||
+          pz + hz < l.minZ ||
+          pz - hz > l.maxZ
+        ) {
+          continue;
+        }
+        return l;
+      }
+      return null;
+    }
+
+    /**
+     * Authentic GoldSrc/Source PM_LadderMove:
+     * Projects look-space forward/side speed onto the ladder plane so looking up + W
+     * climbs upward and diagonal W+A/D fast-climbs at sqrt(2) * climbSpeed.
+     */
+    private ladderMove(
+      ladder: LadderVolume,
+      forward: Vec3,
+      right: Vec3,
+      fmove: number,
+      smove: number,
+    ): void {
+      const vf = this.abi.f32;
+      const climbMax = ladder.climbSpeed ?? 200;
+      const fSpeed = Math.max(-climbMax, Math.min(climbMax, fmove));
+      const sSpeed = Math.max(-climbMax, Math.min(climbMax, smove));
+
+      if (Math.abs(fSpeed) < 1e-3 && Math.abs(sSpeed) < 1e-3) {
+        vf[F32.VEL_X] = f32(0);
+        vf[F32.VEL_Y] = f32(0);
+        vf[F32.VEL_Z] = f32(0);
+        return;
+      }
+
+      const vx = f32(forward.x * fSpeed + right.x * sSpeed);
+      const vy = f32(forward.y * fSpeed + right.y * sSpeed);
+      const vz = f32(forward.z * fSpeed + right.z * sSpeed);
+
+      const nx = ladder.normalX;
+      const ny = ladder.normalY;
+      const nz = ladder.normalZ ?? 0;
+
+      // perp = normalize(up x ladderNormal)
+      let px = -ny;
+      let py = nx;
+      const pLen = Math.hypot(px, py) || 1;
+      px /= pLen;
+      py /= pLen;
+
+      const normalDot = vx * nx + vy * ny + vz * nz;
+      const latX = vx - nx * normalDot;
+      const latY = vy - ny * normalDot;
+      const latZ = vz - nz * normalDot;
+
+      // tmp = ladderNormal x perp -> points along ladder up-axis
+      const upX = ny * 0 - nz * py;
+      const upY = nz * px - nx * 0;
+      const upZ = nx * py - ny * px;
+
+      // Pull gently toward ladder face if climbing so player tracks cleanly to the top lip
+      const stick = normalDot < 0 ? -12 : 0;
+          vf[F32.VEL_X] = f32(latX - upX * normalDot + nx * stick);
+          vf[F32.VEL_Y] = f32(latY - upY * normalDot + ny * stick);
+          vf[F32.VEL_Z] = f32(latZ - upZ * normalDot + nz * stick);
+
+      this.checkVelocity();
+      this.flyMove();
+  }
 
   constructor(
     abi: PhysicsMemoryAbi,
@@ -1106,8 +1371,8 @@ export class GoldSrcPhysicsEngine {
       linearDamping: sourceConfig.linearDamping ?? 0.04,
       angularDamping: sourceConfig.angularDamping ?? 0.08,
       physPushScale: sourceConfig.physPushScale ?? 1.0,
-      fallDamageThreshold: sourceConfig.fallDamageThreshold ?? 580,
-      fallDamageScale: sourceConfig.fallDamageScale ?? 0.16,
+      fallDamageThreshold: sourceConfig.fallDamageThreshold ?? 950,
+      fallDamageScale: sourceConfig.fallDamageScale ?? 0.045,
       tgsSubsteps: Math.max(1, sourceConfig.tgsSubsteps ?? 2),
       tgsIterations: Math.max(1, sourceConfig.tgsIterations ?? 4),
       ngsIterations: Math.max(0, sourceConfig.ngsIterations ?? 2),
@@ -1990,7 +2255,29 @@ export class GoldSrcPhysicsEngine {
       vi[I32.PREV_BUTTONS] = vi[I32.BUTTONS];
       return;
     }
-
+    // Driving mode: step vehicles/props without player hull colliding against chassis
+        if (this.drivenVehicleId) {
+          this.stepSecondaryPhysics(false, false);
+          const veh = this.vehicles.find((v) => v.id === this.drivenVehicleId);
+          const chassis = veh ? this.findBodyById(veh.chassisId) : null;
+          if (chassis) {
+            const rot = quatToMat3(chassis.quat);
+            const up = { x: rot[2], y: rot[5], z: rot[8] };
+            vf[F32.POS_X] = f32(chassis.pos.x + up.x * 36);
+            vf[F32.POS_Y] = f32(chassis.pos.y + up.y * 36);
+            vf[F32.POS_Z] = f32(chassis.pos.z + up.z * 36);
+            vf[F32.VEL_X] = chassis.vel.x;
+            vf[F32.VEL_Y] = chassis.vel.y;
+            vf[F32.VEL_Z] = chassis.vel.z;
+            vi[I32.FLAGS] |= FL_ONGROUND;
+            vi[I32.MOVESTATE] = MoveState.GROUND;
+          } else {
+            this.drivenVehicleId = null;
+          }
+          this.checkTriggers();
+          vi[I32.PREV_BUTTONS] = vi[I32.BUTTONS];
+          return;
+        }
     const wasOnGround = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     const preVelZ = vf[F32.VEL_Z];
     const gravity = vf[F32.CVAR_GRAVITY];
@@ -2003,28 +2290,151 @@ export class GoldSrcPhysicsEngine {
     this.playerWaterSubmersion = this.computePlayerWaterSubmersion();
     const inWater = this.playerWaterSubmersion > 0.35;
 
+    // 2b. Check ladder engagement before jump & gravity
+    // 2b. Check ladder engagement before jump & gravity
+        const touchingLadder = this.findTouchingLadder();
+        this.activeLadder = null;
+
+    if (touchingLadder) {
+      const buttons = vi[I32.BUTTONS];
+            const prevButtons = vi[I32.PREV_BUTTONS];
+            const freshJump = (buttons & IN_JUMP) !== 0 && (prevButtons & IN_JUMP) === 0;
+
+            if (freshJump) {
+              // Classic Source/GoldSrc jump-off away from ladder normal
+              this.activeLadder = null;
+              this.ladderDetachUntilTick = vi[I32.TICK] + 18;
+              vi[I32.FLAGS] &= ~FL_ONGROUND;
+              vf[F32.VEL_X] = f32(touchingLadder.normalX * 270);
+              vf[F32.VEL_Y] = f32(touchingLadder.normalY * 270);
+              vf[F32.VEL_Z] = f32(Math.max(vf[F32.VEL_Z], 185));
+              this.callbacks.onJump?.();
+            } else {
+              vi[I32.FLAGS] &= ~FL_ONGROUND;
+              vi[I32.MOVESTATE] = MoveState.LADDER;
+              const { forward, right } = computeAngleVectors(-vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0);
+              this.ladderMove(touchingLadder, forward, right, vf[F32.CMD_FMOVE], vf[F32.CMD_SMOVE]);
+              this.stepSecondaryPhysics(true, false);
+              this.checkTriggers();
+              vi[I32.PREV_BUTTONS] = buttons;
+              return;
+            }
+          // const buttons = vi[I32.BUTTONS];
+          // const prevButtons = vi[I32.PREV_BUTTONS];
+          // const freshJump = (buttons & IN_JUMP) !== 0 && (prevButtons & IN_JUMP) === 0;
+          // const fmoveRaw = vf[F32.CMD_FMOVE];
+          // const smoveRaw = vf[F32.CMD_SMOVE];
+          // const hz = this.getHullHalfZ();
+          // const feetZ = vf[F32.POS_Z] - hz;
+          // const onFloor = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
+
+          // // Compute horizontal wish direction relative to ladder outward normal
+          // const { forward, right } = computeAngleVectors(-vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0);
+          // const wishX = fmoveRaw * forward.x + smoveRaw * right.x;
+          // const wishY = fmoveRaw * forward.y + smoveRaw * right.y;
+          // const wishLen = Math.hypot(wishX, wishY);
+          // // < 0 means pushing INTO the ladder wall; > 0 means moving OUTWARD away from wall
+          // const wishDotNormal =
+          //   wishLen > 1e-4
+          //     ? (wishX * touchingLadder.normalX + wishY * touchingLadder.normalY) / wishLen
+          //     : 0;
+
+          // // Case A: Standing on the TOP deck -> let normal walkMove carry you cleanly over the lip
+          // const standingOnTopDeck = onFloor && feetZ >= touchingLadder.maxZ - 4;
+
+          // // Case B: Standing on the BOTTOM floor and moving outward away from ladder -> walk off
+          // const exitingBottom = onFloor && feetZ <= touchingLadder.minZ + 6 && wishDotNormal > 0.25;
+
+          // if (!standingOnTopDeck && !exitingBottom) {
+          //   // Case C: Climbing UP to top lip (airborne + pushing INTO wall + not looking straight down)
+          //   const climbingUpAtTop =
+          //     !onFloor &&
+          //     feetZ >= touchingLadder.maxZ - 14 &&
+          //     wishDotNormal < -0.25 &&
+          //     forward.z > -0.35;
+
+          //   if (climbingUpAtTop) {
+          //     const stepX = f32(vf[F32.POS_X] - touchingLadder.normalX * 26);
+          //     const stepY = f32(vf[F32.POS_Y] - touchingLadder.normalY * 26);
+          //     const stepZ = f32(touchingLadder.maxZ + hz + 2);
+          //     const clearTr = this.traceWorld(
+          //       vf[F32.POS_X],
+          //       vf[F32.POS_Y],
+          //       stepZ,
+          //       stepX,
+          //       stepY,
+          //       stepZ,
+          //       HULL_STAND.hx,
+          //       HULL_STAND.hy,
+          //       hz,
+          //       this.auxTraceScratch,
+          //     );
+          //     if (!clearTr.startSolid && !clearTr.allSolid && clearTr.fraction > 0.4) {
+          //       this.ladderDetachUntilTick = vi[I32.TICK] + 18;
+          //       vf[F32.POS_X] = clearTr.endX;
+          //       vf[F32.POS_Y] = clearTr.endY;
+          //       vf[F32.POS_Z] = clearTr.endZ;
+          //       vf[F32.VEL_X] = f32(-touchingLadder.normalX * 140);
+          //       vf[F32.VEL_Y] = f32(-touchingLadder.normalY * 140);
+          //       vf[F32.VEL_Z] = f32(0);
+          //       vi[I32.FLAGS] |= FL_ONGROUND;
+          //       vi[I32.MOVESTATE] = MoveState.GROUND;
+          //       this.stepSecondaryPhysics(true, false);
+          //       this.checkTriggers();
+          //       vi[I32.PREV_BUTTONS] = buttons;
+          //       return;
+          //     }
+          //   }
+
+          //   if (freshJump) {
+          //     // Space jumps cleanly off away from the ladder face
+          //     this.ladderDetachUntilTick = vi[I32.TICK] + 18;
+          //     vi[I32.FLAGS] &= ~FL_ONGROUND;
+          //     vf[F32.VEL_X] = f32(touchingLadder.normalX * 260);
+          //     vf[F32.VEL_Y] = f32(touchingLadder.normalY * 260);
+          //     vf[F32.VEL_Z] = f32(Math.max(vf[F32.VEL_Z], 185));
+          //     this.callbacks.onJump?.();
+          //   } else {
+          //     this.activeLadder = touchingLadder;
+          //     vi[I32.FLAGS] &= ~FL_ONGROUND;
+          //     vi[I32.MOVESTATE] = MoveState.LADDER;
+          //     this.ladderMove(touchingLadder, forward, right, fmoveRaw, smoveRaw);
+          //     this.stepSecondaryPhysics(true, false);
+          //     this.checkTriggers();
+          //     vi[I32.PREV_BUTTONS] = buttons;
+          //     return;
+          //   }
+          // }
+        }
     // 3. CheckJumpButton: v_z = sqrt(2 * g * h_jump), h_jump = 45u (CS:S / GoldSrc)
     const buttons = vi[I32.BUTTONS];
-    const prevButtons = vi[I32.PREV_BUTTONS];
-    const autoBhop = vi[I32.AUTOBHOP] === 1;
-    const jumpPressed = (buttons & IN_JUMP) !== 0;
-    const freshJump = jumpPressed && (autoBhop || (prevButtons & IN_JUMP) === 0);
+        const prevButtons = vi[I32.PREV_BUTTONS];
+        const autoBhop = vi[I32.AUTOBHOP] === 1;
+        const jumpPressed = (buttons & IN_JUMP) !== 0;
+        const duckPressed = (buttons & IN_DUCK) !== 0;
+        const freshJump = jumpPressed && (autoBhop || (prevButtons & IN_JUMP) === 0);
 
-    if (inWater && jumpPressed) {
-      vi[I32.FLAGS] &= ~FL_ONGROUND;
-      vf[F32.VEL_Z] = f32(Math.max(vf[F32.VEL_Z], 145.0));
-    } else if (freshJump && (vi[I32.FLAGS] & FL_ONGROUND)) {
-      vi[I32.FLAGS] &= ~FL_ONGROUND;
-      vf[F32.VEL_Z] = f32(Math.sqrt(2.0 * gravity * 45.0));
-      this.callbacks.onJump?.();
-    }
+        if (inWater) {
+          if (jumpPressed) {
+            vi[I32.FLAGS] &= ~FL_ONGROUND;
+            // Give an extra water-jump boost near the surface so player can hop onto the pool rim
+            const nearSurface = this.playerWaterSubmersion < 0.68;
+            vf[F32.VEL_Z] = f32(Math.max(vf[F32.VEL_Z], nearSurface ? 275.0 : 185.0));
+          } else if (duckPressed) {
+            vi[I32.FLAGS] &= ~FL_ONGROUND;
+            vf[F32.VEL_Z] = f32(Math.min(vf[F32.VEL_Z], -150.0));
+          }
+        } else if (freshJump && (vi[I32.FLAGS] & FL_ONGROUND)) {
+          vi[I32.FLAGS] &= ~FL_ONGROUND;
+          vf[F32.VEL_Z] = f32(Math.sqrt(2.0 * gravity * 45.0));
+          this.callbacks.onJump?.();
+        }
 
-    // 4. StartGravity (first half-step, attenuated in water)
-    const isGroundedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
-    const gravScale = inWater ? f32(0.18) : f32(1.0);
-    if (!isGroundedNow) {
-      this.applyHalfGravity(gravity, gravScale);
-    }
+        // 4. StartGravity (skip gravity in water — buoyancy is solved inside waterMove)
+        const isGroundedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
+        if (!isGroundedNow && !inWater) {
+          this.applyHalfGravity(gravity, 1.0);
+        }
 
     if (this.baseVelX !== 0 || this.baseVelY !== 0 || this.baseVelZ !== 0) {
       vf[F32.VEL_X] = f32(vf[F32.VEL_X] + this.baseVelX);
@@ -2083,36 +2493,42 @@ export class GoldSrcPhysicsEngine {
       this.baseVelZ = f32(0);
     }
 
-    // 7. FinishGravity (second half-step) + fall damage check
-    this.categorizePosition();
-    const landedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
-    if (!landedNow) {
-      this.applyHalfGravity(gravity, gravScale);
-    } else {
-      vf[F32.VEL_Z] = f32(0);
-      if (!wasOnGround && !inWater && preVelZ < -140) {
-        const impact = Math.abs(preVelZ);
-        this.callbacks.onLand?.(impact);
-        if (impact > this.sourceConfig.fallDamageThreshold) {
-          const fallDmg =
-            (impact - this.sourceConfig.fallDamageThreshold) * this.sourceConfig.fallDamageScale;
-          this.damagePlayer(fallDmg, 'fall');
+    // 7. FinishGravity (preserve upward swimming velocity in water)
+        this.categorizePosition();
+        const landedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0 && !(inWater && vf[F32.VEL_Z] > 5);
+        if (inWater && vf[F32.VEL_Z] > 5) {
+          vi[I32.FLAGS] &= ~FL_ONGROUND;
         }
-      }
-    }
+
+        if (!landedNow) {
+          if (!inWater) this.applyHalfGravity(gravity, 1.0);
+        } else {
+          vf[F32.VEL_Z] = f32(0);
+          if (!wasOnGround && !inWater && preVelZ < -140) {
+            const impact = Math.abs(preVelZ);
+            this.callbacks.onLand?.(impact);
+            if (impact > this.sourceConfig.fallDamageThreshold) {
+              const rawDmg =
+                (impact - this.sourceConfig.fallDamageThreshold) * this.sourceConfig.fallDamageScale;
+              this.damagePlayer(Math.min(35, rawDmg), 'fall');
+            }
+          }
+        }
 
     // 8. Determine telemetry state (GROUND / SURF / AIR) before player-shadow push check
     const isSurfing =
       !landedNow &&
       ((flyBlocked & 4) !== 0 || (vf[F32.SURF_NZ] > 0.05 && vf[F32.SURF_NZ] < SURF_NORMAL_Z));
 
-    if (landedNow) {
-      vi[I32.MOVESTATE] = MoveState.GROUND;
-    } else if (isSurfing) {
-      vi[I32.MOVESTATE] = MoveState.SURF;
-    } else {
-      vi[I32.MOVESTATE] = MoveState.AIR;
-    }
+    if (inWater) {
+          vi[I32.MOVESTATE] = MoveState.WATER;
+        } else if (landedNow) {
+          vi[I32.MOVESTATE] = MoveState.GROUND;
+        } else if (isSurfing) {
+          vi[I32.MOVESTATE] = MoveState.SURF;
+        } else {
+          vi[I32.MOVESTATE] = MoveState.AIR;
+        }
 
     // 9. VPhysics (TGS Soft + NGS), Gravity Gun PID, Vehicles, Buoyancy, Joints, Ropes & Player Shadow
     this.stepSecondaryPhysics(true, isSurfing);
@@ -2253,6 +2669,7 @@ export class GoldSrcPhysicsEngine {
     const angSqThresh = this.sourceConfig.sleepAngularThreshold ** 2;
     const sleepTimeThresh = this.sourceConfig.sleepTimeThreshold;
 
+
     for (let i = 0; i < count; i++) {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
@@ -2260,6 +2677,14 @@ export class GoldSrcPhysicsEngine {
         this.wakeBody(b);
         continue;
       }
+      // Inside stepRigidBodiesTgsSoft() step 5, right next to the gravityGun check:
+        const isDrivenChassis =
+          this.drivenVehicleId !== null &&
+          this.vehicles.some((v) => v.id === this.drivenVehicleId && v.chassisId === b.id);
+        if (this.gravityGun.heldBodyId === b.id || isDrivenChassis) {
+          this.wakeBody(b);
+          continue;
+        }
 
       const vSq = b.vel.x * b.vel.x + b.vel.y * b.vel.y + b.vel.z * b.vel.z;
       const wSq = b.angVel.x * b.angVel.x + b.angVel.y * b.angVel.y + b.angVel.z * b.angVel.z;
@@ -2283,114 +2708,126 @@ export class GoldSrcPhysicsEngine {
   }
 
   /** Integrate a single body over subDt with selective CCD sweep against static BSP world */
-  private integrateRigidBodyWorldPose(b: SourceRigidBody, subDt: number): void {
-    const tr = this.bodyTraceScratch;
-    const minExtent = Math.min(b.hx, b.hy, b.hz);
-    const maxRadius = Math.hypot(b.hx, b.hy, b.hz);
-    const speed = Math.hypot(b.vel.x, b.vel.y, b.vel.z);
-    const angSpeed = Math.hypot(b.angVel.x, b.angVel.y, b.angVel.z);
-    const maxDisp = speed * subDt + maxRadius * angSpeed * subDt;
+  /** Integrate a single body over subDt with selective CCD and 2-pass surface sliding */
+    private integrateRigidBodyWorldPose(b: SourceRigidBody, subDt: number): void {
+      const tr = this.bodyTraceScratch;
+      const minExtent = Math.min(b.hx, b.hy, b.hz);
+      const maxRadius = Math.hypot(b.hx, b.hy, b.hz);
+      const speed = Math.hypot(b.vel.x, b.vel.y, b.vel.z);
+      const angSpeed = Math.hypot(b.angVel.x, b.angVel.y, b.angVel.z);
+      const maxDisp = speed * subDt + maxRadius * angSpeed * subDt;
 
-    // Selective CCD: subdivide high-speed bodies to prevent tunneling through thin brushes
-    const ccdSteps =
-      b.enableCcd !== false && minExtent > 0.5 && maxDisp > minExtent * 0.5
-        ? Math.min(4, Math.ceil(maxDisp / (minExtent * 0.5)))
-        : 1;
-    const stepDt = f32(subDt / ccdSteps);
+      const ccdSteps =
+        b.enableCcd !== false && minExtent > 0.5 && maxDisp > minExtent * 0.5
+          ? Math.min(4, Math.ceil(maxDisp / (minExtent * 0.5)))
+          : 1;
+      const stepDt = f32(subDt / ccdSteps);
 
-    for (let k = 0; k < ccdSteps; k++) {
-      const targetX = f32(b.pos.x + b.vel.x * stepDt);
-      const targetY = f32(b.pos.y + b.vel.y * stepDt);
-      const targetZ = f32(b.pos.z + b.vel.z * stepDt);
+      for (let k = 0; k < ccdSteps; k++) {
+        // Quaternion integration: q <- normalize(q + 0.5 * [0, w] * q * dt)
+        const qw = b.quat.w;
+        const qx = b.quat.x;
+        const qy = b.quat.y;
+        const qz = b.quat.z;
+        const wx = b.angVel.x;
+        const wy = b.angVel.y;
+        const wz = b.angVel.z;
 
-      // Quaternion integration: q <- normalize(q + 0.5 * [0, w] * q * dt)
-      const qw = b.quat.w;
-      const qx = b.quat.x;
-      const qy = b.quat.y;
-      const qz = b.quat.z;
-      const wx = b.angVel.x;
-      const wy = b.angVel.y;
-      const wz = b.angVel.z;
+        b.quat = normalizeQuat({
+          w: f32(qw - 0.5 * (wx * qx + wy * qy + wz * qz) * stepDt),
+          x: f32(qx + 0.5 * (wx * qw + wy * qz - wz * qy) * stepDt),
+          y: f32(qy + 0.5 * (-wx * qz + wy * qw + wz * qx) * stepDt),
+          z: f32(qz + 0.5 * (wx * qy - wy * qx + wz * qw) * stepDt),
+        });
 
-      b.quat = normalizeQuat({
-        w: f32(qw - 0.5 * (wx * qx + wy * qy + wz * qz) * stepDt),
-        x: f32(qx + 0.5 * (wx * qw + wy * qz - wz * qy) * stepDt),
-        y: f32(qy + 0.5 * (-wx * qz + wy * qw + wz * qx) * stepDt),
-        z: f32(qz + 0.5 * (wx * qy - wy * qx + wz * qw) * stepDt),
-      });
+        // 2-pass slide loop so resting/scraping bodies still move horizontally
+        let remDt = stepDt;
+        for (let bump = 0; bump < 2 && remDt > 1e-6; bump++) {
+          const targetX = f32(b.pos.x + b.vel.x * remDt);
+          const targetY = f32(b.pos.y + b.vel.y * remDt);
+          const targetZ = f32(b.pos.z + b.vel.z * remDt);
 
-      this.traceWorld(b.pos.x, b.pos.y, b.pos.z, targetX, targetY, targetZ, b.hx, b.hy, b.hz, tr);
+          this.traceWorld(b.pos.x, b.pos.y, b.pos.z, targetX, targetY, targetZ, b.hx, b.hy, b.hz, tr);
 
-      b.pos.x = tr.endX;
-      b.pos.y = tr.endY;
-      b.pos.z = tr.endZ;
-
-      if (tr.fraction < 1.0) {
-        const nx = tr.normalX;
-        const ny = tr.normalY;
-        const nz = tr.normalZ;
-        const vn = f32(b.vel.x * nx + b.vel.y * ny + b.vel.z * nz);
-
-        if (vn < 0) {
-          const rest = Math.abs(vn) > 24 ? Math.max(b.restitution, this.sourceConfig.svBounce) : 0;
-          const bounce = f32(1.0 + rest);
-          const jn = f32(-vn * bounce * b.mass);
-
-          b.vel.x = f32(b.vel.x - nx * vn * bounce);
-          b.vel.y = f32(b.vel.y - ny * vn * bounce);
-          b.vel.z = f32(b.vel.z - nz * vn * bounce);
-
-          // Coulomb tangential friction + rotational rolling/torsional damping against world brush
-          const mu = b.surfaceFriction ?? this.sourceConfig.surfaceFriction;
-          const vtX = f32(b.vel.x - nx * (b.vel.x * nx + b.vel.y * ny + b.vel.z * nz));
-          const vtY = f32(b.vel.y - ny * (b.vel.x * nx + b.vel.y * ny + b.vel.z * nz));
-          const vtZ = f32(b.vel.z - nz * (b.vel.x * nx + b.vel.y * ny + b.vel.z * nz));
-          const vtLen = Math.hypot(vtX, vtY, vtZ);
-          if (vtLen > 1e-4) {
-            const maxFrictionDv = f32((mu * Math.abs(jn)) / b.mass);
-            const drop = Math.min(vtLen, maxFrictionDv);
-            const scale = f32((vtLen - drop) / vtLen);
-            b.vel.x = f32(b.vel.x - vtX * (1 - scale));
-            b.vel.y = f32(b.vel.y - vtY * (1 - scale));
-            b.vel.z = f32(b.vel.z - vtZ * (1 - scale));
-
-            // Induce realistic tumbling torque when sliding across floor/walls
-            const rot = quatToMat3(b.quat);
-            const { invInertia } = computeWorldInertia(rot, b.inertiaLocal);
-            const lever: Vec3 = {
-              x: f32(-nx * b.hx * 0.5),
-              y: f32(-ny * b.hy * 0.5),
-              z: f32(-nz * b.hz * 0.5),
-            };
-            const jtVec: Vec3 = {
-              x: f32((-vtX / vtLen) * drop * b.mass * 0.25),
-              y: f32((-vtY / vtLen) * drop * b.mass * 0.25),
-              z: f32((-vtZ / vtLen) * drop * b.mass * 0.25),
-            };
-            const dOmega = mulMat3Vec3(invInertia, crossVec3(lever, jtVec));
-            b.angVel.x = f32(b.angVel.x + dOmega.x);
-            b.angVel.y = f32(b.angVel.y + dOmega.y);
-            b.angVel.z = f32(b.angVel.z + dOmega.z);
+          if (tr.startSolid || tr.allSolid) {
+            b.pos.z = f32(b.pos.z + 2.0);
+            if (b.vel.z < 0) b.vel.z = f32(0);
+            break;
           }
 
-          // Torsional spin friction around contact normal
-          const wTwist = f32(b.angVel.x * nx + b.angVel.y * ny + b.angVel.z * nz);
-          const twistDamp = f32(Math.max(0, 1 - 0.16 * mu));
-          b.angVel.x = f32(b.angVel.x * 0.92 - nx * wTwist * (1 - twistDamp));
-          b.angVel.y = f32(b.angVel.y * 0.92 - ny * wTwist * (1 - twistDamp));
-          b.angVel.z = f32(b.angVel.z * 0.92 - nz * wTwist * (1 - twistDamp));
+          b.pos.x = tr.endX;
+          b.pos.y = tr.endY;
+          b.pos.z = tr.endZ;
 
-          const impactJ = Math.abs(vn) * b.mass;
-          if (impactJ > 260) {
-            this.callbacks.onRigidBodyHit?.(b.id, impactJ, b.pos, b.kind ?? 'prop');
-          }
-          if (nz >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 16) {
-            b.vel.z = f32(0);
+          if (tr.fraction >= 1.0) break;
+          remDt = f32(remDt * (1.0 - tr.fraction));
+
+          const nx = tr.normalX;
+          const ny = tr.normalY;
+          const nz = tr.normalZ;
+          const vn = f32(b.vel.x * nx + b.vel.y * ny + b.vel.z * nz);
+
+          if (vn < 0) {
+            const rest = Math.abs(vn) > 24 ? Math.max(b.restitution, this.sourceConfig.svBounce) : 0;
+            const bounce = f32(1.0 + rest);
+            const jn = f32(-vn * bounce * b.mass);
+
+            b.vel.x = f32(b.vel.x - nx * vn * bounce);
+            b.vel.y = f32(b.vel.y - ny * vn * bounce);
+            b.vel.z = f32(b.vel.z - nz * vn * bounce);
+
+            // Skip ground-belly friction on vehicle chassis (tires handle traction)
+            if (b.kind !== 'vehicle') {
+              const mu = b.surfaceFriction ?? this.sourceConfig.surfaceFriction;
+              const postVn = b.vel.x * nx + b.vel.y * ny + b.vel.z * nz;
+              const vtX = f32(b.vel.x - nx * postVn);
+              const vtY = f32(b.vel.y - ny * postVn);
+              const vtZ = f32(b.vel.z - nz * postVn);
+              const vtLen = Math.hypot(vtX, vtY, vtZ);
+              if (vtLen > 1e-4) {
+                const maxFrictionDv = f32((mu * Math.abs(jn)) / b.mass);
+                const drop = Math.min(vtLen, maxFrictionDv);
+                const scale = f32((vtLen - drop) / vtLen);
+                b.vel.x = f32(b.vel.x - vtX * (1 - scale));
+                b.vel.y = f32(b.vel.y - vtY * (1 - scale));
+                b.vel.z = f32(b.vel.z - vtZ * (1 - scale));
+
+                const rot = quatToMat3(b.quat);
+                const { invInertia } = computeWorldInertia(rot, b.inertiaLocal);
+                const lever: Vec3 = {
+                  x: f32(-nx * b.hx * 0.5),
+                  y: f32(-ny * b.hy * 0.5),
+                  z: f32(-nz * b.hz * 0.5),
+                };
+                const jtVec: Vec3 = {
+                  x: f32((-vtX / vtLen) * drop * b.mass * 0.25),
+                  y: f32((-vtY / vtLen) * drop * b.mass * 0.25),
+                  z: f32((-vtZ / vtLen) * drop * b.mass * 0.25),
+                };
+                const dOmega = mulMat3Vec3(invInertia, crossVec3(lever, jtVec));
+                b.angVel.x = f32(b.angVel.x + dOmega.x);
+                b.angVel.y = f32(b.angVel.y + dOmega.y);
+                b.angVel.z = f32(b.angVel.z + dOmega.z);
+              }
+            }
+
+            const wTwist = f32(b.angVel.x * nx + b.angVel.y * ny + b.angVel.z * nz);
+            const twistDamp = f32(Math.max(0, 1 - 0.16 * (b.surfaceFriction ?? 1.0)));
+            b.angVel.x = f32(b.angVel.x * 0.92 - nx * wTwist * (1 - twistDamp));
+            b.angVel.y = f32(b.angVel.y * 0.92 - ny * wTwist * (1 - twistDamp));
+            b.angVel.z = f32(b.angVel.z * 0.92 - nz * wTwist * (1 - twistDamp));
+
+            const impactJ = Math.abs(vn) * b.mass;
+            if (impactJ > 260) {
+              this.callbacks.onRigidBodyHit?.(b.id, impactJ, b.pos, b.kind ?? 'prop');
+            }
+            if (nz >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 16) {
+              b.vel.z = f32(0);
+            }
           }
         }
       }
     }
-  }
 
   private collectContactManifolds(): void {
     this.activeManifolds.length = 0;
@@ -3406,38 +3843,50 @@ export class GoldSrcPhysicsEngine {
   }
 
   private waterMove(
-    forward: Vec3,
-    right: Vec3,
-    fmove: number,
-    smove: number,
-    maxSpeed: number,
-  ): number {
-    const vf = this.abi.f32;
-    // Implicit water drag
-    const drag = f32(1 / (1 + 2.4 * FIXED_DT));
-    vf[F32.VEL_X] = f32(vf[F32.VEL_X] * drag);
-    vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] * drag);
-    vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] * drag);
+      forward: Vec3,
+      right: Vec3,
+      fmove: number,
+      smove: number,
+      maxSpeed: number,
+    ): number {
+      const vf = this.abi.f32;
+      const gravity = vf[F32.CVAR_GRAVITY];
+      const sub = this.playerWaterSubmersion;
 
-    const wishX = f32(fmove * forward.x + smove * right.x);
-    const wishY = f32(fmove * forward.y + smove * right.y);
-    const wishZ = f32(fmove * forward.z + smove * right.z);
-    const wishMag = f32(Math.hypot(wishX, wishY, wishZ));
-    const wishspeed = f32(Math.min(wishMag, maxSpeed * 0.8));
+      // Implicit water drag
+      const drag = f32(1 / (1 + 2.6 * FIXED_DT));
+      vf[F32.VEL_X] = f32(vf[F32.VEL_X] * drag);
+      vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] * drag);
+      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] * drag);
 
-    if (wishMag > 1e-5) {
-      this.accelerate(
-        f32(wishX / wishMag),
-        f32(wishY / wishMag),
-        f32(wishZ / wishMag),
-        wishspeed,
-        vf[F32.CVAR_ACCEL],
-        this.sourceConfig.surfaceFriction,
-      );
+      // Self-stabilizing player buoyancy: gently floats with head above water (~0.62 submersion)
+      const neutralSub = 0.62;
+      const buoyAccel = (sub - neutralSub) * gravity * 1.45;
+      vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + buoyAccel * FIXED_DT);
+
+      const wishX = f32(fmove * forward.x + smove * right.x);
+      const wishY = f32(fmove * forward.y + smove * right.y);
+      const wishZ = f32(fmove * forward.z + smove * right.z);
+      const wishMag = f32(Math.hypot(wishX, wishY, wishZ));
+      const wishspeed = f32(Math.min(wishMag, maxSpeed * 0.85));
+
+      if (wishMag > 1e-5) {
+        if (wishZ > 0.15) {
+          this.abi.i32[I32.FLAGS] &= ~FL_ONGROUND;
+        }
+        this.accelerate(
+          f32(wishX / wishMag),
+          f32(wishY / wishMag),
+          f32(wishZ / wishMag),
+          wishspeed,
+          vf[F32.CVAR_ACCEL],
+          this.sourceConfig.surfaceFriction,
+        );
+      }
+
+      this.checkVelocity();
+      return this.flyMove();
     }
-    this.checkVelocity();
-    return this.flyMove();
-  }
 
   // ---------------------------------------------------------------------------
   // Support System F: Raycast Vehicle Suspension & Tire Friction

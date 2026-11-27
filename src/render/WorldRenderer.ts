@@ -3,7 +3,15 @@ import * as THREE from 'three';
 import { SURF_NORMAL_Z } from '../core/constants';
 import { gsToThree } from '../core/coordinates';
 import { ConvexBrush, TriggerVolume } from '../physics/BrushBuilder';
-import { SourceRigidBody, Vec3 } from '../physics/GoldSrcPhysicsEngine';
+import {
+  LadderVolume,
+  SourceJoint,
+  SourceRigidBody,
+  SourceRope,
+  SourceVehicle,
+  Vec3,
+  WaterVolume,
+} from '../physics/GoldSrcPhysicsEngine';
 import { WorldSign } from '../maps/surfSandbox01';
 import { makeDevGridTexture, makeHazardTexture } from './textures';
 
@@ -38,17 +46,46 @@ interface DecalFx {
   duration: number;
 }
 
+interface VehicleWheelVisual {
+  wheelMeshes: THREE.Group[];
+  strutLines: THREE.Line[];
+}
+
 export class WorldRenderer {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly vmScene = new THREE.Scene();
   private readonly vmCamera: THREE.PerspectiveCamera;
+  private readonly vmRoot: THREE.Group;
+
   private readonly boosterTex: THREE.CanvasTexture;
+  private readonly waterTex: THREE.CanvasTexture;
   private readonly rigidBodyMat: THREE.MeshStandardMaterial;
+  private readonly foamPropMat: THREE.MeshStandardMaterial;
+  private readonly steelPropMat: THREE.MeshStandardMaterial;
+  private readonly doorPropMat: THREE.MeshStandardMaterial;
   private readonly rigidBodyEdgeMat: THREE.LineBasicMaterial;
+  private readonly ropeMat: THREE.LineBasicMaterial;
+  private readonly strutMat: THREE.LineBasicMaterial;
+  private readonly jointDbgMat: THREE.LineBasicMaterial;
+
   private readonly rigidBodyMeshes = new Map<string, THREE.Object3D>();
   private readonly seenRigidBodyIds = new Set<string>();
+  private readonly ropeLines = new Map<string, THREE.Line>();
+  private readonly seenRopeIds = new Set<string>();
+  private readonly vehicleVisuals = new Map<string, VehicleWheelVisual>();
+  private readonly seenVehicleIds = new Set<string>();
+
+  private readonly waterGroup = new THREE.Group();
+  private readonly ladderDebugGroup = new THREE.Group();
+  private readonly jointDebugLines: THREE.LineSegments;
+  private readonly jointDebugPositions = new Float32Array(256 * 6);
+
+  // Gravity Gun PID tether beam + lock halo
+  private readonly gravBeamLine: THREE.Line;
+  private readonly gravBeamPositions = new Float32Array(6);
+  private readonly gravHaloMesh: THREE.LineSegments;
 
   private readonly explosionGeo = new THREE.SphereGeometry(1, 20, 14);
   private readonly particleGeo = new THREE.BoxGeometry(2.8, 2.8, 2.8);
@@ -66,6 +103,10 @@ export class WorldRenderer {
   private currentFov = 90;
   private readonly camPos = new THREE.Vector3();
   private readonly camLook = new THREE.Vector3();
+  private readonly tmpQuat = new THREE.Quaternion();
+  private readonly tmpVecA = new THREE.Vector3();
+  private readonly tmpVecB = new THREE.Vector3();
+  private readonly tmpVecC = new THREE.Vector3();
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -74,6 +115,7 @@ export class WorldRenderer {
     signs: WorldSign[],
     vmRoot: THREE.Group,
   ) {
+    this.vmRoot = vmRoot;
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       antialias: true,
@@ -116,6 +158,14 @@ export class WorldRenderer {
       '',
       true,
     );
+    this.waterTex = makeDevGridTexture(
+      '#0369a1',
+      '#38bdf8',
+      'rgba(125,211,252,0.24)',
+      '#7dd3fc',
+      maxAniso,
+      'H2O',
+    );
 
     this.rigidBodyMat = new THREE.MeshStandardMaterial({
       map: makeDevGridTexture(
@@ -129,10 +179,41 @@ export class WorldRenderer {
       roughness: 0.5,
       metalness: 0.22,
     });
+    this.foamPropMat = new THREE.MeshStandardMaterial({
+      map: makeDevGridTexture('#0f4c5c', '#38bdf8', 'rgba(125,211,252,0.25)', '#7dd3fc', maxAniso, '8kg'),
+      roughness: 0.78,
+      metalness: 0.05,
+    });
+    this.steelPropMat = new THREE.MeshStandardMaterial({
+      map: makeDevGridTexture('#1e293b', '#94a3b8', 'rgba(148,163,184,0.2)', '#cbd5e1', maxAniso, '240kg'),
+      roughness: 0.32,
+      metalness: 0.78,
+    });
+    this.doorPropMat = new THREE.MeshStandardMaterial({
+      map: makeDevGridTexture('#431407', '#fb923c', 'rgba(251,146,60,0.25)', '#fdba74', maxAniso, 'DOOR'),
+      roughness: 0.55,
+      metalness: 0.25,
+    });
     this.rigidBodyEdgeMat = new THREE.LineBasicMaterial({
       color: 0xfcd34d,
       transparent: true,
       opacity: 0.65,
+    });
+    this.ropeMat = new THREE.LineBasicMaterial({
+      color: 0xe2e8f0,
+      transparent: true,
+      opacity: 0.92,
+    });
+    this.strutMat = new THREE.LineBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.85,
+    });
+    this.jointDbgMat = new THREE.LineBasicMaterial({
+      color: 0x34d399,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
     });
 
     const mats: Record<string, THREE.MeshStandardMaterial> = {
@@ -172,8 +253,43 @@ export class WorldRenderer {
       }),
     };
 
+    // Debug joint segments
+    const jointGeo = new THREE.BufferGeometry();
+    jointGeo.setAttribute('position', new THREE.BufferAttribute(this.jointDebugPositions, 3));
+    jointGeo.setDrawRange(0, 0);
+    this.jointDebugLines = new THREE.LineSegments(jointGeo, this.jointDbgMat);
+    this.jointDebugLines.frustumCulled = false;
+
     this.debugGroup.visible = false;
-    this.scene.add(this.debugGroup);
+    this.debugGroup.add(this.ladderDebugGroup, this.jointDebugLines);
+    this.scene.add(this.debugGroup, this.waterGroup);
+
+    // Gravity Gun PID tether + wireframe halo
+    const beamGeo = new THREE.BufferGeometry();
+    beamGeo.setAttribute('position', new THREE.BufferAttribute(this.gravBeamPositions, 3));
+    this.gravBeamLine = new THREE.Line(
+      beamGeo,
+      new THREE.LineBasicMaterial({
+        color: 0x22d3ee,
+        transparent: true,
+        opacity: 0.88,
+        depthWrite: false,
+      }),
+    );
+    this.gravBeamLine.visible = false;
+    this.gravBeamLine.frustumCulled = false;
+
+    this.gravHaloMesh = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+      new THREE.LineBasicMaterial({
+        color: 0x22d3ee,
+        transparent: true,
+        opacity: 0.9,
+        depthTest: false,
+      }),
+    );
+    this.gravHaloMesh.visible = false;
+    this.scene.add(this.gravBeamLine, this.gravHaloMesh);
 
     this.buildSkyDome();
     this.buildVisualWorld(brushes, triggers, mats);
@@ -182,12 +298,136 @@ export class WorldRenderer {
     window.addEventListener('resize', this.handleResize);
   }
 
+  public dispose(): void {
+    window.removeEventListener('resize', this.handleResize);
+    this.vmScene.remove(this.vmRoot);
+
+    this.scene.traverse((obj) => {
+      if (
+        obj instanceof THREE.Mesh ||
+        obj instanceof THREE.Line ||
+        obj instanceof THREE.LineSegments
+      ) {
+        obj.geometry.dispose();
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach((m) => m.dispose());
+        } else {
+          obj.material.dispose();
+        }
+      }
+    });
+
+    this.boosterTex.dispose();
+    this.waterTex.dispose();
+    this.explosionGeo.dispose();
+    this.particleGeo.dispose();
+    this.decalGeo.dispose();
+    this.renderer.dispose();
+  }
+
   public setDebugVisible(visible: boolean): void {
     this.debugGroup.visible = visible;
   }
 
   public setScopeZoom(level: 0 | 1 | 2): void {
     this.scopeZoomLevel = level;
+  }
+
+  /** Render translucent fluid surfaces & submerged volume tint for buoyancy tanks */
+  public setWaterVolumes(volumes: readonly WaterVolume[]): void {
+    while (this.waterGroup.children.length > 0) {
+      const child = this.waterGroup.children.pop()!;
+      child.traverse((c) => {
+        if (c instanceof THREE.Mesh) {
+          c.geometry.dispose();
+          if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
+          else c.material.dispose();
+        }
+      });
+    }
+
+    for (let i = 0; i < volumes.length; i++) {
+      const w = volumes[i];
+      const sx = w.maxX - w.minX;
+      const sy = w.maxY - w.minY;
+      const depth = Math.max(2, w.surfaceZ - w.minZ);
+      const cx = (w.minX + w.maxX) * 0.5;
+      const cy = (w.minY + w.maxY) * 0.5;
+
+      // Animated top water surface plane
+      const surfGeo = new THREE.PlaneGeometry(sx, sy);
+      surfGeo.rotateX(-Math.PI / 2);
+      const surfMat = new THREE.MeshStandardMaterial({
+        map: this.waterTex,
+        color: 0x38bdf8,
+        emissive: 0x0284c7,
+        emissiveIntensity: 0.32,
+        transparent: true,
+        opacity: 0.58,
+        roughness: 0.18,
+        metalness: 0.1,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const surfMesh = new THREE.Mesh(surfGeo, surfMat);
+      gsToThree(cx, cy, w.surfaceZ, surfMesh.position);
+      this.waterGroup.add(surfMesh);
+
+      // Subtle volumetric depth tint
+      const volGeo = new THREE.BoxGeometry(sx, depth, sy);
+      const volMat = new THREE.MeshBasicMaterial({
+        color: 0x0ea5e9,
+        transparent: true,
+        opacity: 0.16,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const volMesh = new THREE.Mesh(volGeo, volMat);
+      gsToThree(cx, cy, w.minZ + depth * 0.5, volMesh.position);
+      this.waterGroup.add(volMesh);
+    }
+  }
+
+  /** Render emerald debug wireframes & outward normal arrows for ladders (visible under F2) */
+  public setLadders(ladders: readonly LadderVolume[]): void {
+    while (this.ladderDebugGroup.children.length > 0) {
+      const child = this.ladderDebugGroup.children.pop()!;
+      child.traverse((c) => {
+        if (c instanceof THREE.Mesh || c instanceof THREE.LineSegments || c instanceof THREE.Line) {
+          c.geometry.dispose();
+          if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
+          else c.material.dispose();
+        }
+      });
+    }
+
+    for (let i = 0; i < ladders.length; i++) {
+      const l = ladders[i];
+      const sx = Math.max(4, l.maxX - l.minX);
+      const sy = Math.max(4, l.maxY - l.minY);
+      const sz = Math.max(4, l.maxZ - l.minZ);
+      const cx = (l.minX + l.maxX) * 0.5;
+      const cy = (l.minY + l.maxY) * 0.5;
+      const cz = (l.minZ + l.maxZ) * 0.5;
+
+      const boxGeo = new THREE.BoxGeometry(sx, sz, sy);
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(boxGeo),
+        new THREE.LineBasicMaterial({ color: 0x34d399 }),
+      );
+      gsToThree(cx, cy, cz, edges.position);
+      boxGeo.dispose();
+
+      // Outward climb normal indicator
+      const p0 = gsToThree(cx, cy, cz);
+      const p1 = gsToThree(cx + l.normalX * 42, cy + l.normalY * 42, cz + (l.normalZ ?? 0) * 42);
+      const normLine = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([p0, p1]),
+        new THREE.LineBasicMaterial({ color: 0x6ee7b7 }),
+      );
+
+      this.ladderDebugGroup.add(edges, normLine);
+    }
   }
 
   public spawnExplosionEffect(origin: Vec3, radius: number): void {
@@ -235,7 +475,6 @@ export class WorldRenderer {
     const hitPos = gsToThree(point.x, point.y, point.z);
     const hitNorm = new THREE.Vector3(normal.x, normal.z, -normal.y).normalize();
 
-    // 1. Sparks or blood splatter particles
     const isBlood = material === 'blood';
     const count = isBlood ? 14 : 8;
     const baseColor = isBlood ? 0xdc2626 : material === 'prop' ? 0xfbbf24 : 0xfef08a;
@@ -270,7 +509,6 @@ export class WorldRenderer {
       });
     }
 
-    // 2. Surface decal on world brushes or blood mark
     if (material === 'world' || isBlood) {
       const decalMat = new THREE.MeshBasicMaterial({
         color: isBlood ? 0x991b1b : 0x0f172a,
@@ -286,7 +524,6 @@ export class WorldRenderer {
       this.scene.add(decal);
       this.decals.push({ mesh: decal, mat: decalMat, age: 0, duration: 16 });
 
-      // Cap active decals
       if (this.decals.length > 64) {
         const old = this.decals.shift()!;
         this.scene.remove(old.mesh);
@@ -296,6 +533,7 @@ export class WorldRenderer {
   }
 
   private createRigidBodyVisual(b: SourceRigidBody): THREE.Object3D {
+    // 1. Dropped weapons (Scout / USP .45)
     if (b.kind === 'weapon' && b.weaponData) {
       const group = new THREE.Group();
       const isScout = b.weaponData.slot === 1;
@@ -334,7 +572,6 @@ export class WorldRenderer {
         }
       }
 
-      // Subtle glowing ring to spot dropped weapons easily
       const ring = new THREE.Mesh(
         new THREE.RingGeometry(isScout ? 16 : 11, isScout ? 18 : 13, 20),
         new THREE.MeshBasicMaterial({
@@ -351,7 +588,80 @@ export class WorldRenderer {
       return group;
     }
 
+    // 2. 4-Wheel Raycast Vehicle Chassis (Roll-cage buggy tub)
+    if (b.kind === 'vehicle') {
+      const group = new THREE.Group();
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color: 0xd97706,
+        roughness: 0.38,
+        metalness: 0.45,
+      });
+      const frameMat = new THREE.MeshStandardMaterial({
+        color: 0x1e293b,
+        roughness: 0.5,
+        metalness: 0.72,
+      });
+      const headlightMat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
+      const taillightMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
+
+      const tub = new THREE.Mesh(new THREE.BoxGeometry(b.hx * 2, b.hz * 1.4, b.hy * 1.9), bodyMat);
+      tub.position.y = -b.hz * 0.15;
+
+      const hood = new THREE.Mesh(new THREE.BoxGeometry(b.hx * 0.85, b.hz * 0.65, b.hy * 1.5), frameMat);
+      hood.position.set(b.hx * 0.52, b.hz * 0.62, 0);
+
+      // Roll cage pillars + roof bar
+      const cageRoof = new THREE.Mesh(new THREE.BoxGeometry(b.hx * 0.9, 4, b.hy * 1.55), frameMat);
+      cageRoof.position.set(-10, b.hz + 28, 0);
+      const pillarOffsets: Array<[number, number]> = [
+        [20, b.hy * 0.72],
+        [20, -b.hy * 0.72],
+        [-42, b.hy * 0.72],
+        [-42, -b.hy * 0.72],
+      ];
+      for (const [px, pz] of pillarOffsets) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(4, 30, 4), frameMat);
+        post.position.set(px, b.hz + 13, pz);
+        group.add(post);
+      }
+
+      // Headlights (+X front) & Taillights (-X rear)
+      const hlL = new THREE.Mesh(new THREE.BoxGeometry(3, 6, 10), headlightMat);
+      hlL.position.set(b.hx + 1, 2, b.hy * 0.62);
+      const hlR = hlL.clone();
+      hlR.position.z = -b.hy * 0.62;
+
+      const tlL = new THREE.Mesh(new THREE.BoxGeometry(3, 6, 10), taillightMat);
+      tlL.position.set(-b.hx - 1, 2, b.hy * 0.62);
+      const tlR = tlL.clone();
+      tlR.position.z = -b.hy * 0.62;
+
+      group.add(tub, hood, cageRoof, hlL, hlR, tlL, tlR);
+      return group;
+    }
+
+    // 3. Articulated Ragdoll Segments vs Monolithic Combat Dummies
     if (b.kind === 'target') {
+      const isRagdollSegment = /_(head|torso|arm_[lr]|leg_[lr])$/.test(b.id);
+      if (isRagdollSegment) {
+        const isHead = b.id.endsWith('_head');
+        const isTorso = b.id.endsWith('_torso');
+        const segMat = new THREE.MeshStandardMaterial({
+          color: isHead ? 0xfca5a5 : isTorso ? 0x991b1b : 0x334155,
+          roughness: 0.55,
+          metalness: 0.14,
+        });
+        const geo = new THREE.BoxGeometry(b.hx * 2, b.hz * 2, b.hy * 2);
+        const mesh = new THREE.Mesh(geo, segMat);
+        mesh.name = 'targetTorso';
+        const edges = new THREE.LineSegments(
+          new THREE.EdgesGeometry(geo),
+          new THREE.LineBasicMaterial({ color: 0xfca5a5, transparent: true, opacity: 0.4 }),
+        );
+        mesh.add(edges);
+        return mesh;
+      }
+
       const group = new THREE.Group();
       const torsoMat = new THREE.MeshStandardMaterial({
         color: 0x991b1b,
@@ -382,8 +692,18 @@ export class WorldRenderer {
       return group;
     }
 
+    // 4. Tactile Physics Props styled by role/mass
+    let mat = this.rigidBodyMat;
+    if (b.id.includes('door')) {
+      mat = this.doorPropMat;
+    } else if (b.mass <= 12) {
+      mat = this.foamPropMat;
+    } else if (b.mass >= 120) {
+      mat = this.steelPropMat;
+    }
+
     const geo = new THREE.BoxGeometry(b.hx * 2, b.hz * 2, b.hy * 2);
-    const mesh = new THREE.Mesh(geo, this.rigidBodyMat);
+    const mesh = new THREE.Mesh(geo, mat);
     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), this.rigidBodyEdgeMat);
     mesh.add(edges);
     return mesh;
@@ -406,12 +726,15 @@ export class WorldRenderer {
       gsToThree(b.pos.x, b.pos.y, b.pos.z, obj.position);
       obj.quaternion.set(b.quat.x, b.quat.z, -b.quat.y, b.quat.w);
 
-      // Tint bleeding target dummies darker red as HP drops
       if (b.kind === 'target' && typeof b.hp === 'number' && typeof b.maxHp === 'number') {
-        const torso = obj.getObjectByName('targetTorso') as THREE.Mesh | undefined;
+        const torso = (obj.name === 'targetTorso' ? obj : obj.getObjectByName('targetTorso')) as
+          | THREE.Mesh
+          | undefined;
         if (torso && torso.material instanceof THREE.MeshStandardMaterial) {
           const ratio = Math.max(0, b.hp / Math.max(1, b.maxHp));
-          torso.material.color.setRGB(0.45 + 0.45 * ratio, 0.08 * ratio, 0.08 * ratio);
+          if (!b.id.endsWith('_head') && !/_(arm|leg)_[lr]$/.test(b.id)) {
+            torso.material.color.setRGB(0.45 + 0.45 * ratio, 0.08 * ratio, 0.08 * ratio);
+          }
         }
       }
     }
@@ -422,7 +745,13 @@ export class WorldRenderer {
         obj.traverse((child) => {
           if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
             child.geometry.dispose();
-            if (child.material !== this.rigidBodyMat && child.material !== this.rigidBodyEdgeMat) {
+            if (
+              child.material !== this.rigidBodyMat &&
+              child.material !== this.foamPropMat &&
+              child.material !== this.steelPropMat &&
+              child.material !== this.doorPropMat &&
+              child.material !== this.rigidBodyEdgeMat
+            ) {
               if (Array.isArray(child.material)) {
                 child.material.forEach((m) => m.dispose());
               } else {
@@ -436,6 +765,271 @@ export class WorldRenderer {
     }
   }
 
+  /** Sync Verlet rope/cable polylines */
+  public syncRopes(ropes: readonly SourceRope[]): void {
+    this.seenRopeIds.clear();
+
+    for (let i = 0; i < ropes.length; i++) {
+      const rope = ropes[i];
+      this.seenRopeIds.add(rope.id);
+      const count = rope.nodes.length;
+      if (count < 2) continue;
+
+      let line = this.ropeLines.get(rope.id);
+      if (!line) {
+        const positions = new Float32Array(count * 3);
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        line = new THREE.Line(geo, this.ropeMat);
+        line.frustumCulled = false;
+        this.scene.add(line);
+        this.ropeLines.set(rope.id, line);
+      }
+
+      const attr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
+      const arr = attr.array as Float32Array;
+      for (let n = 0; n < count; n++) {
+        const node = rope.nodes[n];
+        arr[n * 3] = node.x;
+        arr[n * 3 + 1] = node.z;
+        arr[n * 3 + 2] = -node.y;
+      }
+      attr.needsUpdate = true;
+    }
+
+    for (const [id, line] of this.ropeLines.entries()) {
+      if (!this.seenRopeIds.has(id)) {
+        this.scene.remove(line);
+        line.geometry.dispose();
+        this.ropeLines.delete(id);
+      }
+    }
+  }
+
+  /** Sync 4-wheel raycast vehicle tires (suspension travel, steering yaw, rolling spin) & struts */
+  public syncVehicles(
+    vehicles: readonly SourceVehicle[],
+    bodies: readonly SourceRigidBody[],
+  ): void {
+    this.seenVehicleIds.clear();
+
+    for (let vIdx = 0; vIdx < vehicles.length; vIdx++) {
+      const veh = vehicles[vIdx];
+      const chassis = bodies.find((b) => b.id === veh.chassisId);
+      if (!chassis) continue;
+      this.seenVehicleIds.add(veh.id);
+
+      let visual = this.vehicleVisuals.get(veh.id);
+      if (!visual) {
+        visual = this.createVehicleWheelVisuals(veh);
+        this.vehicleVisuals.set(veh.id, visual);
+      }
+
+      this.tmpQuat.set(chassis.quat.x, chassis.quat.z, -chassis.quat.y, chassis.quat.w);
+      const chassisPos = gsToThree(chassis.pos.x, chassis.pos.y, chassis.pos.z, this.tmpVecA);
+      const chassisUp = this.tmpVecB.set(0, 1, 0).applyQuaternion(this.tmpQuat);
+      const steerAngle = veh.steer * veh.maxSteerRad;
+
+      for (let wIdx = 0; wIdx < veh.wheels.length; wIdx++) {
+        const wheel = veh.wheels[wIdx];
+        const wheelGroup = visual.wheelMeshes[wIdx];
+        const strutLine = visual.strutLines[wIdx];
+        if (!wheelGroup || !strutLine) continue;
+
+        // Hardpoint in Three.js world space
+        const hpWorld = this.tmpVecC
+          .set(wheel.localHardpoint.x, wheel.localHardpoint.z, -wheel.localHardpoint.y)
+          .applyQuaternion(this.tmpQuat)
+          .add(chassisPos);
+
+        const ext = Math.max(0, wheel.restLength - wheel.compression);
+        wheelGroup.position.copy(hpWorld).addScaledVector(chassisUp, -ext);
+
+        // Apply chassis orientation + front steering + rolling wheel spin around local Z axle
+        wheelGroup.quaternion.copy(this.tmpQuat);
+        if (wheel.steerable) {
+          wheelGroup.rotateY(steerAngle);
+        }
+        const tireMesh = wheelGroup.children[0];
+        if (tireMesh) {
+          tireMesh.rotation.z = -wheel.spinAngle;
+        }
+
+        // Update suspension strut line between chassis hardpoint and wheel hub
+        const attr = strutLine.geometry.getAttribute('position') as THREE.BufferAttribute;
+        const arr = attr.array as Float32Array;
+        arr[0] = hpWorld.x;
+        arr[1] = hpWorld.y;
+        arr[2] = hpWorld.z;
+        arr[3] = wheelGroup.position.x;
+        arr[4] = wheelGroup.position.y;
+        arr[5] = wheelGroup.position.z;
+        attr.needsUpdate = true;
+      }
+    }
+
+    for (const [id, vis] of this.vehicleVisuals.entries()) {
+      if (!this.seenVehicleIds.has(id)) {
+        for (const wg of vis.wheelMeshes) {
+          this.scene.remove(wg);
+          wg.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+              c.geometry.dispose();
+              if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
+              else c.material.dispose();
+            }
+          });
+        }
+        for (const sl of vis.strutLines) {
+          this.scene.remove(sl);
+          sl.geometry.dispose();
+        }
+        this.vehicleVisuals.delete(id);
+      }
+    }
+  }
+
+  private createVehicleWheelVisuals(veh: SourceVehicle): VehicleWheelVisual {
+    const tireMat = new THREE.MeshStandardMaterial({
+      color: 0x0f172a,
+      roughness: 0.85,
+      metalness: 0.12,
+    });
+    const rimMat = new THREE.MeshStandardMaterial({
+      color: 0xfbbf24,
+      roughness: 0.35,
+      metalness: 0.72,
+    });
+
+    const wheelMeshes: THREE.Group[] = [];
+    const strutLines: THREE.Line[] = [];
+
+    for (let i = 0; i < veh.wheels.length; i++) {
+      const w = veh.wheels[i];
+      const hubGroup = new THREE.Group();
+      const spinGroup = new THREE.Group();
+
+      const tireGeo = new THREE.CylinderGeometry(w.radius, w.radius, 11, 16);
+      tireGeo.rotateX(Math.PI * 0.5);
+      const tire = new THREE.Mesh(tireGeo, tireMat);
+
+      // Spoke bar makes wheel spin clearly readable while driving
+      const spoke = new THREE.Mesh(new THREE.BoxGeometry(w.radius * 1.4, 3.2, 12.2), rimMat);
+      const spokeCross = new THREE.Mesh(new THREE.BoxGeometry(3.2, w.radius * 1.4, 12.2), rimMat);
+
+      spinGroup.add(tire, spoke, spokeCross);
+      hubGroup.add(spinGroup);
+      this.scene.add(hubGroup);
+      wheelMeshes.push(hubGroup);
+
+      const strutGeo = new THREE.BufferGeometry();
+      strutGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+      const strut = new THREE.Line(strutGeo, this.strutMat);
+      strut.frustumCulled = false;
+      this.scene.add(strut);
+      strutLines.push(strut);
+    }
+
+    return { wheelMeshes, strutLines };
+  }
+
+  /** Sync debug constraint links inside debugGroup (visible when F2 debug is enabled) */
+  public syncJoints(joints: readonly SourceJoint[], bodies: readonly SourceRigidBody[]): void {
+    if (!this.debugGroup.visible || joints.length === 0) {
+      this.jointDebugLines.geometry.setDrawRange(0, 0);
+      return;
+    }
+
+    let segCount = 0;
+    const maxSegs = Math.floor(this.jointDebugPositions.length / 6);
+
+    for (let i = 0; i < joints.length && segCount < maxSegs; i++) {
+      const jt = joints[i];
+      if (jt.broken) continue;
+      const a = bodies.find((b) => b.id === jt.bodyAId);
+      if (!a) continue;
+      const b = jt.bodyBId ? bodies.find((body) => body.id === jt.bodyBId) : null;
+
+      this.tmpQuat.set(a.quat.x, a.quat.z, -a.quat.y, a.quat.w);
+      const pA = this.tmpVecA
+        .set(jt.localAnchorA.x, jt.localAnchorA.z, -jt.localAnchorA.y)
+        .applyQuaternion(this.tmpQuat)
+        .add(gsToThree(a.pos.x, a.pos.y, a.pos.z, this.tmpVecC));
+
+      let pB: THREE.Vector3;
+      if (b) {
+        this.tmpQuat.set(b.quat.x, b.quat.z, -b.quat.y, b.quat.w);
+        pB = this.tmpVecB
+          .set(jt.localAnchorB.x, jt.localAnchorB.z, -jt.localAnchorB.y)
+          .applyQuaternion(this.tmpQuat)
+          .add(gsToThree(b.pos.x, b.pos.y, b.pos.z, this.tmpVecC));
+      } else {
+        pB = gsToThree(jt.localAnchorB.x, jt.localAnchorB.y, jt.localAnchorB.z, this.tmpVecB);
+      }
+
+      const off = segCount * 6;
+      this.jointDebugPositions[off] = pA.x;
+      this.jointDebugPositions[off + 1] = pA.y;
+      this.jointDebugPositions[off + 2] = pA.z;
+      this.jointDebugPositions[off + 3] = pB.x;
+      this.jointDebugPositions[off + 4] = pB.y;
+      this.jointDebugPositions[off + 5] = pB.z;
+      segCount++;
+    }
+
+    const attr = this.jointDebugLines.geometry.getAttribute('position') as THREE.BufferAttribute;
+    attr.needsUpdate = true;
+    this.jointDebugLines.geometry.setDrawRange(0, segCount * 2);
+  }
+
+  /** Sync Gravity Gun cyan PID tether beam & lock wireframe halo */
+  public syncGravityGunBeam(eyePos: Vec3 | null, heldBody: SourceRigidBody | null): void {
+    if (!eyePos || !heldBody) {
+      this.gravBeamLine.visible = false;
+      this.gravHaloMesh.visible = false;
+      return;
+    }
+
+    this.gravBeamLine.visible = true;
+    this.gravHaloMesh.visible = true;
+
+    const p0 = gsToThree(eyePos.x, eyePos.y, eyePos.z - 8, this.tmpVecA);
+    const p1 = gsToThree(heldBody.pos.x, heldBody.pos.y, heldBody.pos.z, this.tmpVecB);
+    this.gravBeamPositions[0] = p0.x;
+    this.gravBeamPositions[1] = p0.y;
+    this.gravBeamPositions[2] = p0.z;
+    this.gravBeamPositions[3] = p1.x;
+    this.gravBeamPositions[4] = p1.y;
+    this.gravBeamPositions[5] = p1.z;
+    (this.gravBeamLine.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate =
+      true;
+
+    this.gravHaloMesh.position.copy(p1);
+    this.gravHaloMesh.quaternion.set(
+      heldBody.quat.x,
+      heldBody.quat.z,
+      -heldBody.quat.y,
+      heldBody.quat.w,
+    );
+    this.gravHaloMesh.scale.set(heldBody.hx * 2.08, heldBody.hz * 2.08, heldBody.hy * 2.08);
+  }
+
+  /** Unified per-frame sync for all dynamic physics subsystems */
+  public syncSubsystems(
+    bodies: readonly SourceRigidBody[],
+    ropes: readonly SourceRope[],
+    vehicles: readonly SourceVehicle[],
+    joints: readonly SourceJoint[],
+    gravEyePos: Vec3 | null,
+    gravHeldBody: SourceRigidBody | null,
+  ): void {
+    this.syncRigidBodies(bodies);
+    this.syncRopes(ropes);
+    this.syncVehicles(vehicles, bodies);
+    this.syncJoints(joints, bodies);
+    this.syncGravityGunBeam(gravEyePos, gravHeldBody);
+  }
+
   public update(
     frameDt: number,
     rx: number,
@@ -446,6 +1040,8 @@ export class WorldRenderer {
     spdXY: number,
   ): void {
     this.boosterTex.offset.y -= frameDt * 1.45;
+    this.waterTex.offset.y -= frameDt * 0.22;
+    this.waterTex.offset.x += frameDt * 0.08;
 
     for (let i = this.explosionEffects.length - 1; i >= 0; i--) {
       const fx = this.explosionEffects[i];

@@ -59,6 +59,10 @@
         <span><span class="weapon-key">[3]</span>KNIFE</span>
         <span class="weapon-spd">250 u/s</span>
       </div>
+      <div class="weapon-slot" data-slot="4">
+              <span><span class="weapon-key">[4]</span>PHYS GUN</span>
+              <span class="weapon-spd">PID 260kg</span>
+            </div>
     </div>
 
     <div id="speed-cluster">
@@ -119,7 +123,87 @@
         <span>sync: <strong id="ng-sync">0%</strong></span>
         <span class="ng-muted" id="ng-cvars">aa:100 mv:3500</span>
       </div>
+      <div class="ng-row">
+              <span>bodies: <strong id="ng-bodies">0/0</strong></span>
+              <span>joints: <strong id="ng-joints">0/0</strong></span>
+            </div>
+            <div class="ng-row">
+              <span>fluid: <strong id="ng-water">0%</strong></span>
+              <span class="ng-muted" id="ng-subsys">SUBSYS: IDLE</span>
+            </div>
     </div>
+    <!-- Contextual Interaction Prompt (Pickup / Board Vehicle / Ladder) -->
+        <div id="interact-prompt" aria-live="polite">
+          <span id="interact-key" class="interact-kbd">E</span>
+          <span id="interact-label">INTERACT</span>
+        </div>
+
+        <!-- Gravity Gun PID Hold Telemetry -->
+        <div id="phys-held-panel">
+          <div class="sub-panel-header">
+            <span class="sub-badge badge-cyan">PID LOCK</span>
+            <span id="held-body-name">PROP</span>
+          </div>
+          <div class="sub-panel-meta">
+            <span>MASS <strong id="held-body-mass">0 kg</strong></span>
+            <span>DIST <strong id="held-body-dist">120u</strong></span>
+            <span class="sub-hint">[LMB] PUNT • [RMB] DROP</span>
+          </div>
+        </div>
+
+        <!-- Ladder Climb Telemetry -->
+        <div id="ladder-hud">
+          <div class="sub-panel-header">
+            <span class="sub-badge badge-emerald">LADDER</span>
+            <span id="ladder-id">lad_tower_1</span>
+          </div>
+          <div class="ladder-stats">
+            <span>ALT <strong id="ladder-z">0u</strong></span>
+            <span>CLIMB <strong id="ladder-vz">0 u/s</strong></span>
+          </div>
+          <div class="ladder-bar-track"><div id="ladder-bar"></div></div>
+        </div>
+
+        <!-- 4-Wheel Raycast Vehicle Telemetry (Visible while driving) -->
+        <div id="vehicle-hud">
+          <div class="veh-top">
+            <span class="sub-badge badge-amber">4WD BUGGY</span>
+            <span id="veh-hb-badge" class="veh-hb">HB</span>
+            <span class="veh-speed"><strong id="veh-kmh">0</strong> km/h</span>
+          </div>
+          <div class="veh-bars">
+            <div class="veh-bar-row">
+              <span>THR</span>
+              <div class="veh-track"><div id="veh-throttle-fill"></div></div>
+            </div>
+            <div class="veh-bar-row">
+              <span>STR</span>
+              <div class="veh-track veh-track-center">
+                <div class="veh-center-tick"></div>
+                <div id="veh-steer-pip"></div>
+              </div>
+            </div>
+          </div>
+          <div class="veh-wheels">
+            <div class="wheel-cell" id="whl-0"><span>FL</span><div class="whl-bar"><i id="whl-bar-0"></i></div></div>
+            <div class="wheel-cell" id="whl-1"><span>FR</span><div class="whl-bar"><i id="whl-bar-1"></i></div></div>
+            <div class="wheel-cell" id="whl-2"><span>RL</span><div class="whl-bar"><i id="whl-bar-2"></i></div></div>
+            <div class="wheel-cell" id="whl-3"><span>RR</span><div class="whl-bar"><i id="whl-bar-3"></i></div></div>
+          </div>
+        </div>
+
+        <!-- Vitals Bar (HP & Blood mL from GoldSrcPhysicsEngine.getVitals()) -->
+        <div id="vitals-hud">
+          <div class="vital-item">
+            <span>HP</span>
+            <strong id="vital-hp">100</strong>
+          </div>
+          <div class="vital-sep"></div>
+          <div class="vital-item">
+            <span>BLOOD</span>
+            <strong id="vital-blood">5000 mL</strong>
+          </div>
+        </div>
   </div>
 
   <div id="menu-overlay">

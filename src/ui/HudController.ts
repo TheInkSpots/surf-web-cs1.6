@@ -2,6 +2,41 @@
 import { MoveState } from '../core/constants';
 import { KeyState } from '../gameplay/InputController';
 import { RunTracker } from '../gameplay/RunTracker';
+import { PlayerVitalState, SourceVehicle } from '../physics/GoldSrcPhysicsEngine';
+
+export interface HeldPropTelemetry {
+  id: string;
+  mass: number;
+  holdDistance: number;
+}
+
+export interface LadderTelemetry {
+  id: string;
+  progressPct: number; // 0..100
+  posZ: number;
+  velZ: number;
+}
+
+export interface InteractPrompt {
+  key: string;
+  label: string;
+}
+
+export interface SubsystemTelemetry {
+  activeBodies: number;
+  totalBodies: number;
+  intactJoints: number;
+  totalJoints: number;
+  waterSubmersion: number; // 0..1
+  heldProp: HeldPropTelemetry | null;
+  ladder: LadderTelemetry | null;
+  drivingVehicle: {
+    vehicle: SourceVehicle;
+    speedUnits: number;
+  } | null;
+  interactPrompt: InteractPrompt | null;
+  vitals: Readonly<PlayerVitalState>;
+}
 
 export interface HudSnapshot {
   now: number;
@@ -15,6 +50,7 @@ export interface HudSnapshot {
   ducking: boolean;
   keys: KeyState;
   cvarLabel: string;
+  subsystems?: SubsystemTelemetry;
 }
 
 type MovementKey = 'w' | 'a' | 's' | 'd' | 'jump' | 'duck';
@@ -45,6 +81,39 @@ export class HudController {
   private readonly elFlash = document.getElementById('screen-flash')!;
   private readonly elStrafeOverlay = document.getElementById('strafe-overlay')!;
   private readonly elSpdSlot1 = document.getElementById('spd-slot-1')!;
+  private readonly elCrosshair = document.getElementById('crosshair');
+
+  // Subsystem HUD nodes (optional lookup keeps backwards compatibility)
+  private readonly elInteractPrompt = document.getElementById('interact-prompt');
+  private readonly elInteractKey = document.getElementById('interact-key');
+  private readonly elInteractLabel = document.getElementById('interact-label');
+
+  private readonly elPhysHeld = document.getElementById('phys-held-panel');
+  private readonly elHeldName = document.getElementById('held-body-name');
+  private readonly elHeldMass = document.getElementById('held-body-mass');
+  private readonly elHeldDist = document.getElementById('held-body-dist');
+
+  private readonly elLadderHud = document.getElementById('ladder-hud');
+  private readonly elLadderId = document.getElementById('ladder-id');
+  private readonly elLadderZ = document.getElementById('ladder-z');
+  private readonly elLadderVz = document.getElementById('ladder-vz');
+  private readonly elLadderBar = document.getElementById('ladder-bar');
+
+  private readonly elVehHud = document.getElementById('vehicle-hud');
+  private readonly elVehKmh = document.getElementById('veh-kmh');
+  private readonly elVehHb = document.getElementById('veh-hb-badge');
+  private readonly elVehThrottle = document.getElementById('veh-throttle-fill');
+  private readonly elVehSteerPip = document.getElementById('veh-steer-pip');
+  private readonly elWheelCells = [0, 1, 2, 3].map((i) => document.getElementById(`whl-${i}`));
+  private readonly elWheelBars = [0, 1, 2, 3].map((i) => document.getElementById(`whl-bar-${i}`));
+
+  private readonly elVitalHp = document.getElementById('vital-hp');
+  private readonly elVitalBlood = document.getElementById('vital-blood');
+
+  private readonly elNgBodies = document.getElementById('ng-bodies');
+  private readonly elNgJoints = document.getElementById('ng-joints');
+  private readonly elNgWater = document.getElementById('ng-water');
+  private readonly elNgSubsys = document.getElementById('ng-subsys');
 
   private readonly elKeys: Record<MovementKey, HTMLElement> = {
     w: document.getElementById('key-w')!,
@@ -175,11 +244,17 @@ export class HudController {
       this.elRunDelta.className = 'delta-neutral';
     }
 
-    // net_graph telemetry
+    // net_graph state & CVars
     this.elNgSim.textContent = snap.simMsAvg.toFixed(2);
     this.elNgCvars.textContent = snap.cvarLabel;
 
-    if (snap.moveState === MoveState.SURF) {
+    if (snap.moveState === MoveState.LADDER) {
+      this.elNgState.textContent = 'LADDER';
+      this.elNgState.className = 'ng-ladder';
+    } else if (snap.moveState === MoveState.WATER) {
+      this.elNgState.textContent = 'WATER';
+      this.elNgState.className = 'ng-water';
+    } else if (snap.moveState === MoveState.SURF) {
       this.elNgState.textContent = 'SURF';
       this.elNgState.className = 'ng-surf';
     } else if (snap.moveState === MoveState.AIR) {
@@ -191,6 +266,107 @@ export class HudController {
     }
 
     this.elNgHull.textContent = snap.ducking ? '36u (DUCK)' : '72u (STAND)';
+
+    // Subsystem overlays
+    if (snap.subsystems) {
+      this.updateSubsystems(snap.subsystems);
+    }
+  }
+
+  private updateSubsystems(sub: SubsystemTelemetry): void {
+    // 1. Contextual interact prompt
+    if (this.elInteractPrompt && this.elInteractKey && this.elInteractLabel) {
+      if (sub.interactPrompt) {
+        this.elInteractKey.textContent = sub.interactPrompt.key;
+        this.elInteractLabel.textContent = sub.interactPrompt.label;
+        this.elInteractPrompt.classList.add('visible');
+      } else {
+        this.elInteractPrompt.classList.remove('visible');
+      }
+    }
+
+    // Crosshair feedback
+    if (this.elCrosshair) {
+      this.elCrosshair.classList.toggle('grav-holding', sub.heldProp !== null);
+      this.elCrosshair.classList.toggle('can-interact', sub.interactPrompt !== null);
+    }
+
+    // 2. Gravity Gun held prop PID panel
+    if (this.elPhysHeld) {
+      const held = sub.heldProp;
+      this.elPhysHeld.classList.toggle('visible', held !== null);
+      if (held && this.elHeldName && this.elHeldMass && this.elHeldDist) {
+        this.elHeldName.textContent = held.id.toUpperCase();
+        this.elHeldMass.textContent = `${Math.round(held.mass)} kg`;
+        this.elHeldDist.textContent = `${Math.round(held.holdDistance)}u`;
+      }
+    }
+
+    // 3. Ladder climb panel
+    if (this.elLadderHud) {
+      const lad = sub.ladder;
+      this.elLadderHud.classList.toggle('visible', lad !== null);
+      if (lad && this.elLadderId && this.elLadderZ && this.elLadderVz && this.elLadderBar) {
+        this.elLadderId.textContent = lad.id.toUpperCase();
+        this.elLadderZ.textContent = `${Math.round(lad.posZ)}u`;
+        this.elLadderVz.textContent = `${Math.round(lad.velZ)} u/s`;
+        this.elLadderBar.style.width = `${Math.max(0, Math.min(100, lad.progressPct))}%`;
+      }
+    }
+
+    // 4. Raycast Vehicle panel
+    if (this.elVehHud) {
+      const drv = sub.drivingVehicle;
+      this.elVehHud.classList.toggle('visible', drv !== null);
+      if (drv) {
+        const { vehicle, speedUnits } = drv;
+        // 1 Hammer unit ~= 0.01905m -> u/s * 0.06858 ~= km/h
+        if (this.elVehKmh) this.elVehKmh.textContent = String(Math.round(speedUnits * 0.06858));
+        if (this.elVehHb) this.elVehHb.classList.toggle('active', vehicle.handbrake > 0.5);
+        if (this.elVehThrottle) {
+          this.elVehThrottle.style.width = `${Math.round(Math.abs(vehicle.throttle) * 100)}%`;
+          this.elVehThrottle.style.background = vehicle.throttle >= 0 ? '#34d399' : '#fb7185';
+        }
+        if (this.elVehSteerPip) {
+          this.elVehSteerPip.style.left = `${50 - vehicle.steer * 42}%`;
+        }
+        for (let i = 0; i < 4; i++) {
+          const w = vehicle.wheels[i];
+          const cell = this.elWheelCells[i];
+          const bar = this.elWheelBars[i];
+          if (!w || !cell || !bar) continue;
+          cell.classList.toggle('contact', w.inContact);
+          const pct = Math.max(0, Math.min(100, (w.compression / Math.max(1, w.restLength)) * 100));
+          bar.style.width = `${Math.round(pct)}%`;
+        }
+      }
+    }
+
+    // 5. Vitals
+    if (this.elVitalHp) {
+      this.elVitalHp.textContent = String(sub.vitals.hp);
+      this.elVitalHp.classList.toggle('low', sub.vitals.hp <= 30);
+    }
+    if (this.elVitalBlood) {
+      this.elVitalBlood.textContent = `${sub.vitals.bloodMl} mL`;
+      this.elVitalBlood.classList.toggle('low', sub.vitals.bloodMl <= 1800);
+    }
+
+    // 6. net_graph subsystem counters
+    if (this.elNgBodies) this.elNgBodies.textContent = `${sub.activeBodies}/${sub.totalBodies}`;
+    if (this.elNgJoints) this.elNgJoints.textContent = `${sub.intactJoints}/${sub.totalJoints}`;
+    if (this.elNgWater) this.elNgWater.textContent = `${Math.round(sub.waterSubmersion * 100)}%`;
+    if (this.elNgSubsys) {
+      this.elNgSubsys.textContent = sub.drivingVehicle
+        ? 'SUBSYS: VEHICLE'
+        : sub.heldProp
+          ? 'SUBSYS: GRAV-PID'
+          : sub.ladder
+            ? 'SUBSYS: LADDER'
+            : sub.waterSubmersion > 0.05
+              ? 'SUBSYS: BUOYANCY'
+              : 'SUBSYS: IDLE';
+    }
   }
 
   private refreshPbDisplay(): void {

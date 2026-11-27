@@ -22,4 +22,6 @@ export const MoveState = {
   GROUND: 0,
   AIR: 1,
   SURF: 2,
+  LADDER: 3,
+  WATER: 4,
 } as const;
