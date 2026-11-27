@@ -1228,6 +1228,9 @@ export class GoldSrcPhysicsEngine {
       if (veh) this.wakeBodyById(veh.chassisId);
     }
   }
+  public getDrivenVehicleId(): string | null {
+      return this.drivenVehicleId;
+    }
 
   // Add to class fields:
     private readonly ladders: LadderVolume[] = [];
@@ -2319,92 +2322,6 @@ export class GoldSrcPhysicsEngine {
               vi[I32.PREV_BUTTONS] = buttons;
               return;
             }
-          // const buttons = vi[I32.BUTTONS];
-          // const prevButtons = vi[I32.PREV_BUTTONS];
-          // const freshJump = (buttons & IN_JUMP) !== 0 && (prevButtons & IN_JUMP) === 0;
-          // const fmoveRaw = vf[F32.CMD_FMOVE];
-          // const smoveRaw = vf[F32.CMD_SMOVE];
-          // const hz = this.getHullHalfZ();
-          // const feetZ = vf[F32.POS_Z] - hz;
-          // const onFloor = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
-
-          // // Compute horizontal wish direction relative to ladder outward normal
-          // const { forward, right } = computeAngleVectors(-vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0);
-          // const wishX = fmoveRaw * forward.x + smoveRaw * right.x;
-          // const wishY = fmoveRaw * forward.y + smoveRaw * right.y;
-          // const wishLen = Math.hypot(wishX, wishY);
-          // // < 0 means pushing INTO the ladder wall; > 0 means moving OUTWARD away from wall
-          // const wishDotNormal =
-          //   wishLen > 1e-4
-          //     ? (wishX * touchingLadder.normalX + wishY * touchingLadder.normalY) / wishLen
-          //     : 0;
-
-          // // Case A: Standing on the TOP deck -> let normal walkMove carry you cleanly over the lip
-          // const standingOnTopDeck = onFloor && feetZ >= touchingLadder.maxZ - 4;
-
-          // // Case B: Standing on the BOTTOM floor and moving outward away from ladder -> walk off
-          // const exitingBottom = onFloor && feetZ <= touchingLadder.minZ + 6 && wishDotNormal > 0.25;
-
-          // if (!standingOnTopDeck && !exitingBottom) {
-          //   // Case C: Climbing UP to top lip (airborne + pushing INTO wall + not looking straight down)
-          //   const climbingUpAtTop =
-          //     !onFloor &&
-          //     feetZ >= touchingLadder.maxZ - 14 &&
-          //     wishDotNormal < -0.25 &&
-          //     forward.z > -0.35;
-
-          //   if (climbingUpAtTop) {
-          //     const stepX = f32(vf[F32.POS_X] - touchingLadder.normalX * 26);
-          //     const stepY = f32(vf[F32.POS_Y] - touchingLadder.normalY * 26);
-          //     const stepZ = f32(touchingLadder.maxZ + hz + 2);
-          //     const clearTr = this.traceWorld(
-          //       vf[F32.POS_X],
-          //       vf[F32.POS_Y],
-          //       stepZ,
-          //       stepX,
-          //       stepY,
-          //       stepZ,
-          //       HULL_STAND.hx,
-          //       HULL_STAND.hy,
-          //       hz,
-          //       this.auxTraceScratch,
-          //     );
-          //     if (!clearTr.startSolid && !clearTr.allSolid && clearTr.fraction > 0.4) {
-          //       this.ladderDetachUntilTick = vi[I32.TICK] + 18;
-          //       vf[F32.POS_X] = clearTr.endX;
-          //       vf[F32.POS_Y] = clearTr.endY;
-          //       vf[F32.POS_Z] = clearTr.endZ;
-          //       vf[F32.VEL_X] = f32(-touchingLadder.normalX * 140);
-          //       vf[F32.VEL_Y] = f32(-touchingLadder.normalY * 140);
-          //       vf[F32.VEL_Z] = f32(0);
-          //       vi[I32.FLAGS] |= FL_ONGROUND;
-          //       vi[I32.MOVESTATE] = MoveState.GROUND;
-          //       this.stepSecondaryPhysics(true, false);
-          //       this.checkTriggers();
-          //       vi[I32.PREV_BUTTONS] = buttons;
-          //       return;
-          //     }
-          //   }
-
-          //   if (freshJump) {
-          //     // Space jumps cleanly off away from the ladder face
-          //     this.ladderDetachUntilTick = vi[I32.TICK] + 18;
-          //     vi[I32.FLAGS] &= ~FL_ONGROUND;
-          //     vf[F32.VEL_X] = f32(touchingLadder.normalX * 260);
-          //     vf[F32.VEL_Y] = f32(touchingLadder.normalY * 260);
-          //     vf[F32.VEL_Z] = f32(Math.max(vf[F32.VEL_Z], 185));
-          //     this.callbacks.onJump?.();
-          //   } else {
-          //     this.activeLadder = touchingLadder;
-          //     vi[I32.FLAGS] &= ~FL_ONGROUND;
-          //     vi[I32.MOVESTATE] = MoveState.LADDER;
-          //     this.ladderMove(touchingLadder, forward, right, fmoveRaw, smoveRaw);
-          //     this.stepSecondaryPhysics(true, false);
-          //     this.checkTriggers();
-          //     vi[I32.PREV_BUTTONS] = buttons;
-          //     return;
-          //   }
-          // }
         }
     // 3. CheckJumpButton: v_z = sqrt(2 * g * h_jump), h_jump = 45u (CS:S / GoldSrc)
     const buttons = vi[I32.BUTTONS];
@@ -3934,84 +3851,101 @@ export class GoldSrcPhysicsEngine {
         }
 
         this.wakeBody(chassis);
-        wheel.inContact = true;
-        const hitDist = tr.fraction * rayLen;
-        const comp = f32(Math.max(0, wheel.restLength - (hitDist - wheel.radius)));
-        wheel.compression = comp;
-        wheel.contactPoint = { x: tr.endX, y: tr.endY, z: tr.endZ };
-        wheel.contactNormal = { x: tr.normalX, y: tr.normalY, z: tr.normalZ };
+                wheel.inContact = true;
+                const hitDist = tr.fraction * rayLen;
+                const comp = f32(
+                  Math.max(0, Math.min(wheel.restLength, wheel.restLength - (hitDist - wheel.radius))),
+                );
+                wheel.compression = comp;
+                wheel.contactPoint = { x: tr.endX, y: tr.endY, z: tr.endZ };
+                wheel.contactNormal = { x: tr.normalX, y: tr.normalY, z: tr.normalZ };
 
-        // 1. Hookean Spring-Damper Suspension Force: F_susp = k_s * x + c_d * dx/dt
-        const compVel = (comp - wheel.prevCompression) / FIXED_DT;
-        const suspForce = Math.max(0, wheel.stiffness * comp + wheel.damping * compVel);
-        const suspImpulse = f32(suspForce * FIXED_DT);
+                // 1. Hookean Spring-Damper Suspension (clamped >= 0 so rebound never pulls car down)
+                const compVel = (comp - wheel.prevCompression) / FIXED_DT;
+                const suspForce = Math.max(0, wheel.stiffness * comp + wheel.damping * compVel);
+                const suspImpulse = f32(suspForce * FIXED_DT);
 
-        const rC: Vec3 = {
-          x: f32(tr.endX - chassis.pos.x),
-          y: f32(tr.endY - chassis.pos.y),
-          z: f32(tr.endZ - chassis.pos.z),
-        };
-        const wCrossR = crossVec3(chassis.angVel, rC);
-        const patchVel: Vec3 = {
-          x: f32(chassis.vel.x + wCrossR.x),
-          y: f32(chassis.vel.y + wCrossR.y),
-          z: f32(chassis.vel.z + wCrossR.z),
-        };
+                const rC: Vec3 = {
+                  x: f32(tr.endX - chassis.pos.x),
+                  y: f32(tr.endY - chassis.pos.y),
+                  z: f32(tr.endZ - chassis.pos.z),
+                };
+                const wCrossR = crossVec3(chassis.angVel, rC);
+                const patchVel: Vec3 = {
+                  x: f32(chassis.vel.x + wCrossR.x),
+                  y: f32(chassis.vel.y + wCrossR.y),
+                  z: f32(chassis.vel.z + wCrossR.z),
+                };
 
-        // Wheel forward & lateral axes (steered if front wheel)
-        const wf: Vec3 = wheel.steerable
-          ? {
-              x: f32(chassisFwd.x * cosS + chassisRight.x * sinS),
-              y: f32(chassisFwd.y * cosS + chassisRight.y * sinS),
-              z: f32(chassisFwd.z * cosS + chassisRight.z * sinS),
-            }
-          : chassisFwd;
-        const wr: Vec3 = wheel.steerable
-          ? {
-              x: f32(-chassisFwd.x * sinS + chassisRight.x * cosS),
-              y: f32(-chassisFwd.y * sinS + chassisRight.y * cosS),
-              z: f32(-chassisFwd.z * sinS + chassisRight.z * cosS),
-            }
-          : chassisRight;
+                const wf: Vec3 = wheel.steerable
+                  ? {
+                      x: f32(chassisFwd.x * cosS + chassisRight.x * sinS),
+                      y: f32(chassisFwd.y * cosS + chassisRight.y * sinS),
+                      z: f32(chassisFwd.z * cosS + chassisRight.z * sinS),
+                    }
+                  : chassisFwd;
+                const wr: Vec3 = wheel.steerable
+                  ? {
+                      x: f32(-chassisFwd.x * sinS + chassisRight.x * cosS),
+                      y: f32(-chassisFwd.y * sinS + chassisRight.y * cosS),
+                      z: f32(-chassisFwd.z * sinS + chassisRight.z * cosS),
+                    }
+                  : chassisRight;
 
-        // 2. Pacejka-inspired lateral slip & longitudinal drive/brake impulses clamped by grip cone
-        const vLong = dotVec3(patchVel, wf);
-        const vLat = dotVec3(patchVel, wr);
-        wheel.spinAngle = f32(wheel.spinAngle + (vLong / Math.max(1, wheel.radius)) * FIXED_DT);
+                const vLong = dotVec3(patchVel, wf);
+                const vLat = dotVec3(patchVel, wr);
+                wheel.spinAngle = f32(wheel.spinAngle + (vLong / Math.max(1, wheel.radius)) * FIXED_DT);
 
-        const muGrip = wheel.grip * (veh.handbrake > 0.5 && !wheel.steerable ? 0.35 : 1.0);
-        const maxTireImpulse = f32(suspImpulse * muGrip);
+                const muGrip = wheel.grip * (veh.handbrake > 0.5 && !wheel.steerable ? 0.35 : 1.0);
+                const maxTireImpulse = f32(Math.max(suspImpulse, 320) * muGrip);
 
-        let driveImpulse = wheel.driven ? f32(veh.throttle * veh.engineForce * FIXED_DT) : 0;
-        if (veh.handbrake > 0.1) {
-          const brakeDir = vLong > 1 ? -1 : vLong < -1 ? 1 : 0;
-          driveImpulse = f32(driveImpulse + brakeDir * veh.handbrake * veh.brakeForce * FIXED_DT);
-        }
+                let driveImpulse = wheel.driven ? f32(veh.throttle * veh.engineForce * FIXED_DT) : 0;
+                if (Math.abs(veh.throttle) < 0.05 && veh.handbrake < 0.1) {
+                  // Gentle rolling resistance when coasting
+                  driveImpulse = f32(-vLong * chassis.mass * 0.015);
+                }
+                if (veh.handbrake > 0.1) {
+                  const stopImpulse = f32((-vLong * chassis.mass) / Math.max(1, veh.wheels.length));
+                  const maxBrake = f32(veh.handbrake * veh.brakeForce * FIXED_DT);
+                  driveImpulse = f32(driveImpulse + Math.max(-maxBrake, Math.min(maxBrake, stopImpulse)));
+                }
 
-        const latImpulseRaw = f32(-vLat * chassis.mass * 0.25);
-        const tireMag = Math.hypot(driveImpulse, latImpulseRaw);
-        let jLong = driveImpulse;
-        let jLat = latImpulseRaw;
-        if (tireMag > maxTireImpulse && tireMag > 1e-6) {
-          const s = maxTireImpulse / tireMag;
-          jLong = f32(jLong * s);
-          jLat = f32(jLat * s);
-        }
+                const latImpulseRaw = f32(-vLat * chassis.mass * 0.22);
+                const tireMag = Math.hypot(driveImpulse, latImpulseRaw);
+                let jLong = driveImpulse;
+                let jLat = latImpulseRaw;
+                if (tireMag > maxTireImpulse && tireMag > 1e-6) {
+                  const s = maxTireImpulse / tireMag;
+                  jLong = f32(jLong * s);
+                  jLat = f32(jLat * s);
+                }
 
-        const totalImpulse: Vec3 = {
-          x: f32(tr.normalX * suspImpulse + wf.x * jLong + wr.x * jLat),
-          y: f32(tr.normalY * suspImpulse + wf.y * jLong + wr.y * jLat),
-          z: f32(tr.normalZ * suspImpulse + wf.z * jLong + wr.z * jLat),
-        };
+                const suspVec: Vec3 = {
+                  x: f32(tr.normalX * suspImpulse),
+                  y: f32(tr.normalY * suspImpulse),
+                  z: f32(tr.normalZ * suspImpulse),
+                };
+                const tireVec: Vec3 = {
+                  x: f32(wf.x * jLong + wr.x * jLat),
+                  y: f32(wf.y * jLong + wr.y * jLat),
+                  z: f32(wf.z * jLong + wr.z * jLat),
+                };
 
-        chassis.vel.x = f32(chassis.vel.x + totalImpulse.x * invMass);
-        chassis.vel.y = f32(chassis.vel.y + totalImpulse.y * invMass);
-        chassis.vel.z = f32(chassis.vel.z + totalImpulse.z * invMass);
+                chassis.vel.x = f32(chassis.vel.x + (suspVec.x + tireVec.x) * invMass);
+                chassis.vel.y = f32(chassis.vel.y + (suspVec.y + tireVec.y) * invMass);
+                chassis.vel.z = f32(chassis.vel.z + (suspVec.z + tireVec.z) * invMass);
 
-        const dOmega = mulMat3Vec3(invInertia, crossVec3(rC, totalImpulse));
-        chassis.angVel.x = f32(chassis.angVel.x + dOmega.x);
-        chassis.angVel.y = f32(chassis.angVel.y + dOmega.y);
-        chassis.angVel.z = f32(chassis.angVel.z + dOmega.z);
+                // Apply tire force at reduced vertical lever arm to prevent rear bumper squat
+                const rTire: Vec3 = { x: rC.x, y: rC.y, z: f32(rC.z * 0.25) };
+                const torque = {
+                  x: f32(crossVec3(rC, suspVec).x + crossVec3(rTire, tireVec).x),
+                  y: f32(crossVec3(rC, suspVec).y + crossVec3(rTire, tireVec).y),
+                  z: f32(crossVec3(rC, suspVec).z + crossVec3(rTire, tireVec).z),
+                };
+                const dOmega = mulMat3Vec3(invInertia, torque);
+                chassis.angVel.x = f32(chassis.angVel.x + dOmega.x);
+                chassis.angVel.y = f32(chassis.angVel.y + dOmega.y);
+                chassis.angVel.z = f32(chassis.angVel.z + dOmega.z);
       }
     }
   }

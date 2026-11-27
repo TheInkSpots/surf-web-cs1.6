@@ -273,7 +273,8 @@ export class SurfApp {
           );
         },
         onPlayerDeath: (source) => {
-          this.drivingVehicleId = null;
+          if (this.drivingVehicleId) this.exitVehicle(false);
+          else this.physics.setDrivenVehicle(null);
           this.audio.playPlayerDeath();
           this.hud.flashScreen('rgba(153, 27, 27, 0.72)');
           this.hud.showToast(
@@ -304,7 +305,8 @@ export class SurfApp {
         },
         onTeleport: (isFail) => {
           if (isFail) {
-            this.drivingVehicleId = null;
+            if (this.drivingVehicleId) this.exitVehicle(false);
+            else this.physics.setDrivenVehicle(null);
             this.audio.playTeleport();
             this.hud.flashScreen('rgba(251, 113, 133, 0.42)');
 
@@ -584,48 +586,7 @@ export class SurfApp {
     return best;
   }
 
-  private enterVehicle(vehicleId: string): void {
-    this.physics.setDrivenVehicle(vehicleId);
-    const veh = this.physics.getVehicles().find((v) => v.id === vehicleId);
-    const chassis = veh ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId) : undefined;
-    if (chassis) {
-      const vf = this.abi.f32;
-      vf[F32.POS_X] = vf[F32.PREV_X] = f32(chassis.pos.x);
-      vf[F32.POS_Y] = vf[F32.PREV_Y] = f32(chassis.pos.y);
-      vf[F32.POS_Z] = vf[F32.PREV_Z] = f32(chassis.pos.z + 36);
-    }
-  }
-
-  private exitVehicle(announce = true): void {
-    //this.physics.setDrivenVehicle(null);
-    if (!this.drivingVehicleId) return;
-    const veh = this.physics.getVehicles().find((v) => v.id === this.drivingVehicleId);
-    const chassis = veh
-      ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId)
-      : undefined;
-
-    this.physics.setVehicleControls(this.drivingVehicleId, 0, 0, 1);
-    this.drivingVehicleId = null;
-    this.viewmodel.root.visible = !this.gravityGunActive;
-
-    if (chassis) {
-      const vf = this.abi.f32;
-      vf[F32.POS_X] = f32(chassis.pos.x);
-      vf[F32.POS_Y] = f32(chassis.pos.y + chassis.hy + 38);
-      vf[F32.POS_Z] = f32(chassis.pos.z + 36);
-      vf[F32.PREV_X] = vf[F32.POS_X];
-      vf[F32.PREV_Y] = vf[F32.POS_Y];
-      vf[F32.PREV_Z] = vf[F32.POS_Z];
-      vf[F32.VEL_X] = f32(chassis.vel.x * 0.35);
-      vf[F32.VEL_Y] = f32(chassis.vel.y * 0.35);
-      vf[F32.VEL_Z] = f32(120);
-    }
-
-    if (announce) {
-      this.audio.playWeaponSwitch();
-      this.hud.showToast('EXITED VEHICLE', 'rgba(148,163,184,0.7)');
-    }
-  }
+  private enterVehicle(vehicleId: string): void { const veh = this.physics.getVehicles().find((v) => v.id === vehicleId); const chassis = veh ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId) : undefined; if (!veh || !chassis) return; this.physics.releaseHeldBody(0); this.renderer.setScopeZoom(0); this.drivingVehicleId = vehicleId; this.physics.setDrivenVehicle(vehicleId); this.physics.setVehicleControls(vehicleId, 0, 0, 0); this.viewmodel.root.visible = false; const vf = this.abi.f32; vf[F32.POS_X] = vf[F32.PREV_X] = f32(chassis.pos.x); vf[F32.POS_Y] = vf[F32.PREV_Y] = f32(chassis.pos.y); vf[F32.POS_Z] = vf[F32.PREV_Z] = f32(chassis.pos.z + 36); this.audio.playWeaponSwitch(); this.hud.showToast( 'DRIVING 4WD BUGGY • [WASD] DRIVE • [SPACE] HANDBRAKE • [E] EXIT', 'rgba(251, 191, 36, 0.85)', ); } private exitVehicle(announce = true): void { const vehicleId = this.drivingVehicleId ?? this.physics.getDrivenVehicleId(); this.physics.setDrivenVehicle(null); this.drivingVehicleId = null; this.viewmodel.root.visible = !this.gravityGunActive; if (!vehicleId) return; const veh = this.physics.getVehicles().find((v) => v.id === vehicleId); const chassis = veh ? this.physics.getRigidBodies().find((b) => b.id === veh.chassisId) : undefined; this.physics.setVehicleControls(vehicleId, 0, 0, 1); if (chassis) { const vf = this.abi.f32; vf[F32.POS_X] = f32(chassis.pos.x); vf[F32.POS_Y] = f32(chassis.pos.y + chassis.hy + 38); vf[F32.POS_Z] = f32(chassis.pos.z + 36); vf[F32.PREV_X] = vf[F32.POS_X]; vf[F32.PREV_Y] = vf[F32.POS_Y]; vf[F32.PREV_Z] = vf[F32.POS_Z]; vf[F32.VEL_X] = f32(chassis.vel.x * 0.35); vf[F32.VEL_Y] = f32(chassis.vel.y * 0.35); vf[F32.VEL_Z] = f32(120); } if (announce) { this.audio.playWeaponSwitch(); this.hud.showToast('EXITED VEHICLE', 'rgba(148,163,184,0.7)'); } }
 
   private handleSandboxHotkey = (e: KeyboardEvent): void => {
     if (!this.input.isPointerLocked || e.repeat) return;
