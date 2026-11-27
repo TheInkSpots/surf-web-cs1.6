@@ -25,7 +25,8 @@ export const IN_RELOAD = 1 << 12;
 export const IN_USE = 1 << 13;
 
 export type WeaponSlot = 1 | 2 | 3;
-export type RigidBodyKind = 'prop' | 'weapon' | 'target';
+export type RigidBodyKind = 'prop' | 'weapon' | 'target' | 'vehicle';
+export type JointKind = 'ball' | 'distance' | 'hinge' | 'fixed';
 
 export interface SpawnPoint {
   x: number;
@@ -48,6 +49,28 @@ export interface CheckpointState {
   velZ?: number;
 }
 
+/** Compact deterministic snapshot for client-side prediction / server lag compensation */
+export interface PlayerSnapshot {
+  tick: number;
+  posX: number;
+  posY: number;
+  posZ: number;
+  velX: number;
+  velY: number;
+  velZ: number;
+  baseVelX: number;
+  baseVelY: number;
+  baseVelZ: number;
+  yaw: number;
+  prevYaw: number;
+  pitch: number;
+  viewOfsZ: number;
+  flags: number;
+  moveState: number;
+  prevButtons: number;
+  surfNz: number;
+}
+
 export interface SourcePhysicsConfig {
   sourceMaxVelocity?: number;
   svBounce?: number;
@@ -58,6 +81,21 @@ export interface SourcePhysicsConfig {
   physPushScale?: number;
   fallDamageThreshold?: number;
   fallDamageScale?: number;
+  /** Rapier-style TGS Soft / NGS solver tuning */
+  tgsSubsteps?: number;
+  tgsIterations?: number;
+  ngsIterations?: number;
+  contactFrequencyHz?: number;
+  contactDampingRatio?: number;
+  sleepLinearThreshold?: number;
+  sleepAngularThreshold?: number;
+  sleepTimeThreshold?: number;
+  /** Player-to-VPhysics shadow controller force cap (Hammer units * mass / s) */
+  playerMaxPushForce?: number;
+  /** Enable midpoint yaw evaluation for smoother fixed-tick air-strafing */
+  subTickYaw?: boolean;
+  /** Enable ramp-seam dead-stop recovery on steep surf ramps */
+  enableRampSeamFix?: boolean;
 }
 
 export interface Vec3 {
@@ -111,6 +149,114 @@ export interface SourceRigidBody {
   bleeds?: boolean;
   bloodLostMl?: number;
   weaponData?: DroppedWeaponData;
+  /** Solver & buoyancy extensions */
+  sleeping?: boolean;
+  sleepTimer?: number;
+  buoyancyRatio?: number;
+  linearDrag?: number;
+  angularDrag?: number;
+  enableCcd?: boolean;
+}
+
+export interface SourceJoint {
+  id: string;
+  kind: JointKind;
+  bodyAId: string;
+  /** Null or omitted pins the joint to a static world anchor */
+  bodyBId?: string | null;
+  /** Anchor in body A local coordinates */
+  localAnchorA: Vec3;
+  /** Anchor in body B local coordinates (or world coordinates when bodyBId is null) */
+  localAnchorB: Vec3;
+  /** Local hinge axis (unit vector) used by 'hinge' joints */
+  localAxisA?: Vec3;
+  localAxisB?: Vec3;
+  /** Rest length for 'distance' joints */
+  restLength?: number;
+  /** Harmonic soft compliance frequency (Hz) and damping ratio */
+  frequencyHz?: number;
+  dampingRatio?: number;
+  /** Joint severs if accumulated impulse exceeds breakForce (<= 0 = unbreakable) */
+  breakForce?: number;
+  broken?: boolean;
+  /** Warm-start cached constraint impulse */
+  lambdaX?: number;
+  lambdaY?: number;
+  lambdaZ?: number;
+}
+
+export interface RopePin {
+  /** Static world anchor if bodyId is omitted */
+  bodyId?: string | null;
+  anchor: Vec3;
+}
+
+export interface SourceRope {
+  id: string;
+  nodes: Vec3[];
+  prevNodes: Vec3[];
+  segmentLength: number;
+  damping: number;
+  gravityScale: number;
+  iterations: number;
+  startPin?: RopePin;
+  endPin?: RopePin;
+  collideWorld?: boolean;
+}
+
+export interface WaterVolume {
+  id: string;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  surfaceZ: number;
+  density?: number;
+  linearDrag?: number;
+  angularDrag?: number;
+  currentVel?: Vec3;
+}
+
+export interface WheelConfig {
+  /** Wheel hardpoint in chassis local space */
+  localHardpoint: Vec3;
+  restLength: number;
+  radius: number;
+  stiffness: number;
+  damping: number;
+  grip: number;
+  steerable: boolean;
+  driven: boolean;
+  /** Runtime state populated each tick */
+  compression: number;
+  prevCompression: number;
+  inContact: boolean;
+  contactPoint: Vec3;
+  contactNormal: Vec3;
+  spinAngle: number;
+}
+
+export interface SourceVehicle {
+  id: string;
+  chassisId: string;
+  wheels: WheelConfig[];
+  maxSteerRad: number;
+  engineForce: number;
+  brakeForce: number;
+  /** Runtime inputs: throttle [-1, 1], steer [-1, 1], handbrake [0, 1] */
+  throttle: number;
+  steer: number;
+  handbrake: number;
+}
+
+export interface GravityGunState {
+  heldBodyId: string | null;
+  holdDistance: number;
+  targetOffsetQuat: Quat;
+  integralErr: Vec3;
+  prevErr: Vec3;
 }
 
 export interface PlayerVitalState {
@@ -146,6 +292,9 @@ export interface PhysicsCallbacks {
   onCheckpoint?: (cp: CheckpointState) => void;
   onPlayerDamage?: (amount: number, source: 'fall' | 'explosion' | 'hazard', bloodLostMl: number) => void;
   onPlayerDeath?: (source: 'fall' | 'explosion' | 'hazard') => void;
+  onJointBroken?: (jointId: string, pos: Vec3) => void;
+  onGravityGunGrab?: (bodyId: string) => void;
+  onGravityGunRelease?: (bodyId: string, punted: boolean) => void;
 }
 
 interface TraceResult {
@@ -159,6 +308,40 @@ interface TraceResult {
   startSolid: boolean;
   allSolid: boolean;
   brushId: string;
+}
+
+interface ContactManifold {
+  key: string;
+  idxA: number;
+  idxB: number;
+  nx: number;
+  ny: number;
+  nz: number;
+  t1x: number;
+  t1y: number;
+  t1z: number;
+  t2x: number;
+  t2y: number;
+  t2z: number;
+  cx: number;
+  cy: number;
+  cz: number;
+  penetration: number;
+  restitution: number;
+  friction: number;
+  patchRadius: number;
+  lambdaN: number;
+  lambdaT1: number;
+  lambdaT2: number;
+  lambdaTwist: number;
+  relVelNInitial: number;
+}
+
+interface CachedImpulse {
+  lambdaN: number;
+  lambdaT1: number;
+  lambdaT2: number;
+  lambdaTwist: number;
 }
 
 /**
@@ -215,6 +398,8 @@ export function createBoxRigidBody(
     maxHp?: number;
     bleeds?: boolean;
     weaponData?: DroppedWeaponData;
+    buoyancyRatio?: number;
+    enableCcd?: boolean;
   } = {},
 ): SourceRigidBody {
   const sx = halfExtents.x * 2;
@@ -256,6 +441,10 @@ export function createBoxRigidBody(
     bleeds: opts.bleeds ?? false,
     bloodLostMl: 0,
     weaponData: opts.weaponData,
+    sleeping: false,
+    sleepTimer: 0,
+    buoyancyRatio: opts.buoyancyRatio ?? 1.25,
+    enableCcd: opts.enableCcd ?? true,
   };
 }
 
@@ -280,6 +469,8 @@ export function createWeaponRigidBody(
       restitution: 0.28,
       surfaceFriction: 1.45,
       weaponData,
+      buoyancyRatio: 0.45,
+      enableCcd: true,
     },
   );
 }
@@ -302,19 +493,179 @@ export function createTargetRigidBody(
       bleeds: true,
       restitution: 0.22,
       surfaceFriction: 1.35,
+      buoyancyRatio: 1.05,
     },
   );
+}
+
+/** Create a Verlet cable/rope chain between two world points */
+export function createVerletRope(
+  id: string,
+  start: Vec3,
+  end: Vec3,
+  segments = 10,
+  opts: {
+    damping?: number;
+    gravityScale?: number;
+    iterations?: number;
+    startPin?: RopePin;
+    endPin?: RopePin;
+    collideWorld?: boolean;
+  } = {},
+): SourceRope {
+  const count = Math.max(2, segments + 1);
+  const nodes: Vec3[] = new Array(count);
+  const prevNodes: Vec3[] = new Array(count);
+  const totalDist = Math.hypot(end.x - start.x, end.y - start.y, end.z - start.z);
+  const segLen = f32(Math.max(1, totalDist / (count - 1)));
+
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
+    const x = f32(start.x + (end.x - start.x) * t);
+    const y = f32(start.y + (end.y - start.y) * t);
+    const z = f32(start.z + (end.z - start.z) * t);
+    nodes[i] = { x, y, z };
+    prevNodes[i] = { x, y, z };
+  }
+
+  return {
+    id,
+    nodes,
+    prevNodes,
+    segmentLength: segLen,
+    damping: f32(opts.damping ?? 0.025),
+    gravityScale: f32(opts.gravityScale ?? 1.0),
+    iterations: opts.iterations ?? 6,
+    startPin: opts.startPin ?? { anchor: { ...start } },
+    endPin: opts.endPin,
+    collideWorld: opts.collideWorld ?? true,
+  };
+}
+
+/** Create a standard 4-wheel Source-style raycast vehicle bound to a chassis rigid body */
+export function createFourWheelVehicle(
+  id: string,
+  chassisId: string,
+  opts: {
+    halfTrackY?: number;
+    frontAxleX?: number;
+    rearAxleX?: number;
+    hubZ?: number;
+    restLength?: number;
+    wheelRadius?: number;
+    stiffness?: number;
+    damping?: number;
+    grip?: number;
+    maxSteerRad?: number;
+    engineForce?: number;
+    brakeForce?: number;
+  } = {},
+): SourceVehicle {
+  const hy = opts.halfTrackY ?? 34;
+  const fx = opts.frontAxleX ?? 56;
+  const rx = opts.rearAxleX ?? -54;
+  const hz = opts.hubZ ?? -12;
+  const restLength = opts.restLength ?? 28;
+  const radius = opts.wheelRadius ?? 16;
+  const stiffness = opts.stiffness ?? 4200;
+  const damping = opts.damping ?? 380;
+  const grip = opts.grip ?? 1.35;
+
+  const makeWheel = (x: number, y: number, steerable: boolean, driven: boolean): WheelConfig => ({
+    localHardpoint: { x: f32(x), y: f32(y), z: f32(hz) },
+    restLength: f32(restLength),
+    radius: f32(radius),
+    stiffness: f32(stiffness),
+    damping: f32(damping),
+    grip: f32(grip),
+    steerable,
+    driven,
+    compression: 0,
+    prevCompression: 0,
+    inContact: false,
+    contactPoint: { x: 0, y: 0, z: 0 },
+    contactNormal: { x: 0, y: 0, z: 1 },
+    spinAngle: 0,
+  });
+
+  return {
+    id,
+    chassisId,
+    wheels: [
+      makeWheel(fx, hy, true, true),
+      makeWheel(fx, -hy, true, true),
+      makeWheel(rx, hy, false, true),
+      makeWheel(rx, -hy, false, true),
+    ],
+    maxSteerRad: f32(opts.maxSteerRad ?? 0.52),
+    engineForce: f32(opts.engineForce ?? 220000),
+    brakeForce: f32(opts.brakeForce ?? 260000),
+    throttle: 0,
+    steer: 0,
+    handbrake: 0,
+  };
 }
 
 function normalizeQuat(q: Quat): Quat {
   const len = Math.hypot(q.w, q.x, q.y, q.z);
   if (len < 1e-8) return { w: 1, x: 0, y: 0, z: 0 };
+  const inv = 1 / len;
   return {
-    w: f32(q.w / len),
-    x: f32(q.x / len),
-    y: f32(q.y / len),
-    z: f32(q.z / len),
+    w: f32(q.w * inv),
+    x: f32(q.x * inv),
+    y: f32(q.y * inv),
+    z: f32(q.z * inv),
   };
+}
+
+function mulQuat(a: Quat, b: Quat): Quat {
+  return {
+    w: f32(a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z),
+    x: f32(a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y),
+    y: f32(a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x),
+    z: f32(a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w),
+  };
+}
+
+function conjQuat(q: Quat): Quat {
+  return { w: q.w, x: f32(-q.x), y: f32(-q.y), z: f32(-q.z) };
+}
+
+/** Shortest-arc axis-angle orientation error e_q = log(qTarget * qCurrent^-1) */
+function computeQuatLogError(qTarget: Quat, qCurrent: Quat): Vec3 {
+  let err = mulQuat(qTarget, conjQuat(qCurrent));
+  if (err.w < 0) {
+    err = { w: f32(-err.w), x: f32(-err.x), y: f32(-err.y), z: f32(-err.z) };
+  }
+  const vLen = Math.hypot(err.x, err.y, err.z);
+  if (vLen < 1e-6) return { x: 0, y: 0, z: 0 };
+  const angle = 2 * Math.atan2(vLen, Math.min(1, Math.max(-1, err.w)));
+  const scale = angle / vLen;
+  return {
+    x: f32(err.x * scale),
+    y: f32(err.y * scale),
+    z: f32(err.z * scale),
+  };
+}
+
+function quatFromYawPitch(yaw: number, pitch: number): Quat {
+  const cy = Math.cos(yaw * 0.5);
+  const sy = Math.sin(yaw * 0.5);
+  const cp = Math.cos(pitch * 0.5);
+  const sp = Math.sin(pitch * 0.5);
+  return normalizeQuat({
+    w: f32(cy * cp),
+    x: f32(-sy * sp),
+    y: f32(cy * sp),
+    z: f32(sy * cp),
+  });
+}
+
+function wrapAngleRad(a: number): number {
+  let r = a;
+  while (r > Math.PI) r -= Math.PI * 2;
+  while (r < -Math.PI) r += Math.PI * 2;
+  return r;
 }
 
 function quatToMat3(q: Quat): Mat3 {
@@ -365,78 +716,317 @@ function dotVec3(a: Vec3, b: Vec3): number {
   return f32(a.x * b.x + a.y * b.y + a.z * b.z);
 }
 
-/** World-space inertia tensor I = R * I_local * R^T and its inverse I^-1 */
+/**
+ * Exact world-space inertia I = R * diag(I_local) * R^T and its inverse
+ * I^-1 = R * diag(I_local^-1) * R^T (avoids cofactor inversion drift).
+ */
 function computeWorldInertia(rot: Mat3, inertiaLocal: Vec3): { inertia: Mat3; invInertia: Mat3 } {
-  const s0x = rot[0] * inertiaLocal.x;
-  const s0y = rot[3] * inertiaLocal.x;
-  const s0z = rot[6] * inertiaLocal.x;
+  const ix = inertiaLocal.x;
+  const iy = inertiaLocal.y;
+  const iz = inertiaLocal.z;
 
-  const s1x = rot[1] * inertiaLocal.y;
-  const s1y = rot[4] * inertiaLocal.y;
-  const s1z = rot[7] * inertiaLocal.y;
+  const invIx = ix > 1e-8 ? 1 / ix : 0;
+  const invIy = iy > 1e-8 ? 1 / iy : 0;
+  const invIz = iz > 1e-8 ? 1 / iz : 0;
 
-  const s2x = rot[2] * inertiaLocal.z;
-  const s2y = rot[5] * inertiaLocal.z;
-  const s2z = rot[8] * inertiaLocal.z;
+  const r0 = rot[0], r1 = rot[1], r2 = rot[2];
+  const r3 = rot[3], r4 = rot[4], r5 = rot[5];
+  const r6 = rot[6], r7 = rot[7], r8 = rot[8];
 
-  const i00 = f32(s0x * rot[0] + s1x * rot[1] + s2x * rot[2]);
-  const i01 = f32(s0x * rot[3] + s1x * rot[4] + s2x * rot[5]);
-  const i02 = f32(s0x * rot[6] + s1x * rot[7] + s2x * rot[8]);
-
-  const i10 = f32(s0y * rot[0] + s1y * rot[1] + s2y * rot[2]);
-  const i11 = f32(s0y * rot[3] + s1y * rot[4] + s2y * rot[5]);
-  const i12 = f32(s0y * rot[6] + s1y * rot[7] + s2y * rot[8]);
-
-  const i20 = f32(s0z * rot[0] + s1z * rot[1] + s2z * rot[2]);
-  const i21 = f32(s0z * rot[3] + s1z * rot[4] + s2z * rot[5]);
-  const i22 = f32(s0z * rot[6] + s1z * rot[7] + s2z * rot[8]);
-
-  const inertia: Mat3 = [i00, i01, i02, i10, i11, i12, i20, i21, i22];
-
-  const c00 = i11 * i22 - i12 * i21;
-  const c01 = -(i10 * i22 - i12 * i20);
-  const c02 = i10 * i21 - i11 * i20;
-  const c10 = -(i01 * i22 - i02 * i21);
-  const c11 = i00 * i22 - i02 * i20;
-  const c12 = -(i00 * i21 - i01 * i20);
-  const c20 = i01 * i12 - i02 * i11;
-  const c21 = -(i00 * i12 - i02 * i10);
-  const c22 = i00 * i11 - i01 * i10;
-
-  const det = i00 * c00 + i01 * c01 + i02 * c02;
-  if (Math.abs(det) < 1e-8) {
-    return { inertia, invInertia: [0, 0, 0, 0, 0, 0, 0, 0, 0] };
-  }
-  const invDet = 1 / det;
+  const inertia: Mat3 = [
+    f32(r0 * r0 * ix + r1 * r1 * iy + r2 * r2 * iz),
+    f32(r0 * r3 * ix + r1 * r4 * iy + r2 * r5 * iz),
+    f32(r0 * r6 * ix + r1 * r7 * iy + r2 * r8 * iz),
+    f32(r3 * r0 * ix + r4 * r1 * iy + r5 * r2 * iz),
+    f32(r3 * r3 * ix + r4 * r4 * iy + r5 * r5 * iz),
+    f32(r3 * r6 * ix + r4 * r7 * iy + r5 * r8 * iz),
+    f32(r6 * r0 * ix + r7 * r1 * iy + r8 * r2 * iz),
+    f32(r6 * r3 * ix + r7 * r4 * iy + r8 * r5 * iz),
+    f32(r6 * r6 * ix + r7 * r7 * iy + r8 * r8 * iz),
+  ];
 
   const invInertia: Mat3 = [
-    f32(c00 * invDet), f32(c10 * invDet), f32(c20 * invDet),
-    f32(c01 * invDet), f32(c11 * invDet), f32(c21 * invDet),
-    f32(c02 * invDet), f32(c12 * invDet), f32(c22 * invDet),
+    f32(r0 * r0 * invIx + r1 * r1 * invIy + r2 * r2 * invIz),
+    f32(r0 * r3 * invIx + r1 * r4 * invIy + r2 * r5 * invIz),
+    f32(r0 * r6 * invIx + r1 * r7 * invIy + r2 * r8 * invIz),
+    f32(r3 * r0 * invIx + r4 * r1 * invIy + r5 * r2 * invIz),
+    f32(r3 * r3 * invIx + r4 * r4 * invIy + r5 * r5 * invIz),
+    f32(r3 * r6 * invIx + r4 * r7 * invIy + r5 * r8 * invIz),
+    f32(r6 * r0 * invIx + r7 * r1 * invIy + r8 * r2 * invIz),
+    f32(r6 * r3 * invIx + r7 * r4 * invIy + r8 * r5 * invIz),
+    f32(r6 * r6 * invIx + r7 * r7 * invIy + r8 * r8 * invIz),
   ];
 
   return { inertia, invInertia };
 }
 
+/** Build two orthonormal tangent vectors spanning the contact plane perpendicular to n */
+function buildContactBasis(nx: number, ny: number, nz: number): {
+  t1x: number; t1y: number; t1z: number;
+  t2x: number; t2y: number; t2z: number;
+} {
+  let t1x: number;
+  let t1y: number;
+  let t1z: number;
+  if (Math.abs(nx) < 0.57735) {
+    const inv = 1 / Math.hypot(nz, -ny);
+    t1x = 0;
+    t1y = f32(-nz * inv);
+    t1z = f32(ny * inv);
+  } else {
+    const inv = 1 / Math.hypot(-ny, nx);
+    t1x = f32(-ny * inv);
+    t1y = f32(nx * inv);
+    t1z = 0;
+  }
+  const t2x = f32(ny * t1z - nz * t1y);
+  const t2y = f32(nz * t1x - nx * t1z);
+  const t2z = f32(nx * t1y - ny * t1x);
+  return { t1x, t1y, t1z, t2x, t2y, t2z };
+}
+
+/**
+ * Flat TypedArray BVH over static ConvexBrushes for O(log N) broad-phase sweeps
+ * with zero per-query heap allocations.
+ */
+class StaticBrushBvh {
+  private readonly brushes: ConvexBrush[];
+  private order: Int32Array;
+  private minX: Float32Array;
+  private minY: Float32Array;
+  private minZ: Float32Array;
+  private maxX: Float32Array;
+  private maxY: Float32Array;
+  private maxZ: Float32Array;
+  private leftOrStart: Int32Array;
+  private rightChild: Int32Array;
+  private leafCount: Int32Array;
+  private nodeCount = 0;
+  private readonly stack = new Int32Array(64);
+
+  constructor(brushes: ConvexBrush[]) {
+    this.brushes = brushes;
+    const n = brushes.length;
+    const maxNodes = Math.max(1, n * 2);
+    this.order = new Int32Array(n);
+    this.minX = new Float32Array(maxNodes);
+    this.minY = new Float32Array(maxNodes);
+    this.minZ = new Float32Array(maxNodes);
+    this.maxX = new Float32Array(maxNodes);
+    this.maxY = new Float32Array(maxNodes);
+    this.maxZ = new Float32Array(maxNodes);
+    this.leftOrStart = new Int32Array(maxNodes);
+    this.rightChild = new Int32Array(maxNodes);
+    this.leafCount = new Int32Array(maxNodes);
+
+    this.rebuild();
+  }
+
+  public rebuild(): void {
+    const n = this.brushes.length;
+    if (this.order.length !== n) {
+      const maxNodes = Math.max(1, n * 2);
+      this.order = new Int32Array(n);
+      this.minX = new Float32Array(maxNodes);
+      this.minY = new Float32Array(maxNodes);
+      this.minZ = new Float32Array(maxNodes);
+      this.maxX = new Float32Array(maxNodes);
+      this.maxY = new Float32Array(maxNodes);
+      this.maxZ = new Float32Array(maxNodes);
+      this.leftOrStart = new Int32Array(maxNodes);
+      this.rightChild = new Int32Array(maxNodes);
+      this.leafCount = new Int32Array(maxNodes);
+    }
+
+    for (let i = 0; i < n; i++) this.order[i] = i;
+    this.nodeCount = 0;
+    if (n > 0) {
+      this.buildNode(0, n);
+    }
+  }
+
+  private buildNode(start: number, count: number): number {
+    const nodeIdx = this.nodeCount++;
+    let bMinX = Infinity, bMinY = Infinity, bMinZ = Infinity;
+    let bMaxX = -Infinity, bMaxY = -Infinity, bMaxZ = -Infinity;
+    let cMinX = Infinity, cMinY = Infinity, cMinZ = Infinity;
+    let cMaxX = -Infinity, cMaxY = -Infinity, cMaxZ = -Infinity;
+
+    for (let i = start; i < start + count; i++) {
+      const br = this.brushes[this.order[i]];
+      if (br.minX < bMinX) bMinX = br.minX;
+      if (br.minY < bMinY) bMinY = br.minY;
+      if (br.minZ < bMinZ) bMinZ = br.minZ;
+      if (br.maxX > bMaxX) bMaxX = br.maxX;
+      if (br.maxY > bMaxY) bMaxY = br.maxY;
+      if (br.maxZ > bMaxZ) bMaxZ = br.maxZ;
+
+      const cx = (br.minX + br.maxX) * 0.5;
+      const cy = (br.minY + br.maxY) * 0.5;
+      const cz = (br.minZ + br.maxZ) * 0.5;
+      if (cx < cMinX) cMinX = cx;
+      if (cy < cMinY) cMinY = cy;
+      if (cz < cMinZ) cMinZ = cz;
+      if (cx > cMaxX) cMaxX = cx;
+      if (cy > cMaxY) cMaxY = cy;
+      if (cz > cMaxZ) cMaxZ = cz;
+    }
+
+    this.minX[nodeIdx] = bMinX;
+    this.minY[nodeIdx] = bMinY;
+    this.minZ[nodeIdx] = bMinZ;
+    this.maxX[nodeIdx] = bMaxX;
+    this.maxY[nodeIdx] = bMaxY;
+    this.maxZ[nodeIdx] = bMaxZ;
+
+    if (count <= 4) {
+      this.leftOrStart[nodeIdx] = start;
+      this.rightChild[nodeIdx] = -1;
+      this.leafCount[nodeIdx] = count;
+      return nodeIdx;
+    }
+
+    const ex = cMaxX - cMinX;
+    const ey = cMaxY - cMinY;
+    const ez = cMaxZ - cMinZ;
+    const axis = ex >= ey && ex >= ez ? 0 : ey >= ez ? 1 : 2;
+    const splitVal =
+      axis === 0 ? (cMinX + cMaxX) * 0.5 : axis === 1 ? (cMinY + cMaxY) * 0.5 : (cMinZ + cMaxZ) * 0.5;
+
+    let mid = start;
+    const end = start + count;
+    for (let i = start; i < end; i++) {
+      const br = this.brushes[this.order[i]];
+      const c =
+        axis === 0
+          ? (br.minX + br.maxX) * 0.5
+          : axis === 1
+            ? (br.minY + br.maxY) * 0.5
+            : (br.minZ + br.maxZ) * 0.5;
+      if (c < splitVal) {
+        const tmp = this.order[i];
+        this.order[i] = this.order[mid];
+        this.order[mid] = tmp;
+        mid++;
+      }
+    }
+
+    let leftCount = mid - start;
+    if (leftCount === 0 || leftCount === count) {
+      leftCount = count >> 1;
+    }
+
+    this.leafCount[nodeIdx] = 0;
+    this.leftOrStart[nodeIdx] = this.buildNode(start, leftCount);
+    this.rightChild[nodeIdx] = this.buildNode(start + leftCount, count - leftCount);
+    return nodeIdx;
+  }
+
+  /** Collect overlapping brush indices into outBuf without allocating */
+  public queryAabb(
+    qMinX: number,
+    qMinY: number,
+    qMinZ: number,
+    qMaxX: number,
+    qMaxY: number,
+    qMaxZ: number,
+    outBuf: Int32Array,
+  ): number {
+    if (this.nodeCount === 0) return 0;
+
+    let sp = 0;
+    let hitCount = 0;
+    const maxOut = outBuf.length;
+    this.stack[sp++] = 0;
+
+    while (sp > 0) {
+      const idx = this.stack[--sp];
+      if (
+        qMaxX < this.minX[idx] ||
+        qMinX > this.maxX[idx] ||
+        qMaxY < this.minY[idx] ||
+        qMinY > this.maxY[idx] ||
+        qMaxZ < this.minZ[idx] ||
+        qMinZ > this.maxZ[idx]
+      ) {
+        continue;
+      }
+
+      const lc = this.leafCount[idx];
+      if (lc > 0) {
+        const start = this.leftOrStart[idx];
+        const end = start + lc;
+        for (let i = start; i < end; i++) {
+          const brushIdx = this.order[i];
+          const br = this.brushes[brushIdx];
+          if (
+            qMaxX < br.minX ||
+            qMinX > br.maxX ||
+            qMaxY < br.minY ||
+            qMinY > br.maxY ||
+            qMaxZ < br.minZ ||
+            qMinZ > br.maxZ
+          ) {
+            continue;
+          }
+          if (hitCount < maxOut) {
+            outBuf[hitCount++] = brushIdx;
+          }
+        }
+      } else {
+        if (sp + 2 <= this.stack.length) {
+          this.stack[sp++] = this.rightChild[idx];
+          this.stack[sp++] = this.leftOrStart[idx];
+        }
+      }
+    }
+
+    return hitCount;
+  }
+}
+
 export class GoldSrcPhysicsEngine {
   private readonly abi: PhysicsMemoryAbi;
   private readonly brushes: ConvexBrush[];
+  private readonly brushBvh: StaticBrushBvh;
   private readonly triggers: TriggerVolume[];
   private rigidBodies: SourceRigidBody[];
+  private readonly joints: SourceJoint[] = [];
+  private readonly ropes: SourceRope[] = [];
+  private readonly waterVolumes: WaterVolume[] = [];
+  private readonly vehicles: SourceVehicle[] = [];
   private readonly spawn: SpawnPoint;
   private readonly callbacks: PhysicsCallbacks;
   private readonly sourceConfig: Required<SourcePhysicsConfig>;
 
   private readonly triggerCooldowns = new Map<string, number>();
+  private readonly contactCache = new Map<string, CachedImpulse>();
+  private readonly activeManifolds: ContactManifold[] = [];
+
   private readonly clipOut = new Float32Array(3);
   private readonly planesX = new Float32Array(MAX_CLIP_PLANES);
   private readonly planesY = new Float32Array(MAX_CLIP_PLANES);
   private readonly planesZ = new Float32Array(MAX_CLIP_PLANES);
+  private queryScratch: Int32Array;
+  private stepQueryScratch: Int32Array;
+  private stepCandidateCount = -1;
 
   // Source CGameMovement basevelocity (conveyors / moving platforms)
   private baseVelX = f32(0);
   private baseVelY = f32(0);
   private baseVelZ = f32(0);
+  private prevCmdYaw = f32(0);
+  private hasPrevYaw = false;
+  private playerWaterSubmersion = f32(0);
+
+  // Gravity Gun (Velocity-Level PID Controller)
+  private readonly gravityGun: GravityGunState = {
+    heldBodyId: null,
+    holdDistance: 120,
+    targetOffsetQuat: { w: 1, x: 0, y: 0, z: 0 },
+    integralErr: { x: 0, y: 0, z: 0 },
+    prevErr: { x: 0, y: 0, z: 0 },
+  };
 
   // Player life / health / blood state
   private readonly vitals: PlayerVitalState = {
@@ -461,6 +1051,32 @@ export class GoldSrcPhysicsEngine {
     brushId: '',
   };
 
+  private readonly bodyTraceScratch: TraceResult = {
+    fraction: f32(1.0),
+    endX: f32(0),
+    endY: f32(0),
+    endZ: f32(0),
+    normalX: f32(0),
+    normalY: f32(0),
+    normalZ: f32(0),
+    startSolid: false,
+    allSolid: false,
+    brushId: '',
+  };
+
+  private readonly auxTraceScratch: TraceResult = {
+    fraction: f32(1.0),
+    endX: f32(0),
+    endY: f32(0),
+    endZ: f32(0),
+    normalX: f32(0),
+    normalY: f32(0),
+    normalZ: f32(0),
+    startSolid: false,
+    allSolid: false,
+    brushId: '',
+  };
+
   constructor(
     abi: PhysicsMemoryAbi,
     brushes: ConvexBrush[],
@@ -472,22 +1088,264 @@ export class GoldSrcPhysicsEngine {
   ) {
     this.abi = abi;
     this.brushes = brushes;
+    this.brushBvh = new StaticBrushBvh(brushes);
     this.triggers = triggers;
     this.rigidBodies = rigidBodies;
     this.spawn = spawn;
     this.callbacks = callbacks;
+
+    const scratchCap = Math.max(64, brushes.length);
+    this.queryScratch = new Int32Array(scratchCap);
+    this.stepQueryScratch = new Int32Array(scratchCap);
+
     this.sourceConfig = {
       sourceMaxVelocity: sourceConfig.sourceMaxVelocity ?? 3500,
       svBounce: sourceConfig.svBounce ?? 0,
       playerMass: sourceConfig.playerMass ?? 85,
       surfaceFriction: sourceConfig.surfaceFriction ?? 1.0,
-      linearDamping: sourceConfig.linearDamping ?? 0.02,
-      angularDamping: sourceConfig.angularDamping ?? 0.05,
+      linearDamping: sourceConfig.linearDamping ?? 0.04,
+      angularDamping: sourceConfig.angularDamping ?? 0.08,
       physPushScale: sourceConfig.physPushScale ?? 1.0,
       fallDamageThreshold: sourceConfig.fallDamageThreshold ?? 580,
       fallDamageScale: sourceConfig.fallDamageScale ?? 0.16,
+      tgsSubsteps: Math.max(1, sourceConfig.tgsSubsteps ?? 2),
+      tgsIterations: Math.max(1, sourceConfig.tgsIterations ?? 4),
+      ngsIterations: Math.max(0, sourceConfig.ngsIterations ?? 2),
+      contactFrequencyHz: sourceConfig.contactFrequencyHz ?? 30,
+      contactDampingRatio: sourceConfig.contactDampingRatio ?? 1.0,
+      sleepLinearThreshold: sourceConfig.sleepLinearThreshold ?? 6.0,
+      sleepAngularThreshold: sourceConfig.sleepAngularThreshold ?? 0.12,
+      sleepTimeThreshold: sourceConfig.sleepTimeThreshold ?? 0.6,
+      playerMaxPushForce: sourceConfig.playerMaxPushForce ?? 6500,
+      subTickYaw: sourceConfig.subTickYaw ?? true,
+      enableRampSeamFix: sourceConfig.enableRampSeamFix ?? true,
+    };
+
+    // Auto-register any trigger volumes tagged as water
+    for (let i = 0; i < triggers.length; i++) {
+      const t = triggers[i];
+      if ((t.type as string) === 'water' || t.meta?.water === true) {
+        this.waterVolumes.push({
+          id: t.id,
+          minX: t.minX,
+          minY: t.minY,
+          minZ: t.minZ,
+          maxX: t.maxX,
+          maxY: t.maxY,
+          maxZ: t.maxZ,
+          surfaceZ: (t.meta?.surfaceZ as number | undefined) ?? t.maxZ,
+          density: (t.meta?.density as number | undefined) ?? 1.0,
+          linearDrag: (t.meta?.linearDrag as number | undefined) ?? 2.2,
+          angularDrag: (t.meta?.angularDrag as number | undefined) ?? 2.6,
+        });
+      }
+    }
+  }
+
+  /** Rebuild static brush BVH if map brushes were mutated externally */
+  public rebuildBroadPhase(): void {
+    this.brushBvh.rebuild();
+    if (this.queryScratch.length < this.brushes.length) {
+      this.queryScratch = new Int32Array(this.brushes.length);
+      this.stepQueryScratch = new Int32Array(this.brushes.length);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Support System Management APIs (Joints, Ropes, Water, Vehicles, Gravity Gun)
+  // ---------------------------------------------------------------------------
+
+  public addJoint(joint: SourceJoint): void {
+    this.joints.push(joint);
+    this.wakeBodyById(joint.bodyAId);
+    if (joint.bodyBId) this.wakeBodyById(joint.bodyBId);
+  }
+
+  public removeJoint(id: string): SourceJoint | null {
+    const idx = this.joints.findIndex((j) => j.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.joints.splice(idx, 1);
+    return removed;
+  }
+
+  public getJoints(): readonly SourceJoint[] {
+    return this.joints;
+  }
+
+  public addRope(rope: SourceRope): void {
+    this.ropes.push(rope);
+  }
+
+  public removeRope(id: string): SourceRope | null {
+    const idx = this.ropes.findIndex((r) => r.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.ropes.splice(idx, 1);
+    return removed;
+  }
+
+  public getRopes(): readonly SourceRope[] {
+    return this.ropes;
+  }
+
+  public addWaterVolume(vol: WaterVolume): void {
+    this.waterVolumes.push(vol);
+  }
+
+  public removeWaterVolume(id: string): WaterVolume | null {
+    const idx = this.waterVolumes.findIndex((w) => w.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.waterVolumes.splice(idx, 1);
+    return removed;
+  }
+
+  public getWaterVolumes(): readonly WaterVolume[] {
+    return this.waterVolumes;
+  }
+
+  public addVehicle(vehicle: SourceVehicle): void {
+    this.vehicles.push(vehicle);
+    this.wakeBodyById(vehicle.chassisId);
+  }
+
+  public removeVehicle(id: string): SourceVehicle | null {
+    const idx = this.vehicles.findIndex((v) => v.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.vehicles.splice(idx, 1);
+    return removed;
+  }
+
+  public getVehicles(): readonly SourceVehicle[] {
+    return this.vehicles;
+  }
+
+  public setVehicleControls(
+    vehicleId: string,
+    throttle: number,
+    steer: number,
+    handbrake = 0,
+  ): void {
+    const v = this.vehicles.find((veh) => veh.id === vehicleId);
+    if (!v) return;
+    v.throttle = f32(Math.max(-1, Math.min(1, throttle)));
+    v.steer = f32(Math.max(-1, Math.min(1, steer)));
+    v.handbrake = f32(Math.max(0, Math.min(1, handbrake)));
+    if (Math.abs(throttle) > 0.01 || Math.abs(steer) > 0.01) {
+      this.wakeBodyById(v.chassisId);
+    }
+  }
+
+  public getGravityGunState(): Readonly<GravityGunState> {
+    return this.gravityGun;
+  }
+
+  /** Grab a rigid body in view with the Velocity-Level PID Gravity Gun */
+  public tryGrabRigidBody(
+    origin: Vec3,
+    dir: Vec3,
+    maxRange = 360,
+    maxMass = 260,
+    holdDistance = 120,
+  ): SourceRigidBody | null {
+    const hit = this.traceRay(origin, dir, maxRange);
+    if (!hit.hit || hit.kind !== 'rigidBody' || !hit.body) return null;
+    if (hit.body.mass <= 0 || hit.body.mass > maxMass) return null;
+
+    const vf = this.abi.f32;
+    const viewQuat = quatFromYawPitch(vf[F32.CMD_YAW], -vf[F32.CMD_PITCH]);
+    this.gravityGun.heldBodyId = hit.body.id;
+    this.gravityGun.holdDistance = f32(Math.max(64, Math.min(maxRange * 0.75, holdDistance)));
+    this.gravityGun.targetOffsetQuat = mulQuat(conjQuat(viewQuat), hit.body.quat);
+    this.gravityGun.integralErr = { x: 0, y: 0, z: 0 };
+    this.gravityGun.prevErr = { x: 0, y: 0, z: 0 };
+    this.wakeBody(hit.body);
+    this.callbacks.onGravityGunGrab?.(hit.body.id);
+    return hit.body;
+  }
+
+  /** Drop or punt the currently held Gravity Gun rigid body */
+  public releaseHeldBody(puntImpulse = 0, puntDir?: Vec3): SourceRigidBody | null {
+    if (!this.gravityGun.heldBodyId) return null;
+    const body = this.findBodyById(this.gravityGun.heldBodyId);
+    const id = this.gravityGun.heldBodyId;
+    this.gravityGun.heldBodyId = null;
+    this.gravityGun.integralErr = { x: 0, y: 0, z: 0 };
+    this.gravityGun.prevErr = { x: 0, y: 0, z: 0 };
+
+    if (body && puntImpulse > 0) {
+      const vf = this.abi.f32;
+      const dir = puntDir ?? computeAngleVectors(-vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0).forward;
+      this.applyPointImpulse(body, body.pos, dir, puntImpulse, 0);
+      this.callbacks.onGravityGunRelease?.(id, true);
+    } else {
+      this.callbacks.onGravityGunRelease?.(id, false);
+    }
+    return body;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Deterministic Rollback Snapshot (Player Layer Only)
+  // ---------------------------------------------------------------------------
+
+  public capturePlayerSnapshot(): PlayerSnapshot {
+    const { f32: vf, i32: vi } = this.abi;
+    return {
+      tick: vi[I32.TICK],
+      posX: vf[F32.POS_X],
+      posY: vf[F32.POS_Y],
+      posZ: vf[F32.POS_Z],
+      velX: vf[F32.VEL_X],
+      velY: vf[F32.VEL_Y],
+      velZ: vf[F32.VEL_Z],
+      baseVelX: this.baseVelX,
+      baseVelY: this.baseVelY,
+      baseVelZ: this.baseVelZ,
+      yaw: vf[F32.YAW],
+      prevYaw: this.prevCmdYaw,
+      pitch: vf[F32.PITCH],
+      viewOfsZ: vf[F32.VIEW_OFS_Z],
+      flags: vi[I32.FLAGS],
+      moveState: vi[I32.MOVESTATE],
+      prevButtons: vi[I32.PREV_BUTTONS],
+      surfNz: vf[F32.SURF_NZ],
     };
   }
+
+  public restorePlayerSnapshot(snap: PlayerSnapshot): void {
+    const { f32: vf, i32: vi } = this.abi;
+    vi[I32.TICK] = snap.tick;
+    vf[F32.POS_X] = f32(snap.posX);
+    vf[F32.POS_Y] = f32(snap.posY);
+    vf[F32.POS_Z] = f32(snap.posZ);
+    vf[F32.PREV_X] = f32(snap.posX);
+    vf[F32.PREV_Y] = f32(snap.posY);
+    vf[F32.PREV_Z] = f32(snap.posZ);
+    vf[F32.VEL_X] = f32(snap.velX);
+    vf[F32.VEL_Y] = f32(snap.velY);
+    vf[F32.VEL_Z] = f32(snap.velZ);
+    this.baseVelX = f32(snap.baseVelX);
+    this.baseVelY = f32(snap.baseVelY);
+    this.baseVelZ = f32(snap.baseVelZ);
+    vf[F32.YAW] = f32(snap.yaw);
+    this.prevCmdYaw = f32(snap.prevYaw);
+    this.hasPrevYaw = true;
+    vf[F32.PITCH] = f32(snap.pitch);
+    vf[F32.VIEW_OFS_Z] = f32(snap.viewOfsZ);
+    vf[F32.PREV_VIEW_OFS_Z] = f32(snap.viewOfsZ);
+    vi[I32.FLAGS] = snap.flags;
+    vi[I32.MOVESTATE] = snap.moveState;
+    vi[I32.PREV_BUTTONS] = snap.prevButtons;
+    vf[F32.SURF_NZ] = f32(snap.surfNz);
+  }
+
+  public setBaseVelocity(vx: number, vy: number, vz: number): void {
+    this.baseVelX = f32(vx);
+    this.baseVelY = f32(vy);
+    this.baseVelZ = f32(vz);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Player Vitals & Rigid Body Collection APIs
+  // ---------------------------------------------------------------------------
 
   public getVitals(): Readonly<PlayerVitalState> {
     return this.vitals;
@@ -512,6 +1370,9 @@ export class GoldSrcPhysicsEngine {
 
     if (this.vitals.hp <= 0) {
       this.vitals.dead = true;
+      if (this.gravityGun.heldBodyId) {
+        this.releaseHeldBody(0);
+      }
       this.callbacks.onPlayerDeath?.(source);
     }
   }
@@ -527,12 +1388,36 @@ export class GoldSrcPhysicsEngine {
   public removeRigidBody(id: string): SourceRigidBody | null {
     const idx = this.rigidBodies.findIndex((b) => b.id === id);
     if (idx === -1) return null;
+    if (this.gravityGun.heldBodyId === id) {
+      this.gravityGun.heldBodyId = null;
+    }
     const [removed] = this.rigidBodies.splice(idx, 1);
     return removed;
   }
 
   public setRigidBodies(bodies: SourceRigidBody[]): void {
     this.rigidBodies = bodies;
+    this.contactCache.clear();
+    if (this.gravityGun.heldBodyId && !this.findBodyById(this.gravityGun.heldBodyId)) {
+      this.gravityGun.heldBodyId = null;
+    }
+  }
+
+  private findBodyById(id: string): SourceRigidBody | null {
+    for (let i = 0; i < this.rigidBodies.length; i++) {
+      if (this.rigidBodies[i].id === id) return this.rigidBodies[i];
+    }
+    return null;
+  }
+
+  private wakeBody(body: SourceRigidBody): void {
+    body.sleeping = false;
+    body.sleepTimer = 0;
+  }
+
+  private wakeBodyById(id: string): void {
+    const b = this.findBodyById(id);
+    if (b) this.wakeBody(b);
   }
 
   public getPlayerEyePosition(): Vec3 {
@@ -590,7 +1475,8 @@ export class GoldSrcPhysicsEngine {
   }
 
   /**
-   * Hitscan raycast against BOTH static BSP convex brushes and oriented VPhysics rigid bodies (OBBs).
+   * Hitscan raycast against BOTH static BSP convex brushes (BVH-accelerated)
+   * and oriented VPhysics rigid bodies (OBBs).
    */
   public traceRay(
     origin: Vec3,
@@ -618,19 +1504,7 @@ export class GoldSrcPhysicsEngine {
     const endY = f32(origin.y + ny * maxDistance);
     const endZ = f32(origin.z + nz * maxDistance);
 
-    // 1. Static BSP brush trace (point ray with DIST_EPSILON)
-    const worldTr: TraceResult = {
-      fraction: f32(1.0),
-      endX,
-      endY,
-      endZ,
-      normalX: f32(0),
-      normalY: f32(0),
-      normalZ: f32(1),
-      startSolid: false,
-      allSolid: false,
-      brushId: '',
-    };
+    const worldTr = this.auxTraceScratch;
     this.traceWorld(origin.x, origin.y, origin.z, endX, endY, endZ, 0, 0, 0, worldTr);
 
     let bestFrac = worldTr.fraction;
@@ -643,19 +1517,17 @@ export class GoldSrcPhysicsEngine {
     let bestBrushId: string | undefined = worldTr.fraction < 1.0 ? worldTr.brushId : undefined;
     let bestBody: SourceRigidBody | undefined;
 
-    // 2. Oriented bounding box (OBB) slab ray intersection against every VPhysics rigid body
     const rayDir: Vec3 = { x: nx, y: ny, z: nz };
     for (let i = 0; i < this.rigidBodies.length; i++) {
       const b = this.rigidBodies[i];
       if (ignoreBodyIds?.has(b.id)) continue;
 
       const rot = quatToMat3(b.quat);
-      const relOrigin: Vec3 = {
+      const localOrigin = mulMat3TransposeVec3(rot, {
         x: origin.x - b.pos.x,
         y: origin.y - b.pos.y,
         z: origin.z - b.pos.z,
-      };
-      const localOrigin = mulMat3TransposeVec3(rot, relOrigin);
+      });
       const localDir = mulMat3TransposeVec3(rot, rayDir);
 
       const obbHit = this.intersectRayLocalBox(
@@ -716,7 +1588,6 @@ export class GoldSrcPhysicsEngine {
     const nz = dir.z / dLen;
     const rayDir: Vec3 = { x: nx, y: ny, z: nz };
 
-    // Expanded OBB check for forgiving melee hits on props/targets
     let bestFrac = exact.fraction;
     let bestBody: SourceRigidBody | undefined;
     let bestNormal: Vec3 = exact.normal;
@@ -783,44 +1654,86 @@ export class GoldSrcPhysicsEngine {
   ): { t: number; localNormal: Vec3 } | null {
     let tMin = 0;
     let tMax = maxDist;
-    let hitNormal: Vec3 = { x: 0, y: 0, z: 1 };
+    let hitAxis: 0 | 1 | 2 = 2;
+    let hitSign = 1;
 
-    const axes: Array<{ o: number; d: number; h: number; axis: 0 | 1 | 2 }> = [
-      { o: o.x, d: d.x, h: hx, axis: 0 },
-      { o: o.y, d: d.y, h: hy, axis: 1 },
-      { o: o.z, d: d.z, h: hz, axis: 2 },
-    ];
-
-    for (const a of axes) {
-      if (Math.abs(a.d) < 1e-7) {
-        if (a.o < -a.h || a.o > a.h) return null;
-      } else {
-        const invD = 1 / a.d;
-        let t1 = (-a.h - a.o) * invD;
-        let t2 = (a.h - a.o) * invD;
-        let sign = -1;
-        if (t1 > t2) {
-          const tmp = t1;
-          t1 = t2;
-          t2 = tmp;
-          sign = 1;
-        }
-        if (t1 > tMin) {
-          tMin = t1;
-          hitNormal =
-            a.axis === 0
-              ? { x: sign, y: 0, z: 0 }
-              : a.axis === 1
-                ? { x: 0, y: sign, z: 0 }
-                : { x: 0, y: 0, z: sign };
-        }
-        if (t2 < tMax) tMax = t2;
-        if (tMin > tMax) return null;
+    // X slab
+    if (Math.abs(d.x) < 1e-7) {
+      if (o.x < -hx || o.x > hx) return null;
+    } else {
+      const invD = 1 / d.x;
+      let t1 = (-hx - o.x) * invD;
+      let t2 = (hx - o.x) * invD;
+      let sign = -1;
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
+        sign = 1;
       }
+      if (t1 > tMin) {
+        tMin = t1;
+        hitAxis = 0;
+        hitSign = sign;
+      }
+      if (t2 < tMax) tMax = t2;
+      if (tMin > tMax) return null;
+    }
+
+    // Y slab
+    if (Math.abs(d.y) < 1e-7) {
+      if (o.y < -hy || o.y > hy) return null;
+    } else {
+      const invD = 1 / d.y;
+      let t1 = (-hy - o.y) * invD;
+      let t2 = (hy - o.y) * invD;
+      let sign = -1;
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
+        sign = 1;
+      }
+      if (t1 > tMin) {
+        tMin = t1;
+        hitAxis = 1;
+        hitSign = sign;
+      }
+      if (t2 < tMax) tMax = t2;
+      if (tMin > tMax) return null;
+    }
+
+    // Z slab
+    if (Math.abs(d.z) < 1e-7) {
+      if (o.z < -hz || o.z > hz) return null;
+    } else {
+      const invD = 1 / d.z;
+      let t1 = (-hz - o.z) * invD;
+      let t2 = (hz - o.z) * invD;
+      let sign = -1;
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
+        sign = 1;
+      }
+      if (t1 > tMin) {
+        tMin = t1;
+        hitAxis = 2;
+        hitSign = sign;
+      }
+      if (t2 < tMax) tMax = t2;
+      if (tMin > tMax) return null;
     }
 
     if (tMin < 0 || tMin > maxDist) return null;
-    return { t: tMin, localNormal: hitNormal };
+    const localNormal: Vec3 =
+      hitAxis === 0
+        ? { x: hitSign, y: 0, z: 0 }
+        : hitAxis === 1
+          ? { x: 0, y: hitSign, z: 0 }
+          : { x: 0, y: 0, z: hitSign };
+    return { t: tMin, localNormal };
   }
 
   /**
@@ -837,6 +1750,7 @@ export class GoldSrcPhysicsEngine {
     damage = 0,
   ): { destroyed: boolean; remainingHp?: number; bled: boolean; bloodLostMl: number } {
     if (body.mass > 0 && impulseMag > 0) {
+      this.wakeBody(body);
       const dLen = Math.hypot(direction.x, direction.y, direction.z) || 1;
       const nx = direction.x / dLen;
       const ny = direction.y / dLen;
@@ -921,6 +1835,8 @@ export class GoldSrcPhysicsEngine {
     this.baseVelZ = f32(0);
     vf[F32.YAW] = f32(cp.yaw);
     vf[F32.PITCH] = f32(cp.pitch);
+    this.prevCmdYaw = f32(cp.yaw);
+    this.hasPrevYaw = true;
     vi[I32.FLAGS] &= ~FL_ONGROUND;
     vi[I32.MOVESTATE] = MoveState.AIR;
     this.triggerCooldowns.clear();
@@ -972,6 +1888,7 @@ export class GoldSrcPhysicsEngine {
       const dz = b.pos.z - origin.z;
       const dist = Math.hypot(dx, dy, dz);
       if (dist > 1e-5 && dist < radius) {
+        this.wakeBody(b);
         const falloff = Math.max(0, 1 - dist / radius);
         const mag = maxDamage * falloff * kPush;
         const nx = dx / dist;
@@ -1003,6 +1920,9 @@ export class GoldSrcPhysicsEngine {
         if (typeof b.hp === 'number') {
           b.hp = Math.max(0, b.hp - Math.round(falloff * 110));
           if (b.hp <= 0) {
+            if (this.gravityGun.heldBodyId === b.id) {
+              this.gravityGun.heldBodyId = null;
+            }
             this.rigidBodies.splice(i, 1);
             this.callbacks.onRigidBodyDestroyed?.(b, b.pos);
           }
@@ -1034,6 +1954,8 @@ export class GoldSrcPhysicsEngine {
     this.baseVelZ = f32(0);
     vf[F32.YAW] = f32(this.spawn.yaw);
     vf[F32.PITCH] = f32(this.spawn.pitch);
+    this.prevCmdYaw = f32(this.spawn.yaw);
+    this.hasPrevYaw = true;
     vf[F32.VIEW_OFS_Z] = HULL_STAND.eyeZ;
     vf[F32.PREV_VIEW_OFS_Z] = HULL_STAND.eyeZ;
     vi[I32.FLAGS] = FL_ONGROUND;
@@ -1062,12 +1984,9 @@ export class GoldSrcPhysicsEngine {
     vi[I32.TICK] += 1;
     vf[F32.SURF_NZ] = f32(0);
 
-    // If dead, keep stepping VPhysics props/dropped guns while player movement is frozen
+    // If dead, keep stepping VPhysics props/ropes/vehicles while player movement is frozen
     if (this.vitals.dead) {
-      if (this.rigidBodies.length > 0) {
-        this.stepRigidBodies();
-        this.resolveRigidBodyPairCollisions();
-      }
+      this.stepSecondaryPhysics(false);
       vi[I32.PREV_BUTTONS] = vi[I32.BUTTONS];
       return;
     }
@@ -1079,8 +1998,10 @@ export class GoldSrcPhysicsEngine {
     // 1. Duck / uncrouch hull update
     this.duck();
 
-    // 2. Categorize ground/air state (walkable n_z >= 0.7)
+    // 2. Categorize ground/air & water submersion state
     this.categorizePosition();
+    this.playerWaterSubmersion = this.computePlayerWaterSubmersion();
+    const inWater = this.playerWaterSubmersion > 0.35;
 
     // 3. CheckJumpButton: v_z = sqrt(2 * g * h_jump), h_jump = 45u (CS:S / GoldSrc)
     const buttons = vi[I32.BUTTONS];
@@ -1089,16 +2010,20 @@ export class GoldSrcPhysicsEngine {
     const jumpPressed = (buttons & IN_JUMP) !== 0;
     const freshJump = jumpPressed && (autoBhop || (prevButtons & IN_JUMP) === 0);
 
-    if (freshJump && (vi[I32.FLAGS] & FL_ONGROUND)) {
+    if (inWater && jumpPressed) {
+      vi[I32.FLAGS] &= ~FL_ONGROUND;
+      vf[F32.VEL_Z] = f32(Math.max(vf[F32.VEL_Z], 145.0));
+    } else if (freshJump && (vi[I32.FLAGS] & FL_ONGROUND)) {
       vi[I32.FLAGS] &= ~FL_ONGROUND;
       vf[F32.VEL_Z] = f32(Math.sqrt(2.0 * gravity * 45.0));
       this.callbacks.onJump?.();
     }
 
-    // 4. StartGravity (first half-step)
+    // 4. StartGravity (first half-step, attenuated in water)
     const isGroundedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
+    const gravScale = inWater ? f32(0.18) : f32(1.0);
     if (!isGroundedNow) {
-      this.applyHalfGravity(gravity, 1.0);
+      this.applyHalfGravity(gravity, gravScale);
     }
 
     if (this.baseVelX !== 0 || this.baseVelY !== 0 || this.baseVelZ !== 0) {
@@ -1107,8 +2032,16 @@ export class GoldSrcPhysicsEngine {
       vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + this.baseVelZ);
     }
 
-    // 5. AngleVectors -> horizontal projection (f_xy, r_xy) -> wish velocity & unit wish direction
-    const { forward, right } = computeAngleVectors(-vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0);
+    // 5. AngleVectors with optional midpoint sub-tick yaw -> wish velocity & unit wish direction
+    const cmdYaw = vf[F32.CMD_YAW];
+    const effYaw =
+      this.sourceConfig.subTickYaw && this.hasPrevYaw
+        ? f32(this.prevCmdYaw + wrapAngleRad(cmdYaw - this.prevCmdYaw) * 0.5)
+        : cmdYaw;
+    this.prevCmdYaw = cmdYaw;
+    this.hasPrevYaw = true;
+
+    const { forward, right } = computeAngleVectors(-vf[F32.CMD_PITCH], effYaw, 0);
     const fLenXY = Math.hypot(forward.x, forward.y);
     const rLenXY = Math.hypot(right.x, right.y);
     const fxyX = fLenXY > 1e-6 ? forward.x / fLenXY : 0;
@@ -1130,9 +2063,11 @@ export class GoldSrcPhysicsEngine {
     const wishDirX = wishMag > 1e-5 ? f32(rawWishX / wishMag) : f32(0);
     const wishDirY = wishMag > 1e-5 ? f32(rawWishY / wishMag) : f32(0);
 
-    // 6. Ground vs Air/Surf movement branch
+    // 6. Ground vs Water vs Air/Surf movement branch
     let flyBlocked = 0;
-    if (isGroundedNow) {
+    if (inWater) {
+      flyBlocked = this.waterMove(forward, right, fmove, smove, maxSpeed);
+    } else if (isGroundedNow) {
       this.friction(this.sourceConfig.surfaceFriction);
       this.walkMove(wishDirX, wishDirY, wishspeed, this.sourceConfig.surfaceFriction);
     } else {
@@ -1152,10 +2087,10 @@ export class GoldSrcPhysicsEngine {
     this.categorizePosition();
     const landedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
     if (!landedNow) {
-      this.applyHalfGravity(gravity, 1.0);
+      this.applyHalfGravity(gravity, gravScale);
     } else {
       vf[F32.VEL_Z] = f32(0);
-      if (!wasOnGround && preVelZ < -140) {
+      if (!wasOnGround && !inWater && preVelZ < -140) {
         const impact = Math.abs(preVelZ);
         this.callbacks.onLand?.(impact);
         if (impact > this.sourceConfig.fallDamageThreshold) {
@@ -1166,26 +2101,23 @@ export class GoldSrcPhysicsEngine {
       }
     }
 
-    // 8. VPhysics rigid bodies: semi-implicit Euler, prop-prop & player-prop impulses
-    if (this.rigidBodies.length > 0) {
-      this.stepRigidBodies();
-      this.resolveRigidBodyPairCollisions();
-      this.resolvePlayerRigidBodyCollisions();
-    }
+    // 8. Determine telemetry state (GROUND / SURF / AIR) before player-shadow push check
+    const isSurfing =
+      !landedNow &&
+      ((flyBlocked & 4) !== 0 || (vf[F32.SURF_NZ] > 0.05 && vf[F32.SURF_NZ] < SURF_NORMAL_Z));
 
-    this.checkVelocity();
-
-    // 9. Determine telemetry state (GROUND / SURF / AIR)
     if (landedNow) {
       vi[I32.MOVESTATE] = MoveState.GROUND;
-    } else if (
-      (flyBlocked & 4) !== 0 ||
-      (vf[F32.SURF_NZ] > 0.05 && vf[F32.SURF_NZ] < SURF_NORMAL_Z)
-    ) {
+    } else if (isSurfing) {
       vi[I32.MOVESTATE] = MoveState.SURF;
     } else {
       vi[I32.MOVESTATE] = MoveState.AIR;
     }
+
+    // 9. VPhysics (TGS Soft + NGS), Gravity Gun PID, Vehicles, Buoyancy, Joints, Ropes & Player Shadow
+    this.stepSecondaryPhysics(true, isSurfing);
+
+    this.checkVelocity();
 
     // 10. Trigger volumes
     this.checkTriggers();
@@ -1193,51 +2125,185 @@ export class GoldSrcPhysicsEngine {
     vi[I32.PREV_BUTTONS] = buttons;
   }
 
-  /** VPhysics semi-implicit Euler integration for linear, angular, and quaternion kinematics */
-  private stepRigidBodies(): void {
+  // ---------------------------------------------------------------------------
+  // Rapier-Style Rigid-Body Pipeline (TGS Soft + NGS + Support Subsystems)
+  // ---------------------------------------------------------------------------
+
+  private stepSecondaryPhysics(playerAlive: boolean, playerIsSurfing = false): void {
+    const hasBodies = this.rigidBodies.length > 0;
+
+    if (hasBodies) {
+      if (playerAlive && this.gravityGun.heldBodyId) {
+        this.stepGravityGunPid();
+      }
+      if (this.vehicles.length > 0) {
+        this.stepVehicles();
+      }
+      if (this.waterVolumes.length > 0) {
+        this.stepRigidBodyBuoyancy();
+      }
+
+      this.stepRigidBodiesTgsSoft();
+
+      if (playerAlive) {
+        this.resolvePlayerShadowCollisions(playerIsSurfing);
+      }
+    }
+
+    if (this.ropes.length > 0) {
+      this.stepRopes();
+    }
+  }
+
+  /**
+   * Substepped TGS Soft velocity solver + unbiased relaxation + NGS position projection,
+   * implicit damping, Coulomb + torsional patch friction, selective CCD, and sleeping.
+   */
+  private stepRigidBodiesTgsSoft(): void {
+    const count = this.rigidBodies.length;
+    if (count === 0) return;
+
     const gravity = this.abi.f32[F32.CVAR_GRAVITY];
-    const linKeep = f32(Math.max(0, 1.0 - this.sourceConfig.linearDamping * FIXED_DT));
-    const angKeep = f32(Math.max(0, 1.0 - this.sourceConfig.angularDamping * FIXED_DT));
+    const substeps = this.sourceConfig.tgsSubsteps;
+    const subDt = f32(FIXED_DT / substeps);
+    const tgsIters = this.sourceConfig.tgsIterations;
+    const ngsIters = this.sourceConfig.ngsIterations;
+    const omega = 2 * Math.PI * this.sourceConfig.contactFrequencyHz;
+    const zeta = this.sourceConfig.contactDampingRatio;
+    const linDampDenom = f32(1.0 + this.sourceConfig.linearDamping * subDt);
+    const angDampDenom = f32(1.0 + this.sourceConfig.angularDamping * subDt);
 
-    const traceOut: TraceResult = {
-      fraction: f32(1.0),
-      endX: f32(0),
-      endY: f32(0),
-      endZ: f32(0),
-      normalX: f32(0),
-      normalY: f32(0),
-      normalZ: f32(0),
-      startSolid: false,
-      allSolid: false,
-      brushId: '',
-    };
+    // 1. Collect rigid-body contact manifolds & fetch warm-start impulses
+    this.collectContactManifolds();
 
-    for (let i = 0; i < this.rigidBodies.length; i++) {
+    // 2. Run TGS Soft substeps
+    for (let s = 0; s < substeps; s++) {
+      // 2a. Forces, gyroscopic torque, and unconditionally stable implicit damping
+      for (let i = 0; i < count; i++) {
+        const b = this.rigidBodies[i];
+        if (b.mass <= 0 || b.sleeping) continue;
+
+        b.vel.x = f32(b.vel.x / linDampDenom);
+        b.vel.y = f32(b.vel.y / linDampDenom);
+        b.vel.z = f32((b.vel.z - gravity * b.gravityScale * subDt) / linDampDenom);
+
+        const rot = quatToMat3(b.quat);
+        const { inertia, invInertia } = computeWorldInertia(rot, b.inertiaLocal);
+        const iOmega = mulMat3Vec3(inertia, b.angVel);
+        const gyro = crossVec3(b.angVel, iOmega);
+        const angAccel = mulMat3Vec3(invInertia, {
+          x: f32(-gyro.x),
+          y: f32(-gyro.y),
+          z: f32(-gyro.z),
+        });
+
+        b.angVel.x = f32((b.angVel.x + angAccel.x * subDt) / angDampDenom);
+        b.angVel.y = f32((b.angVel.y + angAccel.y * subDt) / angDampDenom);
+        b.angVel.z = f32((b.angVel.z + angAccel.z * subDt) / angDampDenom);
+      }
+
+      // 2b. Warm-start contact & joint impulses on first substep
+      if (s === 0) {
+        this.warmStartContacts(0.85);
+        this.warmStartJoints(0.85);
+      }
+
+      // 2c. Iterative TGS Soft velocity solver for contacts & joints
+      for (let iter = 0; iter < tgsIters; iter++) {
+        this.solveContactManifoldsVelocity(subDt, omega, zeta, true);
+        if (this.joints.length > 0) {
+          this.solveJointsVelocity(subDt);
+        }
+      }
+
+      // 2d. Integrate positions (with selective CCD world sweep) and orientations
+      for (let i = 0; i < count; i++) {
+        const b = this.rigidBodies[i];
+        if (b.mass <= 0 || b.sleeping) continue;
+
+        this.integrateRigidBodyWorldPose(b, subDt);
+      }
+
+      // 2e. Unbiased velocity relaxation pass (beta_soft = 0, restitution = 0)
+      this.solveContactManifoldsVelocity(subDt, omega, zeta, false);
+    }
+
+    // 3. Persist contact warm-start cache for next tick
+    this.contactCache.clear();
+    for (let i = 0; i < this.activeManifolds.length; i++) {
+      const m = this.activeManifolds[i];
+      this.contactCache.set(m.key, {
+        lambdaN: m.lambdaN,
+        lambdaT1: m.lambdaT1,
+        lambdaT2: m.lambdaT2,
+        lambdaTwist: m.lambdaTwist,
+      });
+    }
+
+    // 4. NGS (Non-Linear Gauss-Seidel) position projection (zero velocity kick)
+    for (let iter = 0; iter < ngsIters; iter++) {
+      this.solveContactsNgsPosition();
+      if (this.joints.length > 0) {
+        this.solveJointsNgsPosition();
+      }
+    }
+
+    // 5. Update body sleeping state
+    const linSqThresh = this.sourceConfig.sleepLinearThreshold ** 2;
+    const angSqThresh = this.sourceConfig.sleepAngularThreshold ** 2;
+    const sleepTimeThresh = this.sourceConfig.sleepTimeThreshold;
+
+    for (let i = 0; i < count; i++) {
       const b = this.rigidBodies[i];
       if (b.mass <= 0) continue;
+      if (this.gravityGun.heldBodyId === b.id) {
+        this.wakeBody(b);
+        continue;
+      }
 
-      b.vel.x = f32(b.vel.x * linKeep);
-      b.vel.y = f32(b.vel.y * linKeep);
-      b.vel.z = f32(b.vel.z * linKeep - gravity * b.gravityScale * FIXED_DT);
+      const vSq = b.vel.x * b.vel.x + b.vel.y * b.vel.y + b.vel.z * b.vel.z;
+      const wSq = b.angVel.x * b.angVel.x + b.angVel.y * b.angVel.y + b.angVel.z * b.angVel.z;
 
-      const targetX = f32(b.pos.x + b.vel.x * FIXED_DT);
-      const targetY = f32(b.pos.y + b.vel.y * FIXED_DT);
-      const targetZ = f32(b.pos.z + b.vel.z * FIXED_DT);
+      if (vSq < linSqThresh && wSq < angSqThresh) {
+        b.sleepTimer = (b.sleepTimer ?? 0) + FIXED_DT;
+        if (b.sleepTimer >= sleepTimeThresh) {
+          b.sleeping = true;
+          b.vel.x = f32(0);
+          b.vel.y = f32(0);
+          b.vel.z = f32(0);
+          b.angVel.x = f32(0);
+          b.angVel.y = f32(0);
+          b.angVel.z = f32(0);
+        }
+      } else {
+        b.sleeping = false;
+        b.sleepTimer = 0;
+      }
+    }
+  }
 
-      const rot = quatToMat3(b.quat);
-      const { inertia, invInertia } = computeWorldInertia(rot, b.inertiaLocal);
-      const iOmega = mulMat3Vec3(inertia, b.angVel);
-      const gyro = crossVec3(b.angVel, iOmega);
-      const angAccel = mulMat3Vec3(invInertia, {
-        x: f32(-gyro.x),
-        y: f32(-gyro.y),
-        z: f32(-gyro.z),
-      });
+  /** Integrate a single body over subDt with selective CCD sweep against static BSP world */
+  private integrateRigidBodyWorldPose(b: SourceRigidBody, subDt: number): void {
+    const tr = this.bodyTraceScratch;
+    const minExtent = Math.min(b.hx, b.hy, b.hz);
+    const maxRadius = Math.hypot(b.hx, b.hy, b.hz);
+    const speed = Math.hypot(b.vel.x, b.vel.y, b.vel.z);
+    const angSpeed = Math.hypot(b.angVel.x, b.angVel.y, b.angVel.z);
+    const maxDisp = speed * subDt + maxRadius * angSpeed * subDt;
 
-      b.angVel.x = f32(b.angVel.x * angKeep + angAccel.x * FIXED_DT);
-      b.angVel.y = f32(b.angVel.y * angKeep + angAccel.y * FIXED_DT);
-      b.angVel.z = f32(b.angVel.z * angKeep + angAccel.z * FIXED_DT);
+    // Selective CCD: subdivide high-speed bodies to prevent tunneling through thin brushes
+    const ccdSteps =
+      b.enableCcd !== false && minExtent > 0.5 && maxDisp > minExtent * 0.5
+        ? Math.min(4, Math.ceil(maxDisp / (minExtent * 0.5)))
+        : 1;
+    const stepDt = f32(subDt / ccdSteps);
 
+    for (let k = 0; k < ccdSteps; k++) {
+      const targetX = f32(b.pos.x + b.vel.x * stepDt);
+      const targetY = f32(b.pos.y + b.vel.y * stepDt);
+      const targetZ = f32(b.pos.z + b.vel.z * stepDt);
+
+      // Quaternion integration: q <- normalize(q + 0.5 * [0, w] * q * dt)
       const qw = b.quat.w;
       const qx = b.quat.x;
       const qy = b.quat.y;
@@ -1246,47 +2312,79 @@ export class GoldSrcPhysicsEngine {
       const wy = b.angVel.y;
       const wz = b.angVel.z;
 
-      const dw = f32(-0.5 * (wx * qx + wy * qy + wz * qz) * FIXED_DT);
-      const dx = f32(0.5 * (wx * qw + wy * qz - wz * qy) * FIXED_DT);
-      const dy = f32(0.5 * (-wx * qz + wy * qw + wz * qx) * FIXED_DT);
-      const dz = f32(0.5 * (wx * qy - wy * qx + wz * qw) * FIXED_DT);
-
       b.quat = normalizeQuat({
-        w: f32(qw + dw),
-        x: f32(qx + dx),
-        y: f32(qy + dy),
-        z: f32(qz + dz),
+        w: f32(qw - 0.5 * (wx * qx + wy * qy + wz * qz) * stepDt),
+        x: f32(qx + 0.5 * (wx * qw + wy * qz - wz * qy) * stepDt),
+        y: f32(qy + 0.5 * (-wx * qz + wy * qw + wz * qx) * stepDt),
+        z: f32(qz + 0.5 * (wx * qy - wy * qx + wz * qw) * stepDt),
       });
 
-      this.traceWorld(b.pos.x, b.pos.y, b.pos.z, targetX, targetY, targetZ, b.hx, b.hy, b.hz, traceOut);
+      this.traceWorld(b.pos.x, b.pos.y, b.pos.z, targetX, targetY, targetZ, b.hx, b.hy, b.hz, tr);
 
-      b.pos.x = traceOut.endX;
-      b.pos.y = traceOut.endY;
-      b.pos.z = traceOut.endZ;
+      b.pos.x = tr.endX;
+      b.pos.y = tr.endY;
+      b.pos.z = tr.endZ;
 
-      if (traceOut.fraction < 1.0) {
-        const n: Vec3 = { x: traceOut.normalX, y: traceOut.normalY, z: traceOut.normalZ };
-        const vn = dotVec3(b.vel, n);
+      if (tr.fraction < 1.0) {
+        const nx = tr.normalX;
+        const ny = tr.normalY;
+        const nz = tr.normalZ;
+        const vn = f32(b.vel.x * nx + b.vel.y * ny + b.vel.z * nz);
+
         if (vn < 0) {
-          const bounce = f32(1.0 + Math.max(b.restitution, this.sourceConfig.svBounce));
-          const impactJ = Math.abs(vn) * b.mass;
-          b.vel.x = f32(b.vel.x - n.x * vn * bounce);
-          b.vel.y = f32(b.vel.y - n.y * vn * bounce);
-          b.vel.z = f32(b.vel.z - n.z * vn * bounce);
+          const rest = Math.abs(vn) > 24 ? Math.max(b.restitution, this.sourceConfig.svBounce) : 0;
+          const bounce = f32(1.0 + rest);
+          const jn = f32(-vn * bounce * b.mass);
 
+          b.vel.x = f32(b.vel.x - nx * vn * bounce);
+          b.vel.y = f32(b.vel.y - ny * vn * bounce);
+          b.vel.z = f32(b.vel.z - nz * vn * bounce);
+
+          // Coulomb tangential friction + rotational rolling/torsional damping against world brush
           const mu = b.surfaceFriction ?? this.sourceConfig.surfaceFriction;
-          const damp = f32(Math.max(0, 1.0 - 0.14 * mu));
-          b.vel.x = f32(b.vel.x * damp);
-          b.vel.y = f32(b.vel.y * damp);
-          b.angVel.x = f32(b.angVel.x * 0.84);
-          b.angVel.y = f32(b.angVel.y * 0.84);
-          b.angVel.z = f32(b.angVel.z * 0.84);
+          const vtX = f32(b.vel.x - nx * (b.vel.x * nx + b.vel.y * ny + b.vel.z * nz));
+          const vtY = f32(b.vel.y - ny * (b.vel.x * nx + b.vel.y * ny + b.vel.z * nz));
+          const vtZ = f32(b.vel.z - nz * (b.vel.x * nx + b.vel.y * ny + b.vel.z * nz));
+          const vtLen = Math.hypot(vtX, vtY, vtZ);
+          if (vtLen > 1e-4) {
+            const maxFrictionDv = f32((mu * Math.abs(jn)) / b.mass);
+            const drop = Math.min(vtLen, maxFrictionDv);
+            const scale = f32((vtLen - drop) / vtLen);
+            b.vel.x = f32(b.vel.x - vtX * (1 - scale));
+            b.vel.y = f32(b.vel.y - vtY * (1 - scale));
+            b.vel.z = f32(b.vel.z - vtZ * (1 - scale));
 
+            // Induce realistic tumbling torque when sliding across floor/walls
+            const rot = quatToMat3(b.quat);
+            const { invInertia } = computeWorldInertia(rot, b.inertiaLocal);
+            const lever: Vec3 = {
+              x: f32(-nx * b.hx * 0.5),
+              y: f32(-ny * b.hy * 0.5),
+              z: f32(-nz * b.hz * 0.5),
+            };
+            const jtVec: Vec3 = {
+              x: f32((-vtX / vtLen) * drop * b.mass * 0.25),
+              y: f32((-vtY / vtLen) * drop * b.mass * 0.25),
+              z: f32((-vtZ / vtLen) * drop * b.mass * 0.25),
+            };
+            const dOmega = mulMat3Vec3(invInertia, crossVec3(lever, jtVec));
+            b.angVel.x = f32(b.angVel.x + dOmega.x);
+            b.angVel.y = f32(b.angVel.y + dOmega.y);
+            b.angVel.z = f32(b.angVel.z + dOmega.z);
+          }
+
+          // Torsional spin friction around contact normal
+          const wTwist = f32(b.angVel.x * nx + b.angVel.y * ny + b.angVel.z * nz);
+          const twistDamp = f32(Math.max(0, 1 - 0.16 * mu));
+          b.angVel.x = f32(b.angVel.x * 0.92 - nx * wTwist * (1 - twistDamp));
+          b.angVel.y = f32(b.angVel.y * 0.92 - ny * wTwist * (1 - twistDamp));
+          b.angVel.z = f32(b.angVel.z * 0.92 - nz * wTwist * (1 - twistDamp));
+
+          const impactJ = Math.abs(vn) * b.mass;
           if (impactJ > 260) {
             this.callbacks.onRigidBodyHit?.(b.id, impactJ, b.pos, b.kind ?? 'prop');
           }
-
-          if (n.z >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 16) {
+          if (nz >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 16) {
             b.vel.z = f32(0);
           }
         }
@@ -1294,17 +2392,18 @@ export class GoldSrcPhysicsEngine {
     }
   }
 
-  /** Full 2-body rigid-body collision impulse solver */
-  private resolveRigidBodyPairCollisions(): void {
+  private collectContactManifolds(): void {
+    this.activeManifolds.length = 0;
     const count = this.rigidBodies.length;
+
     for (let i = 0; i < count; i++) {
       const a = this.rigidBodies[i];
       if (a.mass <= 0) continue;
-      const invMassA = 1 / a.mass;
 
       for (let j = i + 1; j < count; j++) {
         const b = this.rigidBodies[j];
         if (b.mass <= 0) continue;
+        if (a.sleeping && b.sleeping) continue;
 
         const dx = b.pos.x - a.pos.x;
         const dy = b.pos.y - a.pos.y;
@@ -1313,94 +2412,801 @@ export class GoldSrcPhysicsEngine {
         const overlapX = a.hx + b.hx - Math.abs(dx);
         const overlapY = a.hy + b.hy - Math.abs(dy);
         const overlapZ = a.hz + b.hz - Math.abs(dz);
-
         if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
 
-        let nx = 0;
-        let ny = 0;
-        let nz = 0;
-        let pen = 0;
+        // Wake sleeping partner when hit by an active body
+        if (a.sleeping) this.wakeBody(a);
+        if (b.sleeping) this.wakeBody(b);
 
+        let nx = 0, ny = 0, nz = 0, pen = 0;
+        let patchRadius = 4;
         if (overlapX < overlapY && overlapX < overlapZ) {
           pen = overlapX;
           nx = dx >= 0 ? 1 : -1;
+          patchRadius = Math.min(a.hy, b.hy, a.hz, b.hz) * 0.5;
         } else if (overlapY < overlapZ) {
           pen = overlapY;
           ny = dy >= 0 ? 1 : -1;
+          patchRadius = Math.min(a.hx, b.hx, a.hz, b.hz) * 0.5;
         } else {
           pen = overlapZ;
           nz = dz >= 0 ? 1 : -1;
+          patchRadius = Math.min(a.hx, b.hx, a.hy, b.hy) * 0.5;
         }
 
-        const n: Vec3 = { x: f32(nx), y: f32(ny), z: f32(nz) };
-        const invMassB = 1 / b.mass;
-        const totalInvMass = invMassA + invMassB;
-        const aShare = invMassA / totalInvMass;
-        const bShare = invMassB / totalInvMass;
+        const cx = f32((Math.max(a.pos.x - a.hx, b.pos.x - b.hx) + Math.min(a.pos.x + a.hx, b.pos.x + b.hx)) * 0.5);
+        const cy = f32((Math.max(a.pos.y - a.hy, b.pos.y - b.hy) + Math.min(a.pos.y + a.hy, b.pos.y + b.hy)) * 0.5);
+        const cz = f32((Math.max(a.pos.z - a.hz, b.pos.z - b.hz) + Math.min(a.pos.z + a.hz, b.pos.z + b.hz)) * 0.5);
 
-        a.pos.x = f32(a.pos.x - n.x * pen * aShare);
-        a.pos.y = f32(a.pos.y - n.y * pen * aShare);
-        a.pos.z = f32(a.pos.z - n.z * pen * aShare);
+        const basis = buildContactBasis(nx, ny, nz);
+        const key = a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`;
+        const prev = this.contactCache.get(key);
 
-        b.pos.x = f32(b.pos.x + n.x * pen * bShare);
-        b.pos.y = f32(b.pos.y + n.y * pen * bShare);
-        b.pos.z = f32(b.pos.z + n.z * pen * bShare);
-
-        const contact: Vec3 = {
-          x: f32((Math.max(a.pos.x - a.hx, b.pos.x - b.hx) + Math.min(a.pos.x + a.hx, b.pos.x + b.hx)) * 0.5),
-          y: f32((Math.max(a.pos.y - a.hy, b.pos.y - b.hy) + Math.min(a.pos.y + a.hy, b.pos.y + b.hy)) * 0.5),
-          z: f32((Math.max(a.pos.z - a.hz, b.pos.z - b.hz) + Math.min(a.pos.z + a.hz, b.pos.z + b.hz)) * 0.5),
-        };
-        const rA: Vec3 = { x: f32(contact.x - a.pos.x), y: f32(contact.y - a.pos.y), z: f32(contact.z - a.pos.z) };
-        const rB: Vec3 = { x: f32(contact.x - b.pos.x), y: f32(contact.y - b.pos.y), z: f32(contact.z - b.pos.z) };
-
-        const { invInertia: invIA } = computeWorldInertia(quatToMat3(a.quat), a.inertiaLocal);
-        const { invInertia: invIB } = computeWorldInertia(quatToMat3(b.quat), b.inertiaLocal);
-
+        const rA: Vec3 = { x: f32(cx - a.pos.x), y: f32(cy - a.pos.y), z: f32(cz - a.pos.z) };
+        const rB: Vec3 = { x: f32(cx - b.pos.x), y: f32(cy - b.pos.y), z: f32(cz - b.pos.z) };
         const wA = crossVec3(a.angVel, rA);
         const wB = crossVec3(b.angVel, rB);
-        const vRel: Vec3 = {
-          x: f32((b.vel.x + wB.x) - (a.vel.x + wA.x)),
-          y: f32((b.vel.y + wB.y) - (a.vel.y + wA.y)),
-          z: f32((b.vel.z + wB.z) - (a.vel.z + wA.z)),
-        };
+        const relVelNInitial = f32(
+          (b.vel.x + wB.x - a.vel.x - wA.x) * nx +
+            (b.vel.y + wB.y - a.vel.y - wA.y) * ny +
+            (b.vel.z + wB.z - a.vel.z - wA.z) * nz,
+        );
 
-        const vRelDotN = dotVec3(vRel, n);
-        if (vRelDotN >= 0) continue;
+        const muA = a.surfaceFriction ?? this.sourceConfig.surfaceFriction;
+        const muB = b.surfaceFriction ?? this.sourceConfig.surfaceFriction;
 
-        const angTermA = dotVec3(crossVec3(mulMat3Vec3(invIA, crossVec3(rA, n)), rA), n);
-        const angTermB = dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, n)), rB), n);
-
-        const e = Math.min(a.restitution, b.restitution);
-        const denom = invMassA + invMassB + angTermA + angTermB;
-        if (denom <= 1e-8) continue;
-
-        const imp = f32((-(1 + e) * vRelDotN) / denom);
-        const jn: Vec3 = { x: f32(imp * n.x), y: f32(imp * n.y), z: f32(imp * n.z) };
-
-        a.vel.x = f32(a.vel.x - jn.x * invMassA);
-        a.vel.y = f32(a.vel.y - jn.y * invMassA);
-        a.vel.z = f32(a.vel.z - jn.z * invMassA);
-
-        b.vel.x = f32(b.vel.x + jn.x * invMassB);
-        b.vel.y = f32(b.vel.y + jn.y * invMassB);
-        b.vel.z = f32(b.vel.z + jn.z * invMassB);
-
-        const dOmegaA = mulMat3Vec3(invIA, crossVec3(rA, jn));
-        a.angVel.x = f32(a.angVel.x - dOmegaA.x);
-        a.angVel.y = f32(a.angVel.y - dOmegaA.y);
-        a.angVel.z = f32(a.angVel.z - dOmegaA.z);
-
-        const dOmegaB = mulMat3Vec3(invIB, crossVec3(rB, jn));
-        b.angVel.x = f32(b.angVel.x + dOmegaB.x);
-        b.angVel.y = f32(b.angVel.y + dOmegaB.y);
-        b.angVel.z = f32(b.angVel.z + dOmegaB.z);
+        this.activeManifolds.push({
+          key,
+          idxA: i,
+          idxB: j,
+          nx: f32(nx),
+          ny: f32(ny),
+          nz: f32(nz),
+          ...basis,
+          cx,
+          cy,
+          cz,
+          penetration: f32(pen),
+          restitution: f32(Math.min(a.restitution, b.restitution)),
+          friction: f32(Math.sqrt(Math.max(0, muA * muB))),
+          patchRadius: f32(Math.max(1, patchRadius)),
+          lambdaN: prev ? f32(prev.lambdaN) : 0,
+          lambdaT1: prev ? f32(prev.lambdaT1) : 0,
+          lambdaT2: prev ? f32(prev.lambdaT2) : 0,
+          lambdaTwist: prev ? f32(prev.lambdaTwist) : 0,
+          relVelNInitial,
+        });
       }
     }
   }
 
-  /** Player hull vs non-weapon VPhysics rigid-body collision impulse */
-  private resolvePlayerRigidBodyCollisions(): void {
+  private warmStartContacts(scale: number): void {
+    for (let i = 0; i < this.activeManifolds.length; i++) {
+      const m = this.activeManifolds[i];
+      m.lambdaN = f32(m.lambdaN * scale);
+      m.lambdaT1 = f32(m.lambdaT1 * scale);
+      m.lambdaT2 = f32(m.lambdaT2 * scale);
+      m.lambdaTwist = f32(m.lambdaTwist * scale);
+
+      const a = this.rigidBodies[m.idxA];
+      const b = this.rigidBodies[m.idxB];
+      const { invInertia: invIA } = computeWorldInertia(quatToMat3(a.quat), a.inertiaLocal);
+      const { invInertia: invIB } = computeWorldInertia(quatToMat3(b.quat), b.inertiaLocal);
+
+      const rA: Vec3 = { x: f32(m.cx - a.pos.x), y: f32(m.cy - a.pos.y), z: f32(m.cz - a.pos.z) };
+      const rB: Vec3 = { x: f32(m.cx - b.pos.x), y: f32(m.cy - b.pos.y), z: f32(m.cz - b.pos.z) };
+      const pVec: Vec3 = {
+        x: f32(m.nx * m.lambdaN + m.t1x * m.lambdaT1 + m.t2x * m.lambdaT2),
+        y: f32(m.ny * m.lambdaN + m.t1y * m.lambdaT1 + m.t2y * m.lambdaT2),
+        z: f32(m.nz * m.lambdaN + m.t1z * m.lambdaT1 + m.t2z * m.lambdaT2),
+      };
+
+      this.applyPairImpulse(a, b, invIA, invIB, rA, rB, pVec);
+
+      if (Math.abs(m.lambdaTwist) > 1e-6) {
+        const tw: Vec3 = {
+          x: f32(m.nx * m.lambdaTwist),
+          y: f32(m.ny * m.lambdaTwist),
+          z: f32(m.nz * m.lambdaTwist),
+        };
+        const dwA = mulMat3Vec3(invIA, tw);
+        const dwB = mulMat3Vec3(invIB, tw);
+        a.angVel.x = f32(a.angVel.x - dwA.x);
+        a.angVel.y = f32(a.angVel.y - dwA.y);
+        a.angVel.z = f32(a.angVel.z - dwA.z);
+        b.angVel.x = f32(b.angVel.x + dwB.x);
+        b.angVel.y = f32(b.angVel.y + dwB.y);
+        b.angVel.z = f32(b.angVel.z + dwB.z);
+      }
+    }
+  }
+
+  private solveContactManifoldsVelocity(
+    subDt: number,
+    omega: number,
+    zeta: number,
+    useBiasAndRestitution: boolean,
+  ): void {
+    const slop = 0.08;
+
+    for (let i = 0; i < this.activeManifolds.length; i++) {
+      const m = this.activeManifolds[i];
+      const a = this.rigidBodies[m.idxA];
+      const b = this.rigidBodies[m.idxB];
+      const invMassA = 1 / a.mass;
+      const invMassB = 1 / b.mass;
+
+      const { invInertia: invIA } = computeWorldInertia(quatToMat3(a.quat), a.inertiaLocal);
+      const { invInertia: invIB } = computeWorldInertia(quatToMat3(b.quat), b.inertiaLocal);
+
+      const rA: Vec3 = { x: f32(m.cx - a.pos.x), y: f32(m.cy - a.pos.y), z: f32(m.cz - a.pos.z) };
+      const rB: Vec3 = { x: f32(m.cx - b.pos.x), y: f32(m.cy - b.pos.y), z: f32(m.cz - b.pos.z) };
+      const n: Vec3 = { x: m.nx, y: m.ny, z: m.nz };
+
+      // 1. Normal impulse (TGS Soft harmonic oscillator parameters)
+      const wA = crossVec3(a.angVel, rA);
+      const wB = crossVec3(b.angVel, rB);
+      const vRel: Vec3 = {
+        x: f32(b.vel.x + wB.x - a.vel.x - wA.x),
+        y: f32(b.vel.y + wB.y - a.vel.y - wA.y),
+        z: f32(b.vel.z + wB.z - a.vel.z - wA.z),
+      };
+
+      const jvN = dotVec3(vRel, n);
+      const angN =
+        dotVec3(crossVec3(mulMat3Vec3(invIA, crossVec3(rA, n)), rA), n) +
+        dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, n)), rB), n);
+      const kN = invMassA + invMassB + angN;
+      if (kN <= 1e-8) continue;
+
+      const mEff = 1 / kN;
+      const kSpring = mEff * omega * omega;
+      const cDamp = 2 * mEff * zeta * omega;
+      const denomSoft = cDamp + subDt * kSpring;
+      const gamma = useBiasAndRestitution ? 1 / (subDt * denomSoft) : 0;
+      const betaSoft = useBiasAndRestitution ? (subDt * kSpring) / denomSoft : 0;
+
+      const cErr = -Math.max(0, m.penetration - slop);
+      const vRest =
+        useBiasAndRestitution && m.relVelNInitial < -24 ? -m.restitution * m.relVelNInitial : 0;
+      const rhsBias = useBiasAndRestitution ? Math.max((betaSoft / subDt) * cErr, vRest) : 0;
+
+      const dLambdaN = f32(-(jvN + rhsBias + gamma * m.lambdaN) / (kN + gamma));
+      const nextLambdaN = f32(Math.max(0, m.lambdaN + dLambdaN));
+      const appliedN = f32(nextLambdaN - m.lambdaN);
+      m.lambdaN = nextLambdaN;
+
+      if (Math.abs(appliedN) > 1e-6) {
+        this.applyPairImpulse(a, b, invIA, invIB, rA, rB, {
+          x: f32(n.x * appliedN),
+          y: f32(n.y * appliedN),
+          z: f32(n.z * appliedN),
+        });
+      }
+
+      // 2. Circular Coulomb friction cone across orthonormal tangents t1, t2
+      const t1: Vec3 = { x: m.t1x, y: m.t1y, z: m.t1z };
+      const t2: Vec3 = { x: m.t2x, y: m.t2y, z: m.t2z };
+
+      const wA2 = crossVec3(a.angVel, rA);
+      const wB2 = crossVec3(b.angVel, rB);
+      const vRelT: Vec3 = {
+        x: f32(b.vel.x + wB2.x - a.vel.x - wA2.x),
+        y: f32(b.vel.y + wB2.y - a.vel.y - wA2.y),
+        z: f32(b.vel.z + wB2.z - a.vel.z - wA2.z),
+      };
+
+      const kT1 =
+        invMassA +
+        invMassB +
+        dotVec3(crossVec3(mulMat3Vec3(invIA, crossVec3(rA, t1)), rA), t1) +
+        dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, t1)), rB), t1);
+      const kT2 =
+        invMassA +
+        invMassB +
+        dotVec3(crossVec3(mulMat3Vec3(invIA, crossVec3(rA, t2)), rA), t2) +
+        dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, t2)), rB), t2);
+
+      let nextT1 = kT1 > 1e-8 ? f32(m.lambdaT1 - dotVec3(vRelT, t1) / kT1) : m.lambdaT1;
+      let nextT2 = kT2 > 1e-8 ? f32(m.lambdaT2 - dotVec3(vRelT, t2) / kT2) : m.lambdaT2;
+
+      const maxFriction = f32(m.friction * m.lambdaN);
+      const tMag = Math.hypot(nextT1, nextT2);
+      if (tMag > maxFriction && tMag > 1e-6) {
+        const s = maxFriction / tMag;
+        nextT1 = f32(nextT1 * s);
+        nextT2 = f32(nextT2 * s);
+      }
+
+      const dT1 = f32(nextT1 - m.lambdaT1);
+      const dT2 = f32(nextT2 - m.lambdaT2);
+      m.lambdaT1 = nextT1;
+      m.lambdaT2 = nextT2;
+
+      if (Math.abs(dT1) > 1e-6 || Math.abs(dT2) > 1e-6) {
+        this.applyPairImpulse(a, b, invIA, invIB, rA, rB, {
+          x: f32(t1.x * dT1 + t2.x * dT2),
+          y: f32(t1.y * dT1 + t2.y * dT2),
+          z: f32(t1.z * dT1 + t2.z * dT2),
+        });
+      }
+
+      // 3. Torsional patch friction around contact normal n
+      const relTwist = f32(
+        (b.angVel.x - a.angVel.x) * n.x +
+          (b.angVel.y - a.angVel.y) * n.y +
+          (b.angVel.z - a.angVel.z) * n.z,
+      );
+      const kTwist = dotVec3(mulMat3Vec3(invIA, n), n) + dotVec3(mulMat3Vec3(invIB, n), n);
+      if (kTwist > 1e-8) {
+        const maxTwist = f32(m.friction * m.patchRadius * m.lambdaN);
+        const rawTwist = f32(m.lambdaTwist - relTwist / kTwist);
+        const clampedTwist = f32(Math.max(-maxTwist, Math.min(maxTwist, rawTwist)));
+        const dTwist = f32(clampedTwist - m.lambdaTwist);
+        m.lambdaTwist = clampedTwist;
+
+        if (Math.abs(dTwist) > 1e-6) {
+          const twVec: Vec3 = { x: f32(n.x * dTwist), y: f32(n.y * dTwist), z: f32(n.z * dTwist) };
+          const dwA = mulMat3Vec3(invIA, twVec);
+          const dwB = mulMat3Vec3(invIB, twVec);
+          a.angVel.x = f32(a.angVel.x - dwA.x);
+          a.angVel.y = f32(a.angVel.y - dwA.y);
+          a.angVel.z = f32(a.angVel.z - dwA.z);
+          b.angVel.x = f32(b.angVel.x + dwB.x);
+          b.angVel.y = f32(b.angVel.y + dwB.y);
+          b.angVel.z = f32(b.angVel.z + dwB.z);
+        }
+      }
+    }
+  }
+
+  /** NGS (Non-Linear Gauss-Seidel) position projection: resolves residual overlap without velocity bounce */
+  private solveContactsNgsPosition(): void {
+    const slop = 0.04;
+    const correctionFactor = 0.4;
+
+    for (let i = 0; i < this.activeManifolds.length; i++) {
+      const m = this.activeManifolds[i];
+      const a = this.rigidBodies[m.idxA];
+      const b = this.rigidBodies[m.idxB];
+
+      const dx = b.pos.x - a.pos.x;
+      const dy = b.pos.y - a.pos.y;
+      const dz = b.pos.z - a.pos.z;
+      const pen =
+        Math.abs(m.nx) > 0.5
+          ? a.hx + b.hx - Math.abs(dx)
+          : Math.abs(m.ny) > 0.5
+            ? a.hy + b.hy - Math.abs(dy)
+            : a.hz + b.hz - Math.abs(dz);
+      if (pen <= slop) continue;
+
+      const invA = 1 / a.mass;
+      const invB = 1 / b.mass;
+      const total = invA + invB;
+      const corr = f32((pen - slop) * correctionFactor);
+      const aShare = f32(corr * (invA / total));
+      const bShare = f32(corr * (invB / total));
+
+      a.pos.x = f32(a.pos.x - m.nx * aShare);
+      a.pos.y = f32(a.pos.y - m.ny * aShare);
+      a.pos.z = f32(a.pos.z - m.nz * aShare);
+      b.pos.x = f32(b.pos.x + m.nx * bShare);
+      b.pos.y = f32(b.pos.y + m.ny * bShare);
+      b.pos.z = f32(b.pos.z + m.nz * bShare);
+    }
+  }
+
+  private applyPairImpulse(
+    a: SourceRigidBody,
+    b: SourceRigidBody,
+    invIA: Mat3,
+    invIB: Mat3,
+    rA: Vec3,
+    rB: Vec3,
+    impulse: Vec3,
+  ): void {
+    const invMassA = 1 / a.mass;
+    const invMassB = 1 / b.mass;
+
+    a.vel.x = f32(a.vel.x - impulse.x * invMassA);
+    a.vel.y = f32(a.vel.y - impulse.y * invMassA);
+    a.vel.z = f32(a.vel.z - impulse.z * invMassA);
+
+    b.vel.x = f32(b.vel.x + impulse.x * invMassB);
+    b.vel.y = f32(b.vel.y + impulse.y * invMassB);
+    b.vel.z = f32(b.vel.z + impulse.z * invMassB);
+
+    const dOmegaA = mulMat3Vec3(invIA, crossVec3(rA, impulse));
+    a.angVel.x = f32(a.angVel.x - dOmegaA.x);
+    a.angVel.y = f32(a.angVel.y - dOmegaA.y);
+    a.angVel.z = f32(a.angVel.z - dOmegaA.z);
+
+    const dOmegaB = mulMat3Vec3(invIB, crossVec3(rB, impulse));
+    b.angVel.x = f32(b.angVel.x + dOmegaB.x);
+    b.angVel.y = f32(b.angVel.y + dOmegaB.y);
+    b.angVel.z = f32(b.angVel.z + dOmegaB.z);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Support System A: Constraint & Joint Solver (phys_constraintsystem)
+  // ---------------------------------------------------------------------------
+
+  private warmStartJoints(scale: number): void {
+    for (let i = 0; i < this.joints.length; i++) {
+      const jt = this.joints[i];
+      if (jt.broken) continue;
+      jt.lambdaX = f32((jt.lambdaX ?? 0) * scale);
+      jt.lambdaY = f32((jt.lambdaY ?? 0) * scale);
+      jt.lambdaZ = f32((jt.lambdaZ ?? 0) * scale);
+
+      const a = this.findBodyById(jt.bodyAId);
+      if (!a || a.mass <= 0) continue;
+      const b = jt.bodyBId ? this.findBodyById(jt.bodyBId) : null;
+
+      const rotA = quatToMat3(a.quat);
+      const rA = mulMat3Vec3(rotA, jt.localAnchorA);
+      const { invInertia: invIA } = computeWorldInertia(rotA, a.inertiaLocal);
+      const pVec: Vec3 = { x: jt.lambdaX, y: jt.lambdaY, z: jt.lambdaZ };
+
+      if (b && b.mass > 0) {
+        const rotB = quatToMat3(b.quat);
+        const rB = mulMat3Vec3(rotB, jt.localAnchorB);
+        const { invInertia: invIB } = computeWorldInertia(rotB, b.inertiaLocal);
+        this.applyPairImpulse(a, b, invIA, invIB, rA, rB, pVec);
+      } else {
+        const invMA = 1 / a.mass;
+        a.vel.x = f32(a.vel.x - pVec.x * invMA);
+        a.vel.y = f32(a.vel.y - pVec.y * invMA);
+        a.vel.z = f32(a.vel.z - pVec.z * invMA);
+        const dOmegaA = mulMat3Vec3(invIA, crossVec3(rA, pVec));
+        a.angVel.x = f32(a.angVel.x - dOmegaA.x);
+        a.angVel.y = f32(a.angVel.y - dOmegaA.y);
+        a.angVel.z = f32(a.angVel.z - dOmegaA.z);
+      }
+    }
+  }
+
+  private solveJointsVelocity(subDt: number): void {
+    for (let i = 0; i < this.joints.length; i++) {
+      const jt = this.joints[i];
+      if (jt.broken) continue;
+
+      const a = this.findBodyById(jt.bodyAId);
+      if (!a || a.mass <= 0) continue;
+      const b = jt.bodyBId ? this.findBodyById(jt.bodyBId) : null;
+      if (a.sleeping && (!b || b.sleeping)) continue;
+      if (b && b.sleeping) this.wakeBody(b);
+      if (a.sleeping) this.wakeBody(a);
+
+      const rotA = quatToMat3(a.quat);
+      const rA = mulMat3Vec3(rotA, jt.localAnchorA);
+      const pA: Vec3 = { x: f32(a.pos.x + rA.x), y: f32(a.pos.y + rA.y), z: f32(a.pos.z + rA.z) };
+      const { invInertia: invIA } = computeWorldInertia(rotA, a.inertiaLocal);
+
+      let pB: Vec3;
+      let rB: Vec3 = { x: 0, y: 0, z: 0 };
+      let invIB: Mat3 = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+      let invMB = 0;
+      let rotB: Mat3 | null = null;
+      let vB: Vec3 = { x: 0, y: 0, z: 0 };
+
+      if (b && b.mass > 0) {
+        rotB = quatToMat3(b.quat);
+        rB = mulMat3Vec3(rotB, jt.localAnchorB);
+        pB = { x: f32(b.pos.x + rB.x), y: f32(b.pos.y + rB.y), z: f32(b.pos.z + rB.z) };
+        invIB = computeWorldInertia(rotB, b.inertiaLocal).invInertia;
+        invMB = 1 / b.mass;
+        const wB = crossVec3(b.angVel, rB);
+        vB = { x: f32(b.vel.x + wB.x), y: f32(b.vel.y + wB.y), z: f32(b.vel.z + wB.z) };
+      } else {
+        pB = jt.localAnchorB;
+      }
+
+      const wA = crossVec3(a.angVel, rA);
+      const vA: Vec3 = { x: f32(a.vel.x + wA.x), y: f32(a.vel.y + wA.y), z: f32(a.vel.z + wA.z) };
+      const invMA = 1 / a.mass;
+      const omega = 2 * Math.PI * (jt.frequencyHz ?? 18);
+      const zeta = jt.dampingRatio ?? 1.0;
+
+      let impX = 0, impY = 0, impZ = 0;
+
+      if (jt.kind === 'distance') {
+        const dx = pB.x - pA.x;
+        const dy = pB.y - pA.y;
+        const dz = pB.z - pA.z;
+        const dist = Math.hypot(dx, dy, dz);
+        if (dist > 1e-5) {
+          const axis: Vec3 = { x: f32(dx / dist), y: f32(dy / dist), z: f32(dz / dist) };
+          const cErr = dist - (jt.restLength ?? 0);
+          const jv = dotVec3({ x: vB.x - vA.x, y: vB.y - vA.y, z: vB.z - vA.z }, axis);
+          const k =
+            invMA +
+            invMB +
+            dotVec3(crossVec3(mulMat3Vec3(invIA, crossVec3(rA, axis)), rA), axis) +
+            dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, axis)), rB), axis);
+          if (k > 1e-8) {
+            const mEff = 1 / k;
+            const kS = mEff * omega * omega;
+            const cD = 2 * mEff * zeta * omega;
+            const gamma = 1 / (subDt * (cD + subDt * kS));
+            const beta = (subDt * kS) / (cD + subDt * kS);
+            const prevL = dotVec3({ x: jt.lambdaX ?? 0, y: jt.lambdaY ?? 0, z: jt.lambdaZ ?? 0 }, axis);
+            const dL = f32(-(jv + (beta / subDt) * cErr + gamma * prevL) / (k + gamma));
+            impX = f32(axis.x * dL);
+            impY = f32(axis.y * dL);
+            impZ = f32(axis.z * dL);
+          }
+        }
+      } else {
+        // Ball-socket, hinge, and fixed joints all enforce 3D anchor coincidence pA == pB
+        const axes: Vec3[] = [
+          { x: 1, y: 0, z: 0 },
+          { x: 0, y: 1, z: 0 },
+          { x: 0, y: 0, z: 1 },
+        ];
+        const errs = [pB.x - pA.x, pB.y - pA.y, pB.z - pA.z];
+        const jvs = [vB.x - vA.x, vB.y - vA.y, vB.z - vA.z];
+        const prevs = [jt.lambdaX ?? 0, jt.lambdaY ?? 0, jt.lambdaZ ?? 0];
+        const out = [0, 0, 0];
+
+        for (let kIdx = 0; kIdx < 3; kIdx++) {
+          const ax = axes[kIdx];
+          const k =
+            invMA +
+            invMB +
+            dotVec3(crossVec3(mulMat3Vec3(invIA, crossVec3(rA, ax)), rA), ax) +
+            dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, ax)), rB), ax);
+          if (k <= 1e-8) continue;
+          const mEff = 1 / k;
+          const kS = mEff * omega * omega;
+          const cD = 2 * mEff * zeta * omega;
+          const gamma = 1 / (subDt * (cD + subDt * kS));
+          const beta = (subDt * kS) / (cD + subDt * kS);
+          out[kIdx] = f32(-(jvs[kIdx] + (beta / subDt) * errs[kIdx] + gamma * prevs[kIdx]) / (k + gamma));
+        }
+        impX = out[0];
+        impY = out[1];
+        impZ = out[2];
+      }
+
+      jt.lambdaX = f32((jt.lambdaX ?? 0) + impX);
+      jt.lambdaY = f32((jt.lambdaY ?? 0) + impY);
+      jt.lambdaZ = f32((jt.lambdaZ ?? 0) + impZ);
+
+      const impVec: Vec3 = { x: impX, y: impY, z: impZ };
+      if (b && b.mass > 0) {
+        this.applyPairImpulse(a, b, invIA, invIB, rA, rB, impVec);
+      } else {
+        a.vel.x = f32(a.vel.x - impX * invMA);
+        a.vel.y = f32(a.vel.y - impY * invMA);
+        a.vel.z = f32(a.vel.z - impZ * invMA);
+        const dOmegaA = mulMat3Vec3(invIA, crossVec3(rA, impVec));
+        a.angVel.x = f32(a.angVel.x - dOmegaA.x);
+        a.angVel.y = f32(a.angVel.y - dOmegaA.y);
+        a.angVel.z = f32(a.angVel.z - dOmegaA.z);
+      }
+
+      // Angular constraint for hinge (axis alignment) or fixed (full orientation lock)
+      if (jt.kind === 'hinge' && jt.localAxisA) {
+        const axisA = mulMat3Vec3(rotA, jt.localAxisA);
+        const axisB =
+          b && rotB && jt.localAxisB ? mulMat3Vec3(rotB, jt.localAxisB) : (jt.localAxisB ?? axisA);
+        const alignErr = crossVec3(axisA, axisB);
+        const relAngVel: Vec3 = {
+          x: f32((b ? b.angVel.x : 0) - a.angVel.x),
+          y: f32((b ? b.angVel.y : 0) - a.angVel.y),
+          z: f32((b ? b.angVel.z : 0) - a.angVel.z),
+        };
+        const proj = dotVec3(relAngVel, axisA);
+        const perpVel: Vec3 = {
+          x: f32(relAngVel.x - axisA.x * proj - alignErr.x * 6.0),
+          y: f32(relAngVel.y - axisA.y * proj - alignErr.y * 6.0),
+          z: f32(relAngVel.z - axisA.z * proj - alignErr.z * 6.0),
+        };
+        const damp = f32(0.35);
+        a.angVel.x = f32(a.angVel.x + perpVel.x * damp);
+        a.angVel.y = f32(a.angVel.y + perpVel.y * damp);
+        a.angVel.z = f32(a.angVel.z + perpVel.z * damp);
+        if (b && b.mass > 0) {
+          b.angVel.x = f32(b.angVel.x - perpVel.x * damp);
+          b.angVel.y = f32(b.angVel.y - perpVel.y * damp);
+          b.angVel.z = f32(b.angVel.z - perpVel.z * damp);
+        }
+      } else if (jt.kind === 'fixed') {
+        const targetQ = b ? b.quat : { w: 1, x: 0, y: 0, z: 0 };
+        const errQ = computeQuatLogError(targetQ, a.quat);
+        const relW: Vec3 = {
+          x: f32((b ? b.angVel.x : 0) - a.angVel.x + errQ.x * 8.0),
+          y: f32((b ? b.angVel.y : 0) - a.angVel.y + errQ.y * 8.0),
+          z: f32((b ? b.angVel.z : 0) - a.angVel.z + errQ.z * 8.0),
+        };
+        a.angVel.x = f32(a.angVel.x + relW.x * 0.45);
+        a.angVel.y = f32(a.angVel.y + relW.y * 0.45);
+        a.angVel.z = f32(a.angVel.z + relW.z * 0.45);
+        if (b && b.mass > 0) {
+          b.angVel.x = f32(b.angVel.x - relW.x * 0.45);
+          b.angVel.y = f32(b.angVel.y - relW.y * 0.45);
+          b.angVel.z = f32(b.angVel.z - relW.z * 0.45);
+        }
+      }
+
+      // Breakable threshold check
+      if (jt.breakForce && jt.breakForce > 0) {
+        const totalImp = Math.hypot(jt.lambdaX, jt.lambdaY, jt.lambdaZ);
+        if (totalImp > jt.breakForce) {
+          jt.broken = true;
+          this.callbacks.onJointBroken?.(jt.id, pA);
+        }
+      }
+    }
+  }
+
+  private solveJointsNgsPosition(): void {
+    for (let i = 0; i < this.joints.length; i++) {
+      const jt = this.joints[i];
+      if (jt.broken) continue;
+      const a = this.findBodyById(jt.bodyAId);
+      if (!a || a.mass <= 0) continue;
+      const b = jt.bodyBId ? this.findBodyById(jt.bodyBId) : null;
+
+      const rA = mulMat3Vec3(quatToMat3(a.quat), jt.localAnchorA);
+      const pA = { x: a.pos.x + rA.x, y: a.pos.y + rA.y, z: a.pos.z + rA.z };
+      const pB =
+        b && b.mass > 0
+          ? (() => {
+              const rB = mulMat3Vec3(quatToMat3(b.quat), jt.localAnchorB);
+              return { x: b.pos.x + rB.x, y: b.pos.y + rB.y, z: b.pos.z + rB.z };
+            })()
+          : jt.localAnchorB;
+
+      let errX = pB.x - pA.x;
+      let errY = pB.y - pA.y;
+      let errZ = pB.z - pA.z;
+
+      if (jt.kind === 'distance') {
+        const dist = Math.hypot(errX, errY, errZ);
+        if (dist < 1e-5) continue;
+        const diff = dist - (jt.restLength ?? 0);
+        errX = (errX / dist) * diff;
+        errY = (errY / dist) * diff;
+        errZ = (errZ / dist) * diff;
+      }
+
+      const invA = 1 / a.mass;
+      const invB = b && b.mass > 0 ? 1 / b.mass : 0;
+      const total = invA + invB;
+      const shareA = (invA / total) * 0.35;
+      const shareB = (invB / total) * 0.35;
+
+      a.pos.x = f32(a.pos.x + errX * shareA);
+      a.pos.y = f32(a.pos.y + errY * shareA);
+      a.pos.z = f32(a.pos.z + errZ * shareA);
+      if (b && b.mass > 0) {
+        b.pos.x = f32(b.pos.x - errX * shareB);
+        b.pos.y = f32(b.pos.y - errY * shareB);
+        b.pos.z = f32(b.pos.z - errZ * shareB);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Support System B: Verlet Rope & Cable Dynamics (CRopeKeyframe)
+  // ---------------------------------------------------------------------------
+
+  private stepRopes(): void {
+    const gravity = this.abi.f32[F32.CVAR_GRAVITY];
+    const dtSq = f32(FIXED_DT * FIXED_DT);
+
+    for (let rIdx = 0; rIdx < this.ropes.length; rIdx++) {
+      const rope = this.ropes[rIdx];
+      const n = rope.nodes.length;
+      if (n < 2) continue;
+      const keep = f32(Math.max(0, 1.0 - rope.damping));
+      const gTerm = f32(-gravity * rope.gravityScale * dtSq);
+
+      // 1. Verlet integration
+      for (let i = 0; i < n; i++) {
+        const isPinned = (i === 0 && rope.startPin) || (i === n - 1 && rope.endPin);
+        if (isPinned) continue;
+
+        const cur = rope.nodes[i];
+        const prev = rope.prevNodes[i];
+        const vx = f32((cur.x - prev.x) * keep);
+        const vy = f32((cur.y - prev.y) * keep);
+        const vz = f32((cur.z - prev.z) * keep);
+
+        prev.x = cur.x;
+        prev.y = cur.y;
+        prev.z = cur.z;
+
+        cur.x = f32(cur.x + vx);
+        cur.y = f32(cur.y + vy);
+        cur.z = f32(cur.z + vz + gTerm);
+      }
+
+      // 2. Pin endpoints & iterative distance relaxation
+      const startPos = rope.startPin ? this.resolveRopePinWorldPos(rope.startPin) : null;
+      const endPos = rope.endPin ? this.resolveRopePinWorldPos(rope.endPin) : null;
+
+      for (let iter = 0; iter < rope.iterations; iter++) {
+        if (startPos) {
+          rope.nodes[0].x = startPos.x;
+          rope.nodes[0].y = startPos.y;
+          rope.nodes[0].z = startPos.z;
+        }
+        if (endPos) {
+          rope.nodes[n - 1].x = endPos.x;
+          rope.nodes[n - 1].y = endPos.y;
+          rope.nodes[n - 1].z = endPos.z;
+        }
+
+        for (let i = 0; i < n - 1; i++) {
+          const p0 = rope.nodes[i];
+          const p1 = rope.nodes[i + 1];
+          const dx = p1.x - p0.x;
+          const dy = p1.y - p0.y;
+          const dz = p1.z - p0.z;
+          const dist = Math.hypot(dx, dy, dz);
+          if (dist < 1e-5) continue;
+
+          const diff = (dist - rope.segmentLength) / dist;
+          const pin0 = i === 0 && startPos !== null;
+          const pin1 = i + 1 === n - 1 && endPos !== null;
+
+          if (!pin0 && !pin1) {
+            const hx = f32(dx * diff * 0.5);
+            const hy = f32(dy * diff * 0.5);
+            const hz = f32(dz * diff * 0.5);
+            p0.x = f32(p0.x + hx);
+            p0.y = f32(p0.y + hy);
+            p0.z = f32(p0.z + hz);
+            p1.x = f32(p1.x - hx);
+            p1.y = f32(p1.y - hy);
+            p1.z = f32(p1.z - hz);
+          } else if (!pin0 && pin1) {
+            p0.x = f32(p0.x + dx * diff);
+            p0.y = f32(p0.y + dy * diff);
+            p0.z = f32(p0.z + dz * diff);
+          } else if (pin0 && !pin1) {
+            p1.x = f32(p1.x - dx * diff);
+            p1.y = f32(p1.y - dy * diff);
+            p1.z = f32(p1.z - dz * diff);
+          }
+        }
+      }
+
+      // 3. Optional world collision projection for interior nodes
+      if (rope.collideWorld) {
+        const tr = this.auxTraceScratch;
+        for (let i = 1; i < n - 1; i++) {
+          const prev = rope.prevNodes[i];
+          const cur = rope.nodes[i];
+          this.traceWorld(prev.x, prev.y, prev.z, cur.x, cur.y, cur.z, 1, 1, 1, tr);
+          if (tr.fraction < 1.0) {
+            cur.x = tr.endX;
+            cur.y = tr.endY;
+            cur.z = tr.endZ;
+          }
+        }
+      }
+    }
+  }
+
+  private resolveRopePinWorldPos(pin: RopePin): Vec3 {
+    if (!pin.bodyId) return pin.anchor;
+    const body = this.findBodyById(pin.bodyId);
+    if (!body) return pin.anchor;
+    const offset = mulMat3Vec3(quatToMat3(body.quat), pin.anchor);
+    return {
+      x: f32(body.pos.x + offset.x),
+      y: f32(body.pos.y + offset.y),
+      z: f32(body.pos.z + offset.z),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Support System C: Gravity Gun (Velocity-Level PID Controller)
+  // ---------------------------------------------------------------------------
+
+  private stepGravityGunPid(): void {
+    const id = this.gravityGun.heldBodyId;
+    if (!id) return;
+    const body = this.findBodyById(id);
+    if (!body || body.mass <= 0) {
+      this.gravityGun.heldBodyId = null;
+      return;
+    }
+
+    this.wakeBody(body);
+    const vf = this.abi.f32;
+    const eye = this.getPlayerEyePosition();
+    const { forward } = computeAngleVectors(-vf[F32.CMD_PITCH], vf[F32.CMD_YAW], 0);
+    const targetDist = this.gravityGun.holdDistance;
+
+    // Prevent pushing held prop into static walls
+    const wallTr = this.auxTraceScratch;
+    this.traceWorld(
+      eye.x,
+      eye.y,
+      eye.z,
+      f32(eye.x + forward.x * targetDist),
+      f32(eye.y + forward.y * targetDist),
+      f32(eye.z + forward.z * targetDist),
+      body.hx * 0.5,
+      body.hy * 0.5,
+      body.hz * 0.5,
+      wallTr,
+    );
+
+    const safeDist = Math.max(48, targetDist * wallTr.fraction);
+    const targetX = f32(eye.x + forward.x * safeDist);
+    const targetY = f32(eye.y + forward.y * safeDist);
+    const targetZ = f32(eye.z + forward.z * safeDist);
+
+    const errX = f32(targetX - body.pos.x);
+    const errY = f32(targetY - body.pos.y);
+    const errZ = f32(targetZ - body.pos.z);
+
+    // Auto-drop if prop gets snagged too far away
+    if (Math.hypot(errX, errY, errZ) > 360) {
+      this.releaseHeldBody(0);
+      return;
+    }
+
+    // Velocity-level PID: v_cmd = Kp * e + Ki * integral(e) + Kd * de/dt
+    const kp = 16.0;
+    const ki = 2.0;
+    const kd = 0.35;
+
+    const iErr = this.gravityGun.integralErr;
+    iErr.x = f32(Math.max(-60, Math.min(60, iErr.x + errX * FIXED_DT)));
+    iErr.y = f32(Math.max(-60, Math.min(60, iErr.y + errY * FIXED_DT)));
+    iErr.z = f32(Math.max(-60, Math.min(60, iErr.z + errZ * FIXED_DT)));
+
+    const dErrX = (errX - this.gravityGun.prevErr.x) / FIXED_DT;
+    const dErrY = (errY - this.gravityGun.prevErr.y) / FIXED_DT;
+    const dErrZ = (errZ - this.gravityGun.prevErr.z) / FIXED_DT;
+    this.gravityGun.prevErr.x = errX;
+    this.gravityGun.prevErr.y = errY;
+    this.gravityGun.prevErr.z = errZ;
+
+    let cmdVx = kp * errX + ki * iErr.x + kd * dErrX;
+    let cmdVy = kp * errY + ki * iErr.y + kd * dErrY;
+    let cmdVz = kp * errZ + ki * iErr.z + kd * dErrZ;
+
+    const maxCmdSpeed = 1200;
+    const cmdSpeed = Math.hypot(cmdVx, cmdVy, cmdVz);
+    if (cmdSpeed > maxCmdSpeed) {
+      const s = maxCmdSpeed / cmdSpeed;
+      cmdVx *= s;
+      cmdVy *= s;
+      cmdVz *= s;
+    }
+
+    body.vel.x = f32(body.vel.x + (cmdVx - body.vel.x) * 0.45);
+    body.vel.y = f32(body.vel.y + (cmdVy - body.vel.y) * 0.45);
+    body.vel.z = f32(body.vel.z + (cmdVz - body.vel.z) * 0.45);
+
+    // Orientation PID via quaternion log-error
+    const viewQuat = quatFromYawPitch(vf[F32.CMD_YAW], -vf[F32.CMD_PITCH]);
+    const targetQuat = mulQuat(viewQuat, this.gravityGun.targetOffsetQuat);
+    const eQ = computeQuatLogError(targetQuat, body.quat);
+    body.angVel.x = f32(body.angVel.x * 0.65 + eQ.x * 6.0);
+    body.angVel.y = f32(body.angVel.y * 0.65 + eQ.y * 6.0);
+    body.angVel.z = f32(body.angVel.z * 0.65 + eQ.z * 6.0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Support System D: Player-to-VPhysics Shadow Controller (IPhysicsPlayerController)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Bridges QPhysics player AABB and VPhysics rigid bodies:
+   * - One-way authority on surf ramps so props never corrupt player surf momentum.
+   * - Bounded push force (playerMaxPushForce) so barrels push cleanly without launching dumpsters.
+   */
+  private resolvePlayerShadowCollisions(playerIsSurfing: boolean): void {
     const vf = this.abi.f32;
     const phx = HULL_STAND.hx;
     const phy = HULL_STAND.hy;
@@ -1410,10 +3216,11 @@ export class GoldSrcPhysicsEngine {
     const pVel: Vec3 = { x: vf[F32.VEL_X], y: vf[F32.VEL_Y], z: vf[F32.VEL_Z] };
     const pMass = Math.max(1, this.sourceConfig.playerMass);
     const pInvMass = 1 / pMass;
+    const maxPushImpulse = f32(this.sourceConfig.playerMaxPushForce * FIXED_DT * 10);
 
     for (let i = 0; i < this.rigidBodies.length; i++) {
       const b = this.rigidBodies[i];
-      if (b.mass <= 0 || b.kind === 'weapon') continue;
+      if (b.mass <= 0 || b.kind === 'weapon' || this.gravityGun.heldBodyId === b.id) continue;
 
       const dx = b.pos.x - pPos.x;
       const dy = b.pos.y - pPos.y;
@@ -1422,14 +3229,11 @@ export class GoldSrcPhysicsEngine {
       const overlapX = phx + b.hx - Math.abs(dx);
       const overlapY = phy + b.hy - Math.abs(dy);
       const overlapZ = phz + b.hz - Math.abs(dz);
-
       if (overlapX <= 0 || overlapY <= 0 || overlapZ <= 0) continue;
 
-      let nx = 0;
-      let ny = 0;
-      let nz = 0;
-      let pen = 0;
+      this.wakeBody(b);
 
+      let nx = 0, ny = 0, nz = 0, pen = 0;
       if (overlapX < overlapY && overlapX < overlapZ) {
         pen = overlapX;
         nx = dx >= 0 ? 1 : -1;
@@ -1444,8 +3248,8 @@ export class GoldSrcPhysicsEngine {
       const n: Vec3 = { x: f32(nx), y: f32(ny), z: f32(nz) };
       const bInvMass = 1 / b.mass;
       const totalInvMass = pInvMass + bInvMass;
-      const pShare = pInvMass / totalInvMass;
-      const bShare = bInvMass / totalInvMass;
+      const pShare = playerIsSurfing ? 0 : pInvMass / totalInvMass;
+      const bShare = playerIsSurfing ? 1 : bInvMass / totalInvMass;
 
       pPos.x = f32(pPos.x - n.x * pen * pShare);
       pPos.y = f32(pPos.y - n.y * pen * pShare);
@@ -1467,12 +3271,11 @@ export class GoldSrcPhysicsEngine {
       };
 
       const { invInertia: invIB } = computeWorldInertia(quatToMat3(b.quat), b.inertiaLocal);
-
       const omegaCrossRB = crossVec3(b.angVel, rB);
       const vRel: Vec3 = {
-        x: f32((b.vel.x + omegaCrossRB.x) - pVel.x),
-        y: f32((b.vel.y + omegaCrossRB.y) - pVel.y),
-        z: f32((b.vel.z + omegaCrossRB.z) - pVel.z),
+        x: f32(b.vel.x + omegaCrossRB.x - pVel.x),
+        y: f32(b.vel.y + omegaCrossRB.y - pVel.y),
+        z: f32(b.vel.z + omegaCrossRB.z - pVel.z),
       };
 
       const vRelDotN = dotVec3(vRel, n);
@@ -1480,15 +3283,18 @@ export class GoldSrcPhysicsEngine {
 
       const angTermB = dotVec3(crossVec3(mulMat3Vec3(invIB, crossVec3(rB, n)), rB), n);
       const e = Math.max(b.restitution, this.sourceConfig.svBounce);
-      const denom = pInvMass + bInvMass + angTermB;
+      const denom = (playerIsSurfing ? 0 : pInvMass) + bInvMass + angTermB;
       if (denom <= 1e-8) continue;
 
-      const j = f32((-(1 + e) * vRelDotN) / denom);
-      const jn: Vec3 = { x: f32(j * n.x), y: f32(j * n.y), z: f32(j * n.z) };
+      const rawJ = (-(1 + e) * vRelDotN) / denom;
+      const clampedJ = f32(Math.min(rawJ, maxPushImpulse));
+      const jn: Vec3 = { x: f32(clampedJ * n.x), y: f32(clampedJ * n.y), z: f32(clampedJ * n.z) };
 
-      pVel.x = f32(pVel.x - jn.x * pInvMass);
-      pVel.y = f32(pVel.y - jn.y * pInvMass);
-      pVel.z = f32(pVel.z - jn.z * pInvMass);
+      if (!playerIsSurfing) {
+        pVel.x = f32(pVel.x - jn.x * pInvMass);
+        pVel.y = f32(pVel.y - jn.y * pInvMass);
+        pVel.z = f32(pVel.z - jn.z * pInvMass);
+      }
 
       b.vel.x = f32(b.vel.x + jn.x * bInvMass);
       b.vel.y = f32(b.vel.y + jn.y * bInvMass);
@@ -1499,7 +3305,7 @@ export class GoldSrcPhysicsEngine {
       b.angVel.y = f32(b.angVel.y + dOmegaB.y);
       b.angVel.z = f32(b.angVel.z + dOmegaB.z);
 
-      this.callbacks.onRigidBodyHit?.(b.id, Math.abs(j), contact, b.kind ?? 'prop');
+      this.callbacks.onRigidBodyHit?.(b.id, Math.abs(clampedJ), contact, b.kind ?? 'prop');
     }
 
     vf[F32.POS_X] = pPos.x;
@@ -1509,6 +3315,261 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Y] = pVel.y;
     vf[F32.VEL_Z] = pVel.z;
   }
+
+  // ---------------------------------------------------------------------------
+  // Support System E: Buoyancy & Fluid Drag (CPhysicsFluidController)
+  // ---------------------------------------------------------------------------
+
+  private stepRigidBodyBuoyancy(): void {
+    const gravity = this.abi.f32[F32.CVAR_GRAVITY];
+
+    for (let i = 0; i < this.rigidBodies.length; i++) {
+      const b = this.rigidBodies[i];
+      if (b.mass <= 0) continue;
+
+      for (let wIdx = 0; wIdx < this.waterVolumes.length; wIdx++) {
+        const w = this.waterVolumes[wIdx];
+        if (
+          b.pos.x + b.hx < w.minX ||
+          b.pos.x - b.hx > w.maxX ||
+          b.pos.y + b.hy < w.minY ||
+          b.pos.y - b.hy > w.maxY ||
+          b.pos.z - b.hz > w.surfaceZ ||
+          b.pos.z + b.hz < w.minZ
+        ) {
+          continue;
+        }
+
+        const height = b.hz * 2;
+        if (height <= 1e-4) continue;
+        const submergedDepth = Math.max(0, Math.min(height, w.surfaceZ - (b.pos.z - b.hz)));
+        const fSub = submergedDepth / height;
+        if (fSub <= 0) continue;
+
+        this.wakeBody(b);
+
+        const rhoRatio = (b.buoyancyRatio ?? 1.25) * (w.density ?? 1.0);
+        const curVx = w.currentVel?.x ?? 0;
+        const curVy = w.currentVel?.y ?? 0;
+        const curVz = w.currentVel?.z ?? 0;
+
+        // Upward buoyancy acceleration: a_buoy = g * rho_ratio * f_sub
+        const buoyDvZ = f32(gravity * rhoRatio * fSub * FIXED_DT);
+        b.vel.z = f32(b.vel.z + buoyDvZ);
+
+        // Implicit fluid linear & angular drag relative to water current
+        const linDrag = (b.linearDrag ?? w.linearDrag ?? 2.2) * fSub;
+        const angDrag = (b.angularDrag ?? w.angularDrag ?? 2.6) * fSub;
+        const linFactor = f32(1 / (1 + linDrag * FIXED_DT));
+        const angFactor = f32(1 / (1 + angDrag * FIXED_DT));
+
+        b.vel.x = f32(curVx + (b.vel.x - curVx) * linFactor);
+        b.vel.y = f32(curVy + (b.vel.y - curVy) * linFactor);
+        b.vel.z = f32(curVz + (b.vel.z - curVz) * linFactor);
+
+        // Self-righting torque from offset between submerged centroid and center of mass
+        const rot = quatToMat3(b.quat);
+        const bodyUp: Vec3 = { x: rot[2], y: rot[5], z: rot[8] };
+        const rightingTorque = crossVec3(bodyUp, { x: 0, y: 0, z: 1 });
+        const torqueScale = f32(fSub * (1 - fSub * 0.5) * 3.5 * FIXED_DT);
+        b.angVel.x = f32((b.angVel.x + rightingTorque.x * torqueScale) * angFactor);
+        b.angVel.y = f32((b.angVel.y + rightingTorque.y * torqueScale) * angFactor);
+        b.angVel.z = f32((b.angVel.z + rightingTorque.z * torqueScale) * angFactor);
+        break;
+      }
+    }
+  }
+
+  private computePlayerWaterSubmersion(): number {
+    if (this.waterVolumes.length === 0) return 0;
+    const vf = this.abi.f32;
+    const px = vf[F32.POS_X];
+    const py = vf[F32.POS_Y];
+    const pz = vf[F32.POS_Z];
+    const hz = this.getHullHalfZ();
+
+    for (let i = 0; i < this.waterVolumes.length; i++) {
+      const w = this.waterVolumes[i];
+      if (
+        px + HULL_STAND.hx < w.minX ||
+        px - HULL_STAND.hx > w.maxX ||
+        py + HULL_STAND.hy < w.minY ||
+        py - HULL_STAND.hy > w.maxY ||
+        pz - hz > w.surfaceZ ||
+        pz + hz < w.minZ
+      ) {
+        continue;
+      }
+      return f32(Math.max(0, Math.min(1, (w.surfaceZ - (pz - hz)) / (hz * 2))));
+    }
+    return 0;
+  }
+
+  private waterMove(
+    forward: Vec3,
+    right: Vec3,
+    fmove: number,
+    smove: number,
+    maxSpeed: number,
+  ): number {
+    const vf = this.abi.f32;
+    // Implicit water drag
+    const drag = f32(1 / (1 + 2.4 * FIXED_DT));
+    vf[F32.VEL_X] = f32(vf[F32.VEL_X] * drag);
+    vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] * drag);
+    vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] * drag);
+
+    const wishX = f32(fmove * forward.x + smove * right.x);
+    const wishY = f32(fmove * forward.y + smove * right.y);
+    const wishZ = f32(fmove * forward.z + smove * right.z);
+    const wishMag = f32(Math.hypot(wishX, wishY, wishZ));
+    const wishspeed = f32(Math.min(wishMag, maxSpeed * 0.8));
+
+    if (wishMag > 1e-5) {
+      this.accelerate(
+        f32(wishX / wishMag),
+        f32(wishY / wishMag),
+        f32(wishZ / wishMag),
+        wishspeed,
+        vf[F32.CVAR_ACCEL],
+        this.sourceConfig.surfaceFriction,
+      );
+    }
+    this.checkVelocity();
+    return this.flyMove();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Support System F: Raycast Vehicle Suspension & Tire Friction
+  // ---------------------------------------------------------------------------
+
+  private stepVehicles(): void {
+    const tr = this.auxTraceScratch;
+
+    for (let vIdx = 0; vIdx < this.vehicles.length; vIdx++) {
+      const veh = this.vehicles[vIdx];
+      const chassis = this.findBodyById(veh.chassisId);
+      if (!chassis || chassis.mass <= 0) continue;
+
+      const rot = quatToMat3(chassis.quat);
+      const { invInertia } = computeWorldInertia(rot, chassis.inertiaLocal);
+      const invMass = 1 / chassis.mass;
+
+      const chassisFwd: Vec3 = { x: rot[0], y: rot[3], z: rot[6] };
+      const chassisRight: Vec3 = { x: rot[1], y: rot[4], z: rot[7] };
+      const chassisUp: Vec3 = { x: rot[2], y: rot[5], z: rot[8] };
+
+      const steerAngle = veh.steer * veh.maxSteerRad;
+      const cosS = Math.cos(steerAngle);
+      const sinS = Math.sin(steerAngle);
+
+      for (let wIdx = 0; wIdx < veh.wheels.length; wIdx++) {
+        const wheel = veh.wheels[wIdx];
+        wheel.prevCompression = wheel.compression;
+
+        const worldOffset = mulMat3Vec3(rot, wheel.localHardpoint);
+        const startX = f32(chassis.pos.x + worldOffset.x);
+        const startY = f32(chassis.pos.y + worldOffset.y);
+        const startZ = f32(chassis.pos.z + worldOffset.z);
+
+        const rayLen = wheel.restLength + wheel.radius;
+        const endX = f32(startX - chassisUp.x * rayLen);
+        const endY = f32(startY - chassisUp.y * rayLen);
+        const endZ = f32(startZ - chassisUp.z * rayLen);
+
+        this.traceWorld(startX, startY, startZ, endX, endY, endZ, 0, 0, 0, tr);
+        if (tr.fraction >= 1.0) {
+          wheel.inContact = false;
+          wheel.compression = 0;
+          continue;
+        }
+
+        this.wakeBody(chassis);
+        wheel.inContact = true;
+        const hitDist = tr.fraction * rayLen;
+        const comp = f32(Math.max(0, wheel.restLength - (hitDist - wheel.radius)));
+        wheel.compression = comp;
+        wheel.contactPoint = { x: tr.endX, y: tr.endY, z: tr.endZ };
+        wheel.contactNormal = { x: tr.normalX, y: tr.normalY, z: tr.normalZ };
+
+        // 1. Hookean Spring-Damper Suspension Force: F_susp = k_s * x + c_d * dx/dt
+        const compVel = (comp - wheel.prevCompression) / FIXED_DT;
+        const suspForce = Math.max(0, wheel.stiffness * comp + wheel.damping * compVel);
+        const suspImpulse = f32(suspForce * FIXED_DT);
+
+        const rC: Vec3 = {
+          x: f32(tr.endX - chassis.pos.x),
+          y: f32(tr.endY - chassis.pos.y),
+          z: f32(tr.endZ - chassis.pos.z),
+        };
+        const wCrossR = crossVec3(chassis.angVel, rC);
+        const patchVel: Vec3 = {
+          x: f32(chassis.vel.x + wCrossR.x),
+          y: f32(chassis.vel.y + wCrossR.y),
+          z: f32(chassis.vel.z + wCrossR.z),
+        };
+
+        // Wheel forward & lateral axes (steered if front wheel)
+        const wf: Vec3 = wheel.steerable
+          ? {
+              x: f32(chassisFwd.x * cosS + chassisRight.x * sinS),
+              y: f32(chassisFwd.y * cosS + chassisRight.y * sinS),
+              z: f32(chassisFwd.z * cosS + chassisRight.z * sinS),
+            }
+          : chassisFwd;
+        const wr: Vec3 = wheel.steerable
+          ? {
+              x: f32(-chassisFwd.x * sinS + chassisRight.x * cosS),
+              y: f32(-chassisFwd.y * sinS + chassisRight.y * cosS),
+              z: f32(-chassisFwd.z * sinS + chassisRight.z * cosS),
+            }
+          : chassisRight;
+
+        // 2. Pacejka-inspired lateral slip & longitudinal drive/brake impulses clamped by grip cone
+        const vLong = dotVec3(patchVel, wf);
+        const vLat = dotVec3(patchVel, wr);
+        wheel.spinAngle = f32(wheel.spinAngle + (vLong / Math.max(1, wheel.radius)) * FIXED_DT);
+
+        const muGrip = wheel.grip * (veh.handbrake > 0.5 && !wheel.steerable ? 0.35 : 1.0);
+        const maxTireImpulse = f32(suspImpulse * muGrip);
+
+        let driveImpulse = wheel.driven ? f32(veh.throttle * veh.engineForce * FIXED_DT) : 0;
+        if (veh.handbrake > 0.1) {
+          const brakeDir = vLong > 1 ? -1 : vLong < -1 ? 1 : 0;
+          driveImpulse = f32(driveImpulse + brakeDir * veh.handbrake * veh.brakeForce * FIXED_DT);
+        }
+
+        const latImpulseRaw = f32(-vLat * chassis.mass * 0.25);
+        const tireMag = Math.hypot(driveImpulse, latImpulseRaw);
+        let jLong = driveImpulse;
+        let jLat = latImpulseRaw;
+        if (tireMag > maxTireImpulse && tireMag > 1e-6) {
+          const s = maxTireImpulse / tireMag;
+          jLong = f32(jLong * s);
+          jLat = f32(jLat * s);
+        }
+
+        const totalImpulse: Vec3 = {
+          x: f32(tr.normalX * suspImpulse + wf.x * jLong + wr.x * jLat),
+          y: f32(tr.normalY * suspImpulse + wf.y * jLong + wr.y * jLat),
+          z: f32(tr.normalZ * suspImpulse + wf.z * jLong + wr.z * jLat),
+        };
+
+        chassis.vel.x = f32(chassis.vel.x + totalImpulse.x * invMass);
+        chassis.vel.y = f32(chassis.vel.y + totalImpulse.y * invMass);
+        chassis.vel.z = f32(chassis.vel.z + totalImpulse.z * invMass);
+
+        const dOmega = mulMat3Vec3(invInertia, crossVec3(rC, totalImpulse));
+        chassis.angVel.x = f32(chassis.angVel.x + dOmega.x);
+        chassis.angVel.y = f32(chassis.angVel.y + dOmega.y);
+        chassis.angVel.z = f32(chassis.angVel.z + dOmega.z);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // BSP Minkowski Plane Sweeps & BVH Broad-Phase Queries
+  // ---------------------------------------------------------------------------
 
   /** BSP Minkowski plane expansion + swept point ray test with DIST_EPSILON (1/32u) */
   private clipBoxToBrush(
@@ -1604,8 +3665,19 @@ export class GoldSrcPhysicsEngine {
     const bMaxY = Math.max(sY, eY) + hy + pad;
     const bMaxZ = Math.max(sZ, eZ) + hz + pad;
 
-    for (let i = 0; i < this.brushes.length; i++) {
-      const br = this.brushes[i];
+    // Reuse cached union-AABB candidate list inside StepMove when active
+    let candidates: Int32Array;
+    let count: number;
+    if (this.stepCandidateCount >= 0) {
+      candidates = this.stepQueryScratch;
+      count = this.stepCandidateCount;
+    } else {
+      candidates = this.queryScratch;
+      count = this.brushBvh.queryAabb(bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, candidates);
+    }
+
+    for (let i = 0; i < count; i++) {
+      const br = this.brushes[candidates[i]];
       if (
         bMaxX < br.minX ||
         bMinX > br.maxX ||
@@ -1624,6 +3696,10 @@ export class GoldSrcPhysicsEngine {
     out.endZ = f32(sZ + (eZ - sZ) * out.fraction);
     return out;
   }
+
+  // ---------------------------------------------------------------------------
+  // Core CGameMovement (GoldSrc / Source Exact Velocity Math)
+  // ---------------------------------------------------------------------------
 
   /** ClipVelocity: v' = v - (v . n) * beta * n */
   private clipVelocity(
@@ -1766,7 +3842,10 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VEL_Z] = f32(vz);
   }
 
-  /** TryPlayerMove / PM_FlyMove: multi-plane iterative sliding with crease cross-product */
+  /**
+   * TryPlayerMove / PM_FlyMove: multi-plane iterative sliding with crease cross-product,
+   * duplicate-normal clamping, and optional surf ramp-seam dead-stop recovery.
+   */
   private flyMove(): number {
     const vf = this.abi.f32;
     const hz = this.getHullHalfZ();
@@ -1785,6 +3864,10 @@ export class GoldSrcPhysicsEngine {
     let numPlanes = 0;
     let blocked = 0;
     let surfHitNz = f32(0);
+    let lastSurfNx = f32(0);
+    let lastSurfNy = f32(0);
+    let lastSurfNz = f32(0);
+    let seamRecovered = false;
 
     for (let bump = 0; bump < 4; bump++) {
       if (vf[F32.VEL_X] === 0 && vf[F32.VEL_Y] === 0 && vf[F32.VEL_Z] === 0) break;
@@ -1817,11 +3900,52 @@ export class GoldSrcPhysicsEngine {
 
       if (tr.fraction === 1.0) break;
 
+      // Surf ramp-seam glitch recovery: if an internal brush seam abruptly kills high-speed ramp slide,
+      // nudge outward along the surf ramp normal by 2*DIST_EPSILON and re-trace once.
+      if (
+        this.sourceConfig.enableRampSeamFix &&
+        !seamRecovered &&
+        lastSurfNz > 0.05 &&
+        tr.fraction < 0.05 &&
+        tr.normalZ < 0.05
+      ) {
+        const preSpeed = Math.hypot(curOrigX, curOrigY, curOrigZ);
+        const opposing = curOrigX * tr.normalX + curOrigY * tr.normalY + curOrigZ * tr.normalZ;
+        if (preSpeed > 320 && opposing < -preSpeed * 0.6) {
+          const nudge = f32(DIST_EPSILON * 2.0);
+          const nX = f32(vf[F32.POS_X] + lastSurfNx * nudge);
+          const nY = f32(vf[F32.POS_Y] + lastSurfNy * nudge);
+          const nZ = f32(vf[F32.POS_Z] + lastSurfNz * nudge);
+          const nudgeTr = this.traceWorld(
+            vf[F32.POS_X],
+            vf[F32.POS_Y],
+            vf[F32.POS_Z],
+            nX,
+            nY,
+            nZ,
+            HULL_STAND.hx,
+            HULL_STAND.hy,
+            hz,
+            this.auxTraceScratch,
+          );
+          if (!nudgeTr.startSolid && !nudgeTr.allSolid && nudgeTr.fraction > 0.5) {
+            vf[F32.POS_X] = nudgeTr.endX;
+            vf[F32.POS_Y] = nudgeTr.endY;
+            vf[F32.POS_Z] = nudgeTr.endZ;
+            seamRecovered = true;
+            continue;
+          }
+        }
+      }
+
       if (tr.normalZ >= SURF_NORMAL_Z) {
         blocked |= 1;
       } else if (tr.normalZ > 0.05) {
         blocked |= 4;
         surfHitNz = tr.normalZ;
+        lastSurfNx = tr.normalX;
+        lastSurfNy = tr.normalY;
+        lastSurfNz = tr.normalZ;
       } else {
         blocked |= 2;
       }
@@ -1835,13 +3959,14 @@ export class GoldSrcPhysicsEngine {
         break;
       }
 
+      // Duplicate plane normal clamping (prevents dense seams from tripping 3-plane dead-stop)
       let duplicate = false;
       for (let i = 0; i < numPlanes; i++) {
         if (
           this.planesX[i] * tr.normalX +
             this.planesY[i] * tr.normalY +
             this.planesZ[i] * tr.normalZ >
-          0.99
+          0.999
         ) {
           vf[F32.VEL_X] = f32(vf[F32.VEL_X] + tr.normalX * 0.5);
           vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + tr.normalY * 0.5);
@@ -2012,7 +4137,9 @@ export class GoldSrcPhysicsEngine {
     vf[F32.VIEW_OFS_Z] = f32(vf[F32.VIEW_OFS_Z] + (targetEye - vf[F32.VIEW_OFS_Z]) * 0.28);
   }
 
-  /** StepMove / WalkMove: compares Path A (slide) vs Path B (step up 18u, move, drop down) */
+  /**
+   * StepMove / WalkMove with single union-AABB BVH candidate caching and overhang early-out.
+   */
   private walkMove(
     wishDirX: number,
     wishDirY: number,
@@ -2035,88 +4162,114 @@ export class GoldSrcPhysicsEngine {
     const destX = f32(startX + vx * FIXED_DT);
     const destY = f32(startY + vy * FIXED_DT);
 
-    const tr = this.traceWorld(
-      startX,
-      startY,
-      startZ,
-      destX,
-      destY,
-      startZ,
-      HULL_STAND.hx,
-      HULL_STAND.hy,
-      hz,
+    // Pre-fetch candidate brushes once for the union AABB covering Path A and Path B
+    const pad = f32(4.0);
+    this.stepCandidateCount = this.brushBvh.queryAabb(
+      Math.min(startX, destX) - HULL_STAND.hx - pad,
+      Math.min(startY, destY) - HULL_STAND.hy - pad,
+      startZ - hz - STEPSIZE - pad,
+      Math.max(startX, destX) + HULL_STAND.hx + pad,
+      Math.max(startY, destY) + HULL_STAND.hy + pad,
+      startZ + hz + STEPSIZE + pad,
+      this.stepQueryScratch,
     );
-    if (tr.fraction === 1.0) {
-      vf[F32.POS_X] = tr.endX;
-      vf[F32.POS_Y] = tr.endY;
-      vf[F32.POS_Z] = tr.endZ;
-      return;
-    }
 
-    const origVX = vf[F32.VEL_X];
-    const origVY = vf[F32.VEL_Y];
-    const origVZ = vf[F32.VEL_Z];
-    this.flyMove();
-    const downX = vf[F32.POS_X];
-    const downY = vf[F32.POS_Y];
-    const downZ = vf[F32.POS_Z];
-    const downVX = vf[F32.VEL_X];
-    const downVY = vf[F32.VEL_Y];
-    const downVZ = vf[F32.VEL_Z];
-    const downDistSq = (downX - startX) ** 2 + (downY - startY) ** 2;
-
-    vf[F32.POS_X] = startX;
-    vf[F32.POS_Y] = startY;
-    vf[F32.POS_Z] = startZ;
-    vf[F32.VEL_X] = origVX;
-    vf[F32.VEL_Y] = origVY;
-    vf[F32.VEL_Z] = origVZ;
-
-    const upTr = this.traceWorld(
-      startX,
-      startY,
-      startZ,
-      startX,
-      startY,
-      f32(startZ + STEPSIZE),
-      HULL_STAND.hx,
-      HULL_STAND.hy,
-      hz,
-    );
-    if (!upTr.startSolid && !upTr.allSolid) {
-      vf[F32.POS_X] = upTr.endX;
-      vf[F32.POS_Y] = upTr.endY;
-      vf[F32.POS_Z] = upTr.endZ;
-      this.flyMove();
-
-      const dropTr = this.traceWorld(
-        vf[F32.POS_X],
-        vf[F32.POS_Y],
-        vf[F32.POS_Z],
-        vf[F32.POS_X],
-        vf[F32.POS_Y],
-        f32(vf[F32.POS_Z] - STEPSIZE - 2.0),
+    try {
+      const tr = this.traceWorld(
+        startX,
+        startY,
+        startZ,
+        destX,
+        destY,
+        startZ,
         HULL_STAND.hx,
         HULL_STAND.hy,
         hz,
       );
-      if (!dropTr.allSolid && dropTr.normalZ >= SURF_NORMAL_Z) {
-        vf[F32.POS_X] = dropTr.endX;
-        vf[F32.POS_Y] = dropTr.endY;
-        vf[F32.POS_Z] = dropTr.endZ;
-      }
-      const upDistSq = (vf[F32.POS_X] - startX) ** 2 + (vf[F32.POS_Y] - startY) ** 2;
-      if (upDistSq > downDistSq + 0.01 && dropTr.normalZ >= SURF_NORMAL_Z) {
+      if (tr.fraction === 1.0) {
+        vf[F32.POS_X] = tr.endX;
+        vf[F32.POS_Y] = tr.endY;
+        vf[F32.POS_Z] = tr.endZ;
         return;
       }
-    }
 
-    vf[F32.POS_X] = downX;
-    vf[F32.POS_Y] = downY;
-    vf[F32.POS_Z] = downZ;
-    vf[F32.VEL_X] = downVX;
-    vf[F32.VEL_Y] = downVY;
-    vf[F32.VEL_Z] = downVZ;
+      const initialHitNz = tr.normalZ;
+      const origVX = vf[F32.VEL_X];
+      const origVY = vf[F32.VEL_Y];
+      const origVZ = vf[F32.VEL_Z];
+
+      // Path A (Slide)
+      this.flyMove();
+
+      // Early-out of Path B when hitting a ceiling/overhang (n_z < -0.1)
+      if (initialHitNz < -0.1) {
+        return;
+      }
+
+      const downX = vf[F32.POS_X];
+      const downY = vf[F32.POS_Y];
+      const downZ = vf[F32.POS_Z];
+      const downVX = vf[F32.VEL_X];
+      const downVY = vf[F32.VEL_Y];
+      const downVZ = vf[F32.VEL_Z];
+      const downDistSq = (downX - startX) ** 2 + (downY - startY) ** 2;
+
+      // Path B (Step Up -> Forward -> Drop)
+      vf[F32.POS_X] = startX;
+      vf[F32.POS_Y] = startY;
+      vf[F32.POS_Z] = startZ;
+      vf[F32.VEL_X] = origVX;
+      vf[F32.VEL_Y] = origVY;
+      vf[F32.VEL_Z] = origVZ;
+
+      const upTr = this.traceWorld(
+        startX,
+        startY,
+        startZ,
+        startX,
+        startY,
+        f32(startZ + STEPSIZE),
+        HULL_STAND.hx,
+        HULL_STAND.hy,
+        hz,
+      );
+      if (!upTr.startSolid && !upTr.allSolid) {
+        vf[F32.POS_X] = upTr.endX;
+        vf[F32.POS_Y] = upTr.endY;
+        vf[F32.POS_Z] = upTr.endZ;
+        this.flyMove();
+
+        const dropTr = this.traceWorld(
+          vf[F32.POS_X],
+          vf[F32.POS_Y],
+          vf[F32.POS_Z],
+          vf[F32.POS_X],
+          vf[F32.POS_Y],
+          f32(vf[F32.POS_Z] - STEPSIZE - 2.0),
+          HULL_STAND.hx,
+          HULL_STAND.hy,
+          hz,
+        );
+        if (!dropTr.allSolid && dropTr.normalZ >= SURF_NORMAL_Z) {
+          vf[F32.POS_X] = dropTr.endX;
+          vf[F32.POS_Y] = dropTr.endY;
+          vf[F32.POS_Z] = dropTr.endZ;
+        }
+        const upDistSq = (vf[F32.POS_X] - startX) ** 2 + (vf[F32.POS_Y] - startY) ** 2;
+        if (upDistSq > downDistSq + 0.01 && dropTr.normalZ >= SURF_NORMAL_Z) {
+          return;
+        }
+      }
+
+      vf[F32.POS_X] = downX;
+      vf[F32.POS_Y] = downY;
+      vf[F32.POS_Z] = downZ;
+      vf[F32.VEL_X] = downVX;
+      vf[F32.VEL_Y] = downVY;
+      vf[F32.VEL_Z] = downVZ;
+    } finally {
+      this.stepCandidateCount = -1;
+    }
   }
 
   private airMove(
