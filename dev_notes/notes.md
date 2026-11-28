@@ -1,5 +1,7 @@
 You are a Game developer; Finish the specs first, no code first.
 
+repomix --compress --ignore "docs/,dev_notes/"
+
 Make web based multiplayer FPS game (CS 1.6);
 
 1. only 1 mode: Surf

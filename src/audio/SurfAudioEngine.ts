@@ -103,66 +103,98 @@ export class SurfAudioEngine {
   }
 
   public updateListener(kinematics: ListenerKinematics): void {
-    this.listener = kinematics;
+      const { pos, vel, yaw, pitch } = kinematics;
+      if (
+        !Number.isFinite(pos.x) ||
+        !Number.isFinite(pos.y) ||
+        !Number.isFinite(pos.z) ||
+        !Number.isFinite(vel.x) ||
+        !Number.isFinite(vel.y) ||
+        !Number.isFinite(vel.z) ||
+        !Number.isFinite(yaw) ||
+        !Number.isFinite(pitch)
+      ) {
+        if (!this.loggedNanWarning) {
+          this.loggedNanWarning = true;
+          console.error('[SurfAudioEngine] Non-finite listener kinematics:', kinematics);
+        }
+        return;
+      }
+      this.listener = kinematics;
   }
+  private loggedNanWarning = false;
 
-  private computeSpatialCue(
-    sourcePos?: Vec3,
-    sourceVel: Vec3 = { x: 0, y: 0, z: 0 },
-    refDistHu = 240,
-  ): SpatialCue {
-    if (!sourcePos) {
-      return { gain: 1, pan: 0, dopplerRatio: 1, lowpassHz: 18000 };
-    }
+    private computeSpatialCue(
+        sourcePos?: Vec3,
+        sourceVel: Vec3 = { x: 0, y: 0, z: 0 },
+        refDistHu = 240,
+      ): SpatialCue {
+        const fallback: SpatialCue = { gain: 1, pan: 0, dopplerRatio: 1, lowpassHz: 18000 };
+        if (!sourcePos) return fallback;
 
-    const dx = sourcePos.x - this.listener.pos.x;
-    const dy = sourcePos.y - this.listener.pos.y;
-    const dz = sourcePos.z - this.listener.pos.z;
-    const distHu = Math.hypot(dx, dy, dz);
-    if (distHu < 8) {
-      return { gain: 1, pan: 0, dopplerRatio: 1, lowpassHz: 18000 };
-    }
+        const dx = sourcePos.x - this.listener.pos.x;
+        const dy = sourcePos.y - this.listener.pos.y;
+        const dz = sourcePos.z - this.listener.pos.z;
+        const distHu = Math.hypot(dx, dy, dz);
 
-    const dirX = dx / distHu;
-    const dirY = dy / distHu;
-    const dirZ = dz / distHu;
+        if (!Number.isFinite(distHu)) {
+          if (!this.loggedNanWarning) {
+            this.loggedNanWarning = true;
+            console.error('[SurfAudioEngine] Non-finite spatial distance:', {
+              sourcePos,
+              listener: this.listener,
+            });
+          }
+          return fallback;
+        }
+        if (distHu < 8) return fallback;
 
-    const { right } = computeAngleVectors(-this.listener.pitch, this.listener.yaw, 0);
-    const pan = Math.max(-1, Math.min(1, dirX * right.x + dirY * right.y + dirZ * right.z));
+        const dirX = dx / distHu;
+        const dirY = dy / distHu;
+        const dirZ = dz / distHu;
 
-    const distM = distHu * HAMMER_TO_METERS;
-    const refM = Math.max(1.5, refDistHu * HAMMER_TO_METERS);
-    const gain = Math.max(0.03, Math.min(1, 1 / (1 + Math.pow(distM / refM, 1.35))));
+        const { right } = computeAngleVectors(-this.listener.pitch, this.listener.yaw, 0);
+        const rawPan = dirX * right.x + dirY * right.y + dirZ * right.z;
+        const pan = Number.isFinite(rawPan) ? Math.max(-1, Math.min(1, rawPan)) : 0;
 
-    const vListenerAlong =
-      this.listener.vel.x * dirX + this.listener.vel.y * dirY + this.listener.vel.z * dirZ;
-    const vSourceAlong = sourceVel.x * dirX + sourceVel.y * dirY + sourceVel.z * dirZ;
-    const rawDoppler =
-      (SPEED_OF_SOUND_HU + vListenerAlong) / Math.max(2000, SPEED_OF_SOUND_HU + vSourceAlong);
-    const dopplerRatio = Math.max(0.72, Math.min(1.38, rawDoppler));
-    const lowpassHz = Math.max(1400, 18000 * Math.exp(-distM * 0.022));
+        const distM = distHu * HAMMER_TO_METERS;
+        const refM = Math.max(1.5, refDistHu * HAMMER_TO_METERS);
+        const rawGain = 1 / (1 + Math.pow(distM / refM, 1.35));
+        const gain = Number.isFinite(rawGain) ? Math.max(0.03, Math.min(1, rawGain)) : 1;
 
-    return { gain, pan, dopplerRatio, lowpassHz };
-  }
+        const vListenerAlong =
+          this.listener.vel.x * dirX + this.listener.vel.y * dirY + this.listener.vel.z * dirZ;
+        const vSourceAlong = sourceVel.x * dirX + sourceVel.y * dirY + sourceVel.z * dirZ;
+        const rawDoppler =
+          (SPEED_OF_SOUND_HU + vListenerAlong) / Math.max(2000, SPEED_OF_SOUND_HU + vSourceAlong);
+        const dopplerRatio = Number.isFinite(rawDoppler)
+          ? Math.max(0.72, Math.min(1.38, rawDoppler))
+          : 1;
 
-  private createSpatialOut(cue: SpatialCue): AudioNode {
-    const ctx = this.ctx!;
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.value = cue.lowpassHz;
+        const rawLp = 18000 * Math.exp(-distM * 0.022);
+        const lowpassHz = Number.isFinite(rawLp) ? Math.max(1400, rawLp) : 18000;
 
-    const gain = ctx.createGain();
-    gain.gain.value = cue.gain;
+        return { gain, pan, dopplerRatio, lowpassHz };
+      }
 
-    if (typeof ctx.createStereoPanner === 'function') {
-      const panner = ctx.createStereoPanner();
-      panner.pan.value = cue.pan;
-      lp.connect(gain).connect(panner).connect(ctx.destination);
-    } else {
-      lp.connect(gain).connect(ctx.destination);
-    }
-    return lp;
-  }
+      private createSpatialOut(cue: SpatialCue): AudioNode {
+          const ctx = this.ctx!;
+          const lp = ctx.createBiquadFilter();
+          lp.type = 'lowpass';
+          lp.frequency.value = Number.isFinite(cue.lowpassHz) ? cue.lowpassHz : 18000;
+
+          const gain = ctx.createGain();
+          gain.gain.value = Number.isFinite(cue.gain) ? cue.gain : 1;
+
+          if (typeof ctx.createStereoPanner === 'function') {
+            const panner = ctx.createStereoPanner();
+            panner.pan.value = Number.isFinite(cue.pan) ? cue.pan : 0;
+            lp.connect(gain).connect(panner).connect(ctx.destination);
+          } else {
+            lp.connect(gain).connect(ctx.destination);
+          }
+          return lp;
+        }
 
   public updateContinuous(
     speed3D: number,

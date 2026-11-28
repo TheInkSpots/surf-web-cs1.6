@@ -1,0 +1,4751 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+The content has been processed where content has been compressed (code blocks are separated by ⋮---- delimiter).
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: docs/, dev_notes/
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Content has been compressed - code blocks are separated by ⋮---- delimiter
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  app/
+    SurfApp.ts
+  audio/
+    SurfAudioEngine.ts
+  core/
+    constants.ts
+    coordinates.ts
+    memoryAbi.ts
+  gameplay/
+    BotController.ts
+    InputController.ts
+    RunTracker.ts
+    StrafeSyncTracker.ts
+    TeamMatchManager.ts
+    WeaponSystem.ts
+  maps/
+    mapRegistry.ts
+    surfSandbox01.ts
+    surfSandbox02.ts
+    surfSandbox03.ts
+    surfSandbox04.ts
+  physics/
+    BrushBuilder.ts
+    GoldSrcPhysicsEngine.ts
+  render/
+    textures.ts
+    ViewmodelRig.ts
+    WorldRenderer.ts
+  styles/
+    sandbox.css
+  ui/
+    CombatHudOverlay.ts
+    HudController.ts
+    MenuController.ts
+    StageSelectPanel_bak.ts
+  main.ts
+.gitignore
+index.html
+LICENSE
+package.json
+README.md
+tsconfig.json
+vite.config.ts
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/gameplay/BotController.ts">
+// src/gameplay/BotController.ts
+import { FIXED_DT, FL_DUCKING, FL_ONGROUND, IN_DUCK, IN_JUMP } from '../core/constants';
+import {
+  ACTOR_F32_BASE_INDEX,
+  ACTOR_F32_STRIDE,
+  ACTOR_I32_BASE_INDEX,
+  ACTOR_I32_STRIDE,
+  ActorF32,
+  ActorI32,
+  HitGroup,
+  MAX_ACTORS,
+  PhysicsMemoryAbi,
+  TeamId,
+} from '../core/memoryAbi';
+import {
+  ActorInputCmd,
+  computeAngleVectors,
+  GoldSrcPhysicsEngine,
+  IN_ATTACK,
+  IN_RELOAD,
+  Vec3,
+  WeaponSlot,
+} from '../physics/GoldSrcPhysicsEngine';
+⋮----
+export type NavFlag =
+  | 'jump'
+  | 'duck'
+  | 'ladder'
+  | 'surf_ramp'
+  | 'camp'
+  | 'bombsite'
+  | 't_spawn'
+  | 'ct_spawn';
+⋮----
+export interface NavEdge {
+  to: number;
+  flags?: NavFlag[];
+  costScale?: number;
+}
+⋮----
+export interface NavWaypoint {
+  id: number;
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  flags?: NavFlag[];
+  edges: NavEdge[];
+}
+⋮----
+export interface MapNavGraph {
+  waypoints: NavWaypoint[];
+}
+⋮----
+export type BotState =
+  | 'BUY'
+  | 'ROUTE_TO_OBJECTIVE'
+  | 'ENGAGE'
+  | 'PLANT_OR_DEFUSE'
+  | 'RETREAT_RELOAD';
+⋮----
+export interface BotProfile {
+  name: string;
+  /** Reaction delay before first shot after spotting an enemy (150–450 ms) */
+  reactionDelayMs: number;
+  /** Angular aim-error half-cone in radians (e.g. 0.015–0.055 rad) */
+  aimErrorConeRad: number;
+  /** Maximum angular turn rate in rad/s */
+  turnRateRadPerSec: number;
+  /** Aggression [0..1] controlling push vs. camp tendencies */
+  aggression: number;
+}
+⋮----
+/** Reaction delay before first shot after spotting an enemy (150–450 ms) */
+⋮----
+/** Angular aim-error half-cone in radians (e.g. 0.015–0.055 rad) */
+⋮----
+/** Maximum angular turn rate in rad/s */
+⋮----
+/** Aggression [0..1] controlling push vs. camp tendencies */
+⋮----
+export interface BotShotEvent {
+  shooterId: number;
+  origin: Vec3;
+  dir: Vec3;
+  slot: WeaponSlot;
+  hitActorId?: number;
+  hitGroup?: HitGroup;
+  hitPoint: Vec3;
+  killed: boolean;
+}
+⋮----
+interface BotRuntime {
+  actorId: number;
+  profile: BotProfile;
+  state: BotState;
+  path: number[];
+  pathCursor: number;
+  targetActorId: number;
+  spottedAtTick: number;
+  lastSeenPos: Vec3 | null;
+  alertPos: Vec3 | null;
+  alertExpireTick: number;
+  nextFireTick: number;
+  burstShotsFired: number;
+  burstResetTick: number;
+  clipAmmo: number;
+  reloadFinishTick: number;
+  objectiveProgressTicks: number;
+  strafeSign: number;
+  strafeFlipTick: number;
+  aimErrYaw: number;
+  aimErrPitch: number;
+  stuckTicks: number;
+  lastCheckX: number;
+  lastCheckY: number;
+}
+⋮----
+export interface BotControllerCallbacks {
+  onBotFired?: (ev: BotShotEvent) => void;
+  onObjectiveComplete?: (actorId: number, team: TeamId) => void;
+}
+⋮----
+function wrapAngle(a: number): number
+⋮----
+function dist3(ax: number, ay: number, az: number, bx: number, by: number, bz: number): number
+⋮----
+export class BotController
+⋮----
+constructor(
+    abi: PhysicsMemoryAbi,
+    physics: GoldSrcPhysicsEngine,
+    callbacks: BotControllerCallbacks = {},
+  )
+⋮----
+public setNavGraph(nav: MapNavGraph): void
+⋮----
+public registerBot(actorId: number, profile?: Partial<BotProfile>): void
+⋮----
+public clearBots(): void
+⋮----
+/** Sound-triggered alertness: footsteps (running without ducking) or gunfire */
+public notifySoundEvent(sourceActorId: number, pos: Vec3, radiusHu: number, tick: number): void
+⋮----
+bot.alertExpireTick = tick + 350; // Stay alert for 3.5 s
+⋮----
+/** Called once per 100 Hz physics tick BEFORE physics.simulateAllBotsAndPvp() */
+public stepTick(tick: number): void
+⋮----
+// Emit running footstep sound cues every 25 ticks for any loud actor
+⋮----
+private emitFootstepCues(tick: number): void
+⋮----
+private thinkBot(bot: BotRuntime, tick: number): ActorInputCmd
+⋮----
+// 1. Complete reload if active
+⋮----
+// 2. BUY phase (instant CS 1.6 bot purchase at round start)
+⋮----
+// 3. Vision scan (every 5 ticks = 20 Hz to save raycasts)
+⋮----
+// 4. FSM Execution
+⋮----
+// Aim at enemy chest/head with humanized error cone
+⋮----
+desiredPitch = -Math.atan2(dz, horiz) + bot.aimErrPitch; // Source pitch: +down
+⋮----
+// Strafe-stopping for accurate burst fire
+⋮----
+// Counter-strafe to stop before firing
+⋮----
+// Micro-strafe between bursts
+⋮----
+// Low clip or low HP -> Retreat / Reload
+⋮----
+// Back away while reloading
+⋮----
+// Hold duck at bombsite for 3.0s (300 ticks)
+⋮----
+// ROUTE_TO_OBJECTIVE
+⋮----
+// Sound-triggered alertness: glance toward heard enemy footsteps/gunfire
+⋮----
+// 5. Smooth angular slew so bot aim moves at human speed
+⋮----
+private performBotBuy(bot: BotRuntime): void
+⋮----
+// Buy Scout ($2750) if affordable, otherwise keep USP .45
+⋮----
+private scanForEnemy(bot: BotRuntime, eyePos: Vec3, yaw: number, myTeam: TeamId): number
+⋮----
+// 110° FOV cone (cos 55° ≈ 0.57), widened if sound-alerted
+⋮----
+private fireBotWeapon(
+    bot: BotRuntime,
+    eyePos: Vec3,
+    yaw: number,
+    pitch: number,
+    tick: number,
+  ): void
+⋮----
+bot.nextFireTick = tick + 125; // 1.25 s bolt cycle
+⋮----
+bot.nextFireTick = tick + 42; // Burst recoil cooldown
+⋮----
+// Gunfire alerts nearby enemy bots
+⋮----
+private followNavPath(
+    bot: BotRuntime,
+    pos: Vec3,
+    team: TeamId,
+    tick: number,
+  ): { yaw: number; pitch: number; fmove: number; smove: number; buttons: number }
+⋮----
+// Compute new A* path if empty or finished
+⋮----
+// Edge-flag actions (jump, duck, ladder, surf_ramp)
+⋮----
+// Release W on surf ramps and hold A/D into ramp side
+⋮----
+// Basic stuck recovery every 50 ticks (0.5 s)
+⋮----
+private findNearestWaypoint(pos: Vec3): number
+⋮----
+private pickObjectiveWaypoint(team: TeamId): number
+⋮----
+// Fallback: patrol opposite team spawn or random waypoint
+⋮----
+private computeAStar(startId: number, goalId: number): number[]
+</file>
+
+<file path="src/gameplay/TeamMatchManager.ts">
+// src/gameplay/TeamMatchManager.ts
+import {
+  ACTOR_I32_BASE_INDEX,
+  ACTOR_I32_STRIDE,
+  ActorI32,
+  MAX_ACTORS,
+  PhysicsMemoryAbi,
+  TeamId,
+} from '../core/memoryAbi';
+import { GoldSrcPhysicsEngine, SpawnPoint } from '../physics/GoldSrcPhysicsEngine';
+import { BotController } from './BotController';
+⋮----
+export interface TeamSpawnConfig {
+  tSpawns?: SpawnPoint[];
+  ctSpawns?: SpawnPoint[];
+  fallbackSpawn: SpawnPoint;
+}
+⋮----
+export interface MatchScoreSnapshot {
+  tScore: number;
+  ctScore: number;
+  tAlive: number;
+  ctAlive: number;
+  roundNumber: number;
+  roundTimeLeftSec: number;
+  playerTeam: TeamId;
+}
+⋮----
+export class TeamMatchManager
+⋮----
+constructor(
+    abi: PhysicsMemoryAbi,
+    physics: GoldSrcPhysicsEngine,
+    bots: BotController,
+    spawns: TeamSpawnConfig,
+  )
+⋮----
+public configure(spawns: TeamSpawnConfig, playerTeam: TeamId, botsPerTeam = 3): void
+⋮----
+public startNewRound(currentTick: number): void
+⋮----
+this.roundEndTick = currentTick + 115 * 100; // 1:55 round timer at 100 Hz
+⋮----
+// Deactivate all slots first
+⋮----
+// Slot 0 = Local player
+⋮----
+// Populate Terrorist bots
+⋮----
+// Populate Counter-Terrorist bots
+⋮----
+public awardFrag(killerId: number): void
+⋮----
+public evaluateRound(currentTick: number): { winner: TeamId | null; snapshot: MatchScoreSnapshot }
+⋮----
+private pickSpawn(team: TeamId, index: number): SpawnPoint
+⋮----
+// Fallback grid offset around map's single spawn so bots never start overlapping
+</file>
+
+<file path="src/core/coordinates.ts">
+/**
+ * Convert GoldSrc Z-Up coordinates (gx, gy, gz) to Three.js Y-Up Vector3 (gx, gz, -gy).
+ * Orientation-preserving transform (det = +1):
+ *   +X = Forward (yaw = 0), +Y = Left (yaw = +90°), +Z = Up
+ */
+export function gsToThree(
+  gx: number,
+  gy: number,
+  gz: number,
+  out: THREE.Vector3 = new THREE.Vector3(),
+): THREE.Vector3
+</file>
+
+<file path="src/core/memoryAbi.ts">
+import { f32 } from './constants';
+⋮----
+export const enum TeamId {
+  SPEC = 0,
+  T = 1,
+  CT = 2,
+}
+⋮----
+export const enum HitGroup {
+  GENERIC = 0,
+  HEAD = 1,
+  CHEST = 2,
+  STOMACH = 3,
+  LEGS = 4,
+}
+⋮----
+// Per-actor Float32 layout (16 floats = 64 bytes per actor -> cache-line aligned)
+export const enum ActorF32 {
+  POS_X = 0,
+  POS_Y = 1,
+  POS_Z = 2,
+  VEL_X = 3,
+  VEL_Y = 4,
+  VEL_Z = 5,
+  BASE_VEL_X = 6,
+  BASE_VEL_Y = 7,
+  BASE_VEL_Z = 8,
+  YAW = 9,
+  PREV_YAW = 10,
+  PITCH = 11,
+  VIEW_OFS_Z = 12,
+  SURF_NZ = 13,
+  CMD_FMOVE = 14,
+  CMD_SMOVE = 15,
+}
+⋮----
+// Per-actor Int32 layout (16 ints = 64 bytes per actor)
+export const enum ActorI32 {
+  ACTIVE = 0,          // 0 = free slot, 1 = active
+  IS_BOT = 1,          // 0 = human, 1 = bot
+  TEAM = 2,            // TeamId (0=SPEC, 1=T, 2=CT)
+  ALIVE = 3,           // 0/1
+  HP = 4,              // 0..100
+  ARMOR = 5,           // 0..100
+  HAS_HELMET = 6,      // 0/1
+  CASH = 7,            // 0..16000
+  FLAGS = 8,           // FL_ONGROUND | FL_DUCKING
+  MOVE_STATE = 9,      // MoveState enum
+  BUTTONS = 10,        // IN_JUMP | IN_DUCK | IN_ATTACK | ...
+  PREV_BUTTONS = 11,
+  ACTIVE_SLOT = 12,    // 1=Scout, 2=USP, 3=Knife, 5=HE
+  WEAPON_MASK = 13,    // Bitmask of owned slots (bit 1, 2, 3, 5)
+  GROUND_ACTOR = 14,   // -1 = world/air, >=0 = actorId stood on (head-boost)
+  MODEL_VARIANT = 15,  // 0 = Phoenix/SAS, 1 = Leet/GIGN
+}
+⋮----
+ACTIVE = 0,          // 0 = free slot, 1 = active
+IS_BOT = 1,          // 0 = human, 1 = bot
+TEAM = 2,            // TeamId (0=SPEC, 1=T, 2=CT)
+ALIVE = 3,           // 0/1
+HP = 4,              // 0..100
+ARMOR = 5,           // 0..100
+HAS_HELMET = 6,      // 0/1
+CASH = 7,            // 0..16000
+FLAGS = 8,           // FL_ONGROUND | FL_DUCKING
+MOVE_STATE = 9,      // MoveState enum
+BUTTONS = 10,        // IN_JUMP | IN_DUCK | IN_ATTACK | ...
+⋮----
+ACTIVE_SLOT = 12,    // 1=Scout, 2=USP, 3=Knife, 5=HE
+WEAPON_MASK = 13,    // Bitmask of owned slots (bit 1, 2, 3, 5)
+GROUND_ACTOR = 14,   // -1 = world/air, >=0 = actorId stood on (head-boost)
+MODEL_VARIANT = 15,  // 0 = Phoenix/SAS, 1 = Leet/GIGN
+⋮----
+// Server Physics CVars
+⋮----
+// UserCmd
+⋮----
+// Byte offsets in WebAssembly.Memory (after existing single-player header & CVars):
+export const ACTOR_F32_BASE_INDEX = 64;  // Float32 index (byte 256)
+export const ACTOR_I32_BASE_INDEX = 64;  // Int32 index (offset inside i32 view)
+⋮----
+// Add these helper methods onto PhysicsMemoryAbi:
+export function actorF32Idx(actorId: number, field: ActorF32): number
+⋮----
+export function actorI32Idx(actorId: number, field: ActorI32): number
+⋮----
+export function initActorSlot(
+  f32View: Float32Array,
+  i32View: Int32Array,
+  actorId: number,
+  team: TeamId,
+  isBot: boolean,
+  x: number,
+  y: number,
+  z: number,
+  yaw: number,
+): void
+⋮----
+i32View[i + ActorI32.ACTIVE_SLOT] = 2; // USP .45 default sidearm
+⋮----
+export class PhysicsMemoryAbi
+⋮----
+constructor(pages = 2)
+⋮----
+public resetCvars(): void
+⋮----
+// Add to your existing F32 / I32 CVar enums:
+// I32.CVAR_SOLID_TEAMMATES (0 = semiclip, 1 = solid boosting)
+// I32.CVAR_FRIENDLY_FIRE   (0 = off, 1 = on)
+// I32.ACTOR_COUNT
+</file>
+
+<file path="src/gameplay/StrafeSyncTracker.ts">
+export class StrafeSyncTracker
+⋮----
+constructor(windowSize = 140)
+⋮----
+public recordTick(
+    airborne: boolean,
+    keyA: boolean,
+    keyD: boolean,
+    yawDelta: number,
+    preXY: number,
+    postXY: number,
+  ): void
+⋮----
+public getSyncPercent(): number
+⋮----
+public reset(): void
+</file>
+
+<file path="src/maps/surfSandbox03.ts">
+// src/maps/surfSandbox03.ts
+import { f32 } from '../core/constants';
+import { BrushBuilder, BrushStyle } from '../physics/BrushBuilder';
+import {
+  createBoxRigidBody,
+  createTargetRigidBody,
+  createWeaponRigidBody,
+  SourceRigidBody,
+  SpawnPoint,
+} from '../physics/GoldSrcPhysicsEngine';
+import { MapBuildResult, WorldSign } from './surfSandbox01';
+⋮----
+interface StaircaseSpec {
+  idPrefix: string;
+  /** Center of the bottom step's starting edge */
+  startX: number;
+  startY: number;
+  /** Floor Z of the lower deck */
+  baseZ: number;
+  /** Cardinal direction of ascent */
+  dir: '+x' | '-x' | '+y' | '-y';
+  /** Total width perpendicular to climb direction */
+  width: number;
+  /** Number of steps */
+  steps: number;
+  /** Step riser height (keep <= 16u so GoldSrc StepMove steps up seamlessly at <= 18u STEPSIZE) */
+  riser: number;
+  /** Horizontal tread depth per step */
+  tread: number;
+  /** Base slab thickness beneath the lowest step */
+  baseThickness?: number;
+  style?: BrushStyle;
+}
+⋮----
+/** Center of the bottom step's starting edge */
+⋮----
+/** Floor Z of the lower deck */
+⋮----
+/** Cardinal direction of ascent */
+⋮----
+/** Total width perpendicular to climb direction */
+⋮----
+/** Number of steps */
+⋮----
+/** Step riser height (keep <= 16u so GoldSrc StepMove steps up seamlessly at <= 18u STEPSIZE) */
+⋮----
+/** Horizontal tread depth per step */
+⋮----
+/** Base slab thickness beneath the lowest step */
+⋮----
+/**
+ * Generates solid convex box steps compatible with CGameMovement::StepMove (sv_stepsize = 18u).
+ * Each step extends down to baseZ - baseThickness so there are no underside trace gaps.
+ */
+function addStaircase(builder: BrushBuilder, spec: StaircaseSpec): { endX: number; endY: number; topZ: number }
+⋮----
+export function buildSurfSandbox03(): MapBuildResult
+⋮----
+// =========================================================================
+// STAGE 0: SPAWN BASTION, STAIRWELL ARMORY & ELEVATED START GATE
+// =========================================================================
+⋮----
+// Lower spawn courtyard (Z = 1200)
+⋮----
+// Stair Flight A: 10 steps (16u riser x 28u tread) climbing +Y to Armory Mezzanine (Z = 1360)
+⋮----
+// Elevated Armory Mezzanine (Z = 1360) overlooking a target range across the gap
+⋮----
+// Target gallery platform across from the mezzanine
+⋮----
+// Stair Flight B: 5 steps (16u riser x 32u tread) climbing +X from Z = 1200 -> 1280 to Start Gate
+⋮----
+// Elevated Start Launch Deck (Z = 1280) + Framing Gate
+⋮----
+// =========================================================================
+// STAGE 1: TWIN VALLEY DROP, S-TRANSFER & SNIPER PERCH
+// =========================================================================
+⋮----
+// Ramp 1: 50° drop-in wedge
+⋮----
+// Ramp 2: 53° offset right (-Y) transfer
+⋮----
+// Flanking combat target gallery on +Y side of Ramp 2 (mid-air snipe targets)
+⋮----
+// Ramp 3: 55° counter-transfer back to +Y
+⋮----
+// Stage 1 Booster Pad -> launches to Stage 2 Checkpoint Deck (Z = 420)
+⋮----
+// =========================================================================
+// STAGE 2: CHECKPOINT 2, STAIRWELL SPLIT & DUAL-ANGLE ROUTES
+// =========================================================================
+⋮----
+// Checkpoint 2 Landing Deck (Z = 420)
+⋮----
+// Stair Flight C: 8 steps (16u riser x 30u tread) climbing +X from Z = 420 -> 548 to High Split Balcony
+⋮----
+// Upper Split Balcony (+Y, Z = 548) -> feeds High 58° Steep Route
+⋮----
+// Lower Split Lip (-Y, Z = 420) -> feeds Low 50° Technical Route
+⋮----
+// Branch A (High Risk/Speed): 58° Steep Ramp on +Y
+⋮----
+// Framing arch over Branch A
+⋮----
+// Branch B (Low Technical): 50° Glide Ramp on -Y + side combat catwalk
+⋮----
+// Stage 2 Convergence Explosion Boost Gate -> launches up to Stage 3 Skybridge (Z = 480)
+⋮----
+// =========================================================================
+// STAGE 3: CHECKPOINT 3, CROUCH-GATE SKYBRIDGE & 90° CURVED BANK
+// =========================================================================
+⋮----
+// Optional 48u Crouch-Slide Center Gate (standing 72u hits beam; ducking 36u slides cleanly under)
+⋮----
+// 3-Segment 90° Sweeping Curved Surf Bank (+X turning smoothly to +Y North)
+⋮----
+// Stage 3 North Booster Pad -> launches +Y onto Stage 4 Stair-Tower Bastion (Z = 280)
+⋮----
+// =========================================================================
+// STAGE 4: CHECKPOINT 4, GRAND CITADEL STAIRCASE & 60°–62° HYPER-SLALOM
+// =========================================================================
+⋮----
+// Checkpoint 4 Lower Bastion (Z = 280)
+⋮----
+// Stair Flight D: Grand Citadel Staircase — 12 steps (16u riser x 30u tread), Z = 280 -> 472
+⋮----
+// Flanking stair parapet walls for strong architectural framing
+⋮----
+// High Slalom Launch Terrace (Z = 472)
+⋮----
+// Ramp 4A: 60° Steep Slalom Left
+⋮----
+// Ramp 4B: 62° Hyper-Steep Slalom Right
+⋮----
+// Citadel Hyper-Arch framing Ramp 4B
+⋮----
+// Final Hyper-Launch Pad -> launches high onto Stage 5 Citadel Finish Arena (Z = 520)
+⋮----
+// =========================================================================
+// STAGE 5: CITADEL FINISH ARENA & VICTORY OVERLOOK STAIRS
+// =========================================================================
+⋮----
+// Stair Flight E: 6 steps (16u riser x 28u tread) up to Victory Overlook Podium (Z = 616)
+⋮----
+// =========================================================================
+// GLOBAL FAIL FLOOR TELEPORT TRIGGER
+// =========================================================================
+⋮----
+// =========================================================================
+// INITIAL VPHYSICS RIGID BODIES (WEAPONS, COMBAT TARGETS & CRATES)
+// =========================================================================
+const createRigidBodies = (): SourceRigidBody[] =>
+⋮----
+// --- Stage 0: Spawn Armory Weapons & Target Gallery ---
+⋮----
+// --- Stage 1: Mid-Air Sniper Gallery Targets ---
+⋮----
+// --- Stage 2: Checkpoint Deck Resupply, Guard & Low-Route Targets ---
+⋮----
+// --- Stage 3: Skybridge USP Resupply & Crates ---
+⋮----
+// --- Stage 4: Citadel Stair Tower Garrison & Armory Pedestal ---
+⋮----
+// --- Stage 5: Citadel Finish Arena Garrison & Victory Crate Pyramid ---
+</file>
+
+<file path="src/maps/surfSandbox04.ts">
+// src/maps/surfSandbox04.ts
+import { f32 } from '../core/constants';
+import { BrushBuilder, ConvexBrush, TriggerVolume } from '../physics/BrushBuilder';
+import {
+  createArticulatedRagdoll,
+  createBoxRigidBody,
+  createFourWheelVehicle,
+  createVerletRope,
+  createWeaponRigidBody,
+  LadderVolume,
+  SourceJoint,
+  SourceRigidBody,
+  SourceRope,
+  SourceVehicle,
+  SpawnPoint,
+  WaterVolume,
+} from '../physics/GoldSrcPhysicsEngine';
+import { MapBuildResult, WorldSign } from './surfSandbox01';
+⋮----
+export interface SubsystemMapBuildResult extends MapBuildResult {
+  createJoints: () => SourceJoint[];
+  createRopes: () => SourceRope[];
+  createWaterVolumes: () => WaterVolume[];
+  createVehicles: () => SourceVehicle[];
+  ladders: LadderVolume[];
+}
+⋮----
+/**
+ * Adds a functional LadderVolume plus non-blocking side rails & thin visual rungs
+ * so the player sees clear ladder geometry aligned to the climb surface.
+ */
+function addLadderAssembly(
+  builder: BrushBuilder,
+  ladders: LadderVolume[],
+  opts: {
+    id: string;
+    /** Center X/Y of the ladder face plane */
+    faceX: number;
+    faceY: number;
+    bottomZ: number;
+    topZ: number;
+    width: number;
+    normalX: number;
+    normalY: number;
+    climbSpeed?: number;
+  },
+): void
+⋮----
+/** Center X/Y of the ladder face plane */
+⋮----
+// Tangent along ladder width
+⋮----
+//maxZ: topZ + 12,
+⋮----
+// Backplate strip painted with high-contrast booster/hazard style for visibility
+⋮----
+// Visual climb rungs every 24u (thin 2u depth so they don't snag StepMove)
+⋮----
+export function buildSurfSandbox04(): SubsystemMapBuildResult
+⋮----
+yaw: f32(0), // Facing East (+X) toward Bay 1 Prop & Buoyancy Lab
+⋮----
+// =========================================================================
+// CENTRAL HUB DECK (Z = 200)
+// =========================================================================
+⋮----
+// Corner directional pylons
+⋮----
+// =========================================================================
+// BAY 1 (+X): TACTILE PROPS, GRAVITY GUN, VERLET ROPES & BUOYANCY TANK
+// =========================================================================
+// Main prop workshop slab (X: 520..1180)
+⋮----
+// Tank perimeter decks surrounding recessed pool [X: 1180..1660, Y: -340..340]
+⋮----
+// Pool basin bottom & inner retaining walls
+⋮----
+// Pool exit ladder on West basin wall (normal +X into pool)
+⋮----
+// Prop calibration table & overhead Verlet Rope Gantry
+⋮----
+// =========================================================================
+// BAY 2 (+Y): ARTICULATED RAGDOLLS & BREAKABLE JOINTS ARENA
+// =========================================================================
+⋮----
+// 16u step-up blast stage (StepMove friendly)
+⋮----
+// Remote blast button pad on West flank (safely triggers explosion at ragdoll stage center)
+⋮----
+// Overhead gallows beam for Verlet-suspended ragdoll
+⋮----
+// Door frame for breakable hinged door test (East side of Bay 2)
+⋮----
+// =========================================================================
+// BAY 3 (-Y): 4-WHEEL RAYCAST VEHICLE PROVING TRACK
+// =========================================================================
+⋮----
+// Perimeter retaining curbs (56u tall)
+⋮----
+// Washboard suspension test ribs (8u tall x 28u wide) along straightaway
+⋮----
+// Smooth 22° double-sided vehicle jump kicker on South return straight
+⋮----
+// Low-angle side ramp for rollover & chassis contact verification
+⋮----
+// =========================================================================
+// BAY 4 (-X): 3-TIER LADDER TOWER & 52° SURF RETURN (SHADOW AUTHORITY TEST)
+// =========================================================================
+// Base deck connecting Hub to Tower
+⋮----
+// Tier 1 Tower Shaft & Deck (Z = 200 -> 520)
+⋮----
+// Tier 2 Shaft & Deck (Z = 520 -> 840) + 48u Crouch Hatch at top
+⋮----
+// 48u Crouch Hatch frame across Tier 2 deck
+⋮----
+// Tier 3 Upper Mast & Summit Overlook (Z = 840 -> 1120)
+⋮----
+// 52° Surf Return Ramp from Summit (-X, Z=1080) back toward Hub (+X, Z=420)
+// Props perched on the ramp test one-way Player Shadow surf immunity.
+⋮----
+// Start / End timer triggers for optional Tower-to-Hub climb+surf loop
+⋮----
+// Global fail teleport below track/pool
+⋮----
+// =========================================================================
+// SUBSYSTEM FACTORIES (RIGID BODIES, JOINTS, ROPES, WATER, VEHICLES)
+// =========================================================================
+⋮----
+const buildRagdollAndJointData = (): { bodies: SourceRigidBody[]; joints: SourceJoint[] } =>
+⋮----
+// --- Hub Pedestal Weapons ---
+⋮----
+// --- Bay 1: Mass Calibration Props (Foam, Wood, Heavy Steel) ---
+⋮----
+// --- Bay 1: TGS Soft + NGS 3-Tier Stability Stack ---
+⋮----
+// --- Bay 1: Verlet Rope Swinging Crate ---
+⋮----
+// --- Bay 1: Buoyancy Tank Floaters & Sinkers ---
+⋮----
+// --- Bay 2: Articulated Ragdolls & Breakable Hinged Door ---
+⋮----
+// --- Bay 3: 4-Wheel Raycast Vehicle Chassis & Slalom Pylons ---
+⋮----
+// --- Bay 4: Surf Ramp Shadow Authority Test Props ---
+⋮----
+// Pendulum distance constraint pinning swinging crate to Bay 1 gantry beam
+⋮----
+// Breakable hinge pins for Bay 2 door
+⋮----
+// Pin hanging ragdoll head to overhead gallows beam
+⋮----
+const createRigidBodies = (): SourceRigidBody[] =>
+const createJoints = (): SourceJoint[] =>
+⋮----
+const createRopes = (): SourceRope[] =>
+⋮----
+// Visual/physical Verlet cable for Bay 1 swinging pendulum crate
+⋮----
+// Free-draping cable across Bay 1 gantry posts
+⋮----
+// Suspension tether on Bay 2 hanging ragdoll
+⋮----
+const createWaterVolumes = (): WaterVolume[] =>
+⋮----
+const createVehicles = (): SourceVehicle[] =>
+</file>
+
+<file path="src/render/textures.ts">
+export function makeDevGridTexture(
+  baseHex: string,
+  majorHex: string,
+  minorHex: string,
+  accentHex: string,
+  maxAnisotropy: number,
+  labelText = '64',
+  chevrons = false,
+): THREE.CanvasTexture
+⋮----
+// Minor 16u subdivisions
+⋮----
+// Optional glowing directional chevrons (for booster pads)
+⋮----
+// Major 64u border
+⋮----
+// Corner accent ticks
+⋮----
+export function makeHazardTexture(): THREE.CanvasTexture
+</file>
+
+<file path="src/ui/StageSelectPanel_bak.ts">
+import { RunTracker } from '../gameplay/RunTracker';
+import { CheckpointState } from '../physics/GoldSrcPhysicsEngine';
+⋮----
+export interface StageSelectCallbacks {
+  onSelectStage: (stage: CheckpointState, isFullRunStart: boolean) => void;
+  onResetRecords: () => void;
+}
+⋮----
+export class StageSelectPanel
+⋮----
+constructor(runTracker: RunTracker, callbacks: StageSelectCallbacks)
+⋮----
+// Header
+⋮----
+// Stage Buttons List
+⋮----
+// PB Splits & Gold Segments Section
+⋮----
+public refresh(): void
+</file>
+
+<file path="src/main.ts">
+// src/main.ts
+⋮----
+import { SurfApp } from './app/SurfApp';
+</file>
+
+<file path=".gitignore">
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Directory for instrumented libs generated by jscoverage/JSCover
+lib-cov
+
+# Coverage directory used by tools like istanbul
+coverage
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
+.grunt
+
+# Bower dependency directory (https://bower.io/)
+bower_components
+
+# node-waf configuration
+.lock-wscript
+
+# Compiled binary addons (https://nodejs.org/api/addons.html)
+build/Release
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Snowpack dependency directory (https://snowpack.dev/)
+web_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variable files
+.env
+.env.*
+!.env.example
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# Next.js build output
+.next
+out
+
+# Nuxt.js build / generate output
+.nuxt
+dist
+.output
+
+# NitroJS
+.nitro/
+
+# Gatsby files
+.cache/
+# Comment in the public line in if your project uses Gatsby and not Next.js
+# https://nextjs.org/blog/next-9-1#public-directory-support
+# public
+
+# vuepress build output
+.vuepress/dist
+
+# vuepress v2.x temp directory
+.temp
+
+# Sveltekit cache directory
+.svelte-kit/
+
+# vitepress build output
+**/.vitepress/dist
+
+# vitepress cache directory
+**/.vitepress/cache
+
+# Docusaurus cache and generated files
+.docusaurus
+
+# Serverless directories
+.serverless/
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# Firebase cache directory
+.firebase/
+
+# TernJS port file
+.tern-port
+
+# Stores Visual Studio Code versions used for testing Visual Studio Code extensions
+.vscode-test
+
+# pnpm
+.pnpm-store
+
+# yarn v3
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Vite files
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+.vite/
+
+# Astro generated types
+.astro/
+
+# Turbo Repo (https://turborepo.dev/)
+.turbo
+
+# Nx (https://nx.dev/)
+.nx/cache
+.nx/workspace-data
+.nx/migrate-runs
+</file>
+
+<file path="LICENSE">
+MIT License
+
+Copyright (c) 2026 McCartney Mo 
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "moduleResolution": "bundler",
+    "types": ["vite/client"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true
+  },
+  "include": ["src"]
+}
+</file>
+
+<file path="vite.config.ts">
+// vite.config.ts
+import { defineConfig } from 'vite';
+import { viteSingleFile } from 'vite-plugin-singlefile';
+⋮----
+assetsInlineLimit: 100_000_000, // Inline any fonts, audio, or textures as data URLs
+</file>
+
+<file path="src/audio/SurfAudioEngine.ts">
+// src/audio/SurfAudioEngine.ts
+import { computeAngleVectors, RigidBodyKind, Vec3 } from '../physics/GoldSrcPhysicsEngine';
+⋮----
+/** 1 Hammer unit = 0.01905 meters -> Speed of sound 343 m/s ≈ 18005.25 Hammer u/s */
+⋮----
+export interface ListenerKinematics {
+  pos: Vec3;
+  vel: Vec3;
+  yaw: number;
+  /** Camera pitch (+up); converted internally to Source pitch (+down) */
+  pitch: number;
+}
+⋮----
+/** Camera pitch (+up); converted internally to Source pitch (+down) */
+⋮----
+interface SpatialCue {
+  gain: number;
+  pan: number;
+  dopplerRatio: number;
+  lowpassHz: number;
+}
+⋮----
+export class SurfAudioEngine
+⋮----
+public unlock(): void
+⋮----
+// Velocity-reactive aerodynamic wind rush
+⋮----
+// Continuous surf-ramp slide hum (active during MoveState.SURF, n_z < 0.7)
+⋮----
+public setMuted(muted: boolean): void
+⋮----
+public updateListener(kinematics: ListenerKinematics): void
+⋮----
+private computeSpatialCue(
+    sourcePos?: Vec3,
+    sourceVel: Vec3 = { x: 0, y: 0, z: 0 },
+    refDistHu = 240,
+  ): SpatialCue
+⋮----
+private createSpatialOut(cue: SpatialCue): AudioNode
+⋮----
+public updateContinuous(
+    speed3D: number,
+    isSurfing: boolean,
+    isPaused: boolean,
+    surfNormalZ = 0,
+  ): void
+⋮----
+public playLand(impactSpeed: number): void
+⋮----
+public playJump(): void
+⋮----
+public playBoost(): void
+⋮----
+public playExplosion(origin: Vec3, radius: number): void
+⋮----
+public playScoutShot(): void
+⋮----
+public playUspShot(silenced: boolean): void
+⋮----
+public playSilencerToggle(attaching: boolean): void
+⋮----
+public playKnifeSwing(heavy: boolean): void
+⋮----
+public playImpact(
+    pos: Vec3,
+    material: 'world' | 'prop' | 'blood' | 'weapon',
+    impulseMag = 1200,
+    sourceVel: Vec3 = { x: 0, y: 0, z: 0 },
+  ): void
+⋮----
+public playRigidBodyClatter(pos: Vec3, impulseMag: number, kind: RigidBodyKind): void
+⋮----
+public playDryFire(): void
+⋮----
+public playReload(): void
+⋮----
+public playWeaponDrop(): void
+⋮----
+public playWeaponPickup(): void
+⋮----
+public playScopeZoom(): void
+⋮----
+public playPlayerHurt(damage: number): void
+⋮----
+public playPlayerDeath(): void
+⋮----
+public playTeleport(): void
+⋮----
+public playWeaponSwitch(): void
+⋮----
+public playStartBeep(): void
+⋮----
+public playFinishChime(): void
+</file>
+
+<file path="src/core/constants.ts">
+// src/core/constants.ts
+</file>
+
+<file path="src/gameplay/RunTracker.ts">
+import { FIXED_DT } from '../core/constants';
+⋮----
+export type RunState = 'IDLE' | 'RUNNING' | 'FINISHED';
+⋮----
+export interface StoredCheckpointSplit {
+  index: number;
+  label: string;
+  elapsedSec: number;
+  segmentSec: number;
+}
+⋮----
+export interface CheckpointSplitResult {
+  index: number;
+  label: string;
+  elapsedSec: number;
+  segmentSec: number;
+  pbSplitSec: number | null;
+  deltaSec: number | null;
+  bestSegmentSec: number | null;
+  isNewBestSegment: boolean;
+  isRanked: boolean;
+}
+⋮----
+export interface RunFinishResult {
+  finishSec: number;
+  isNewPb: boolean;
+  deltaSec: number | null;
+  topTimes: number[];
+  isRanked: boolean;
+}
+⋮----
+interface PersistedRunData {
+  topTimes: number[];
+  pbSplits: Record<number, StoredCheckpointSplit>;
+  bestSegments: Record<number, number>;
+}
+⋮----
+export class RunTracker
+⋮----
+constructor()
+⋮----
+public get pbSec(): number | null
+⋮----
+public get topRuns(): readonly number[]
+⋮----
+public get elapsedSec(): number
+⋮----
+public get isRanked(): boolean
+⋮----
+public getTopTimes(): readonly number[]
+⋮----
+public getPbSplits(): Readonly<Record<number, StoredCheckpointSplit>>
+⋮----
+public getBestSegments(): Readonly<Record<number, number>>
+⋮----
+public getCurrentSplits(): ReadonlyMap<number, CheckpointSplitResult>
+⋮----
+public getElapsedSec(nowTick = this.currentTick): number
+⋮----
+public getCurrentElapsedSec(): number
+⋮----
+public start(tick: number): void
+⋮----
+public tick(currentTick: number): void
+⋮----
+/** Marks the current run unranked (e.g., checkpoint respawn or stage warp) while keeping live split deltas active */
+public invalidateRankedRun(): void
+⋮----
+public recordCheckpoint(index: number, label: string, tick: number): CheckpointSplitResult
+⋮----
+public finish(tick: number): RunFinishResult | null
+⋮----
+public reset(): void
+⋮----
+public clearAllRecords(): void
+⋮----
+// Ignore storage access errors
+⋮----
+private loadFromStorage(): void
+⋮----
+// Ignore malformed storage entries
+⋮----
+private saveToStorage(): void
+⋮----
+// Ignore storage quota / privacy mode errors
+⋮----
+public static formatTime(sec: number): string
+⋮----
+public static formatDelta(deltaSec: number): string
+</file>
+
+<file path="src/gameplay/WeaponSystem.ts">
+// src/gameplay/WeaponSystem.ts
+import { f32 } from '../core/constants';
+import {
+  ACTOR_I32_BASE_INDEX,
+  ActorI32,
+  F32,
+  HitGroup,
+  I32,
+  PhysicsMemoryAbi,
+} from '../core/memoryAbi';
+import {
+  computeAngleVectors,
+  createWeaponRigidBody,
+  GoldSrcPhysicsEngine,
+  SourceRigidBody,
+  Vec3,
+  WeaponSlot,
+} from '../physics/GoldSrcPhysicsEngine';
+import { SurfAudioEngine } from '../audio/SurfAudioEngine';
+import { ViewmodelRig } from '../render/ViewmodelRig';
+import { WorldRenderer } from '../render/WorldRenderer';
+import { InputController } from './InputController';
+⋮----
+export interface GunSlotState {
+  owned: boolean;
+  clip: number;
+  clipMax: number;
+  reserve: number;
+  silenced?: boolean;
+}
+⋮----
+export interface GrenadeSlotState {
+  owned: boolean;
+  count: number;
+  maxCount: number;
+}
+⋮----
+export interface WeaponHudSnapshot {
+  activeSlot: WeaponSlot;
+  scout: GunSlotState;
+  usp: GunSlotState;
+  knifeOwned: boolean;
+  grenade?: GrenadeSlotState;
+  reloading: boolean;
+  reloadProgress: number;
+  scopeZoom: 0 | 1 | 2;
+  nearbyPickupLabel: string | null;
+}
+⋮----
+export interface WeaponSystemCallbacks {
+  onToast?: (msg: string, color: string) => void;
+  onHitMarker?: (isBlood: boolean, isKill: boolean) => void;
+  onActiveSlotChanged?: (slot: WeaponSlot) => void;
+  onPlayerFired?: (origin: Vec3, soundRadiusHu: number) => void;
+  onActorKilled?: (victimId: number, hitGroup: HitGroup) => void;
+}
+⋮----
+export class WeaponSystem
+⋮----
+constructor(
+    abi: PhysicsMemoryAbi,
+    physics: GoldSrcPhysicsEngine,
+    audio: SurfAudioEngine,
+    viewmodel: ViewmodelRig,
+    renderer: WorldRenderer,
+    input: InputController,
+    callbacks: WeaponSystemCallbacks = {},
+  )
+⋮----
+public getActiveSlot(): WeaponSlot
+⋮----
+public getMoveSpeed(): number
+⋮----
+public resetLoadout(): void
+⋮----
+public selectSlot(slot: number, silent = false): boolean
+⋮----
+public quickSwitch(): void
+⋮----
+public handlePrimaryPress(nowSec: number): void
+⋮----
+public handleSecondaryPress(nowSec: number): void
+⋮----
+public tryReload(nowSec: number): boolean
+⋮----
+/** Drop active firearm (Slot 1 or 2) into the world as a VPhysics rigid body */
+public dropActiveWeapon(): void
+⋮----
+pickupCooldownTick: tick + 85, // 0.85s auto-pickup cooldown
+⋮----
+// Auto-switch to next available weapon
+⋮----
+/** Manual pickup via E key (swaps if that weapon slot is already occupied) */
+public tryPickupLookedWeapon(): boolean
+⋮----
+/** Per-frame update: reload/restock completion, held-fire repeat, auto-pickup, and pickup prompt */
+public update(nowSec: number): void
+⋮----
+// 1. Finish active reload or grenade restock
+⋮----
+// 2. Continuous hold-to-slash for knife
+⋮----
+// 3. Auto-pickup when walking over a ground weapon for an empty slot
+⋮----
+// 4. Highlight nearest looked-at ground weapon for HUD prompt
+⋮----
+public getHudSnapshot(nowSec: number): WeaponHudSnapshot
+⋮----
+private throwGrenade(nowSec: number, underhand: boolean): void
+⋮----
+// Wall-safe spawn clamp so throwing flush against a brush never starts solid
+⋮----
+private equipGroundWeapon(body: SourceRigidBody, allowSwap: boolean): boolean
+⋮----
+private fireScout(nowSec: number): void
+⋮----
+private fireUsp(nowSec: number): void
+⋮----
+private fireHitscanRay(
+    range: number,
+    spreadRad: number,
+    damage: number,
+    armorRatio: number,
+    impulseMag: number,
+    tracerColor: number,
+    soundRadiusHu: number,
+  ): void
+⋮----
+// Notify enemy bots of gunshot sound cue
+⋮----
+// Hitscan against BSP brushes, VPhysics props, AND segmented actor hitboxes
+⋮----
+// 1. Segmented actor hitbox strike (Head 4.0x, Stomach 1.25x, Chest 1.0x, Legs 0.75x)
+⋮----
+// 2. VPhysics rigid body prop / dummy
+⋮----
+// 3. Static world brush
+⋮----
+private performKnifeAttack(nowSec: number, heavy: boolean): void
+⋮----
+// Check segmented actor hitboxes first for close-quarters melee
+⋮----
+private setScopeZoom(level: 0 | 1 | 2): void
+⋮----
+private cancelReload(): void
+</file>
+
+<file path="src/maps/mapRegistry.ts">
+// src/maps/mapRegistry.ts
+import { buildSurfSandbox01, MapBuildResult } from './surfSandbox01';
+import { buildSurfSandbox02 } from './surfSandbox02';
+import { buildSurfSandbox03 } from './surfSandbox03';
+import { buildSurfSandbox04 } from './surfSandbox04';
+⋮----
+export type MapId = 'surf_sandbox_01' | 'surf_sandbox_02' | 'surf_sandbox_03' | 'surf_sandbox_04';
+⋮----
+export interface MapDefinition {
+  id: MapId;
+  name: string;
+  shortName: string;
+  stages: number;
+  difficulty: 'TIER 1' | 'TIER 2' | 'TIER 3' | 'TIER 4';
+  description: string;
+  build: () => MapBuildResult;
+}
+⋮----
+export function getMapById(id: MapId): MapDefinition
+</file>
+
+<file path="src/maps/surfSandbox02.ts">
+// src/maps/surfSandbox02.ts
+import { ConvexBrush, TriggerVolume } from '../physics/BrushBuilder';
+import {
+  createBoxRigidBody,
+  createTargetRigidBody,
+  createWeaponRigidBody,
+  SourceRigidBody,
+  SpawnPoint,
+} from '../physics/GoldSrcPhysicsEngine';
+import { WorldSign } from './surfSandbox01';
+⋮----
+export interface SurfMap02Data {
+  brushes: ConvexBrush[];
+  triggers: TriggerVolume[];
+  signs: WorldSign[];
+  spawn: SpawnPoint;
+  createRigidBodies: () => SourceRigidBody[];
+}
+⋮----
+type BrushStyle = ConvexBrush['style'];
+⋮----
+function makeBoxBrush(
+  id: string,
+  minX: number,
+  maxX: number,
+  minY: number,
+  maxY: number,
+  minZ: number,
+  maxZ: number,
+  style: BrushStyle = 'slate',
+): ConvexBrush
+⋮----
+/**
+ * Symmetric A-frame surf ramp running along X (default height/halfW = 1.25 -> ~51.3 deg, n_z = 0.625 < 0.7).
+ */
+function makeSurfRampX(
+  id: string,
+  x0: number,
+  x1: number,
+  yCenter: number,
+  halfW: number,
+  zBot: number,
+  zTop: number,
+  style: BrushStyle = 'ramp',
+): ConvexBrush
+⋮----
+// +Y surf slope
+⋮----
+// -Y surf slope
+⋮----
+// -X end cap
+⋮----
+// +X end cap
+⋮----
+// Bottom
+⋮----
+export function buildSurfSandbox02(): SurfMap02Data
+⋮----
+// =========================================================================
+// 1. SPAWN DECK & COMBAT / WEAPON RANGE
+// =========================================================================
+⋮----
+// =========================================================================
+// 2. STAGE 1 — DUAL SURF RAMPS + BOOSTER PAD
+// =========================================================================
+⋮----
+// =========================================================================
+// 3. STAGE 2 — CHECKPOINT DECK, STEEP 58° SURF RAMPS & BLAST ZONE
+// =========================================================================
+⋮----
+// =========================================================================
+// 4. STAGE 3 — FINAL SURF LAUNCH & COMBAT FINISH ARENA
+// =========================================================================
+⋮----
+// =========================================================================
+// 5. GLOBAL FAIL FLOOR TELEPORT TRIGGER
+// =========================================================================
+⋮----
+// =========================================================================
+// 6. WORLD SIGNS
+// =========================================================================
+⋮----
+// =========================================================================
+// 7. INITIAL VPHYSICS RIGID BODIES (TARGETS, CRATES, GROUND WEAPONS)
+// =========================================================================
+const createRigidBodies = (): SourceRigidBody[] =>
+</file>
+
+<file path="src/physics/BrushBuilder.ts">
+import { f32 } from '../core/constants';
+⋮----
+export type TriggerType = 'start' | 'end' | 'push' | 'teleport' | 'checkpoint' | 'explosion';
+⋮----
+export interface PushTriggerMeta {
+  mode?: string;
+  dirX?: number;
+  dirY?: number;
+  dirZ?: number;
+  addSpeed?: number;
+  minSpeedXY?: number;
+  minVelZ?: number;
+  cooldownTicks?: number;
+}
+⋮----
+export interface TeleportTriggerMeta {
+  dest?: {
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    pitch: number;
+  };
+}
+⋮----
+export interface CheckpointTriggerMeta {
+  index?: number;
+  label?: string;
+  respawnX?: number;
+  respawnY?: number;
+  respawnZ?: number;
+  respawnYaw?: number;
+  respawnPitch?: number;
+  respawnVelX?: number;
+  respawnVelY?: number;
+  respawnVelZ?: number;
+}
+⋮----
+export interface ExplosionTriggerMeta {
+  originX?: number;
+  originY?: number;
+  originZ?: number;
+  maxDamage?: number;
+  radius?: number;
+  pushScale?: number;
+  cooldownTicks?: number;
+}
+⋮----
+export type TriggerMeta = Partial<
+  PushTriggerMeta & TeleportTriggerMeta & CheckpointTriggerMeta & ExplosionTriggerMeta
+>;
+⋮----
+export interface TriggerVolume {
+  id: string;
+  type: TriggerType;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  meta: TriggerMeta;
+}
+⋮----
+export type Vec3Tuple = [number, number, number];
+export type BrushStyle = 'slate' | 'ramp' | 'steep' | 'walkable' | 'booster' | 'finish';
+⋮----
+export interface BrushPlane {
+  nx: number;
+  ny: number;
+  nz: number;
+  d: number;
+}
+⋮----
+export interface RenderFace extends BrushPlane {
+  verts: Vec3Tuple[];
+}
+⋮----
+export interface ConvexBrush {
+  id: string;
+  style: BrushStyle;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  planes: BrushPlane[];
+  renderFaces: RenderFace[];
+}
+⋮----
+export interface SurfRampOptions {
+  start: Vec3Tuple;
+  end: Vec3Tuple;
+  angleDeg?: number;
+  height?: number;
+  topWidth?: number;
+  sides?: 'both' | 'left' | 'right';
+  style?: BrushStyle;
+}
+⋮----
+export class BrushBuilder
+⋮----
+private makePlaneFromFace(verts: Vec3Tuple[], centroid: Vec3Tuple): RenderFace | null
+⋮----
+// Ensure outward normal: centroid must satisfy dot(n, centroid) < d
+⋮----
+public addConvexBrush(id: string, faces: Vec3Tuple[][], style: BrushStyle = 'slate'): ConvexBrush
+⋮----
+public addBoxBrush(
+    id: string,
+    minX: number,
+    minY: number,
+    minZ: number,
+    maxX: number,
+    maxY: number,
+    maxZ: number,
+    style: BrushStyle = 'slate',
+  ): ConvexBrush
+⋮----
+[p001, p101, p111, p011], // +Z top
+[p000, p010, p110, p100], // -Z bottom
+[p100, p110, p111, p101], // +X
+[p000, p001, p011, p010], // -X
+[p010, p011, p111, p110], // +Y
+[p000, p100, p101, p001], // -Y
+⋮----
+public addSurfRampBrush(id: string, opts: SurfRampOptions): ConvexBrush
+⋮----
+// Unit left vector in GoldSrc Z-up: (-dirY, dirX, 0)
+⋮----
+[sTL, sTR, eTR, eTL], // Top spine
+[sBL, eBL, eBR, sBR], // Bottom flat
+[sTL, eTL, eBL, sBL], // Left sloped face
+[sTR, sBR, eBR, eTR], // Right sloped face
+[sTL, sBL, sBR, sTR], // Start cap
+[eTL, eTR, eBR, eBL], // End cap
+⋮----
+public addTrigger(
+      id: string,
+      type: TriggerType,
+      minX: number,
+      minY: number,
+      minZ: number,
+      maxX: number,
+      maxY: number,
+      maxZ: number,
+      meta: TriggerMeta = {},
+    ): void
+</file>
+
+<file path="src/styles/sandbox.css">
+:root {
+⋮----
+* {
+⋮----
+html,
+⋮----
+#viewport {
+⋮----
+/* Screen feedback flashes (teleport / boost / finish) */
+#screen-flash {
+⋮----
+/* ==================== HUD LAYER ==================== */
+#hud {
+⋮----
+/* Classic crisp CS 1.6 crosshair */
+#crosshair {
+.ch-line {
+.ch-top    { width: 2px; height: 6px; left: 11px; top: 2px; }
+.ch-bottom { width: 2px; height: 6px; left: 11px; bottom: 2px; }
+.ch-left   { width: 6px; height: 2px; top: 11px; left: 2px; }
+.ch-right  { width: 6px; height: 2px; top: 11px; right: 2px; }
+.ch-dot    { width: 2px; height: 2px; top: 11px; left: 11px; background: rgba(255, 255, 255, 0.85); }
+⋮----
+/* Top-Center Run Timer & Splits */
+#timer-panel {
+.timer-card {
+.timer-badge {
+.timer-badge.running {
+.timer-badge.finished {
+#run-time {
+#run-delta {
+.delta-ahead { color: #34d399; }
+.delta-behind { color: #fb7185; }
+.delta-neutral { color: #64748b; }
+⋮----
+.pb-strip {
+.pb-strip strong { color: #fbbf24; }
+.top3-sep { color: rgba(148, 163, 184, 0.35); }
+⋮----
+/* Top-Left Zone & Status Banner */
+#top-left-status {
+.status-pill {
+.dot {
+#debug-pill {
+#debug-pill.active { display: inline-flex; }
+⋮----
+/* Center Toast Banner */
+#event-toast {
+#event-toast.visible {
+⋮----
+/* Center-Lower Speedometer & Strafe Sync */
+#speed-cluster {
+⋮----
+/* Live Keycaps + Strafe Sync Bar */
+#strafe-overlay {
+#strafe-overlay.hidden { display: none; }
+⋮----
+.key-grid {
+.keycap {
+.keycap.active {
+.keycap.warn-w.active {
+.key-aux {
+.keycap-wide {
+⋮----
+.sync-box {
+.sync-header {
+#sync-pct {
+.sync-track {
+#sync-bar {
+.yaw-meter {
+.yaw-center {
+#yaw-pip {
+⋮----
+/* Digital Speedometer Card */
+.speed-card {
+.speed-main-row {
+#speed-xy {
+.speed-unit {
+#speed-gain {
+.speed-sub-row {
+.speed-sub-row span strong {
+⋮----
+/* Bottom-Left Weapon Selector */
+#weapon-hud {
+.weapon-slot {
+.weapon-slot.active {
+.weapon-key {
+.weapon-spd {
+⋮----
+/* Bottom-Right Classic CS 1.6 net_graph */
+#net-graph {
+.ng-row {
+.ng-muted { color: #94a3b8; }
+.ng-surf  { color: #22d3ee; font-weight: 800; }
+.ng-air   { color: #fbbf24; font-weight: 800; }
+.ng-gnd   { color: #4ade80; font-weight: 800; }
+⋮----
+/* ==================== MENU / CVAR OVERLAY ==================== */
+#menu-overlay {
+#menu-overlay.hidden {
+⋮----
+.menu-shell {
+⋮----
+.menu-header {
+.brand-title {
+.brand-tag {
+.menu-header h1 {
+.menu-subtitle {
+⋮----
+.cta-row {
+#btn-play {
+#btn-play:hover {
+#btn-play:active { transform: translateY(1px); }
+⋮----
+#btn-restart-menu {
+#btn-restart-menu:hover { background: rgba(51, 65, 85, 0.9); }
+⋮----
+#lock-hint {
+⋮----
+.tip-banner {
+.tip-badge {
+⋮----
+.menu-grid {
+⋮----
+.panel-box {
+.panel-title {
+⋮----
+/* Preset Segmented Toggle */
+.preset-group {
+.preset-btn {
+.preset-btn small {
+.preset-btn.active {
+⋮----
+/* Sliders */
+.slider-row {
+.slider-row:last-child { margin-bottom: 0; }
+.slider-meta {
+.slider-meta label { color: #cbd5e1; }
+.slider-val { color: var(--accent-cyan); font-weight: 700; }
+input[type="range"] {
+⋮----
+/* Toggle switches */
+.toggle-list {
+.toggle-row {
+.toggle-row small {
+.toggle-row input[type="checkbox"] {
+⋮----
+/* Hotkeys Footer */
+.hotkey-bar {
+.hk kbd {
+⋮----
+/* --- Subsystem HUD Overlays --- */
+#interact-prompt {
+#interact-prompt.visible {
+.interact-kbd {
+⋮----
+#phys-held-panel,
+#phys-held-panel.visible,
+⋮----
+.sub-panel-header,
+.sub-badge {
+.badge-cyan { background: rgba(34, 211, 238, 0.18); color: #22d3ee; border: 1px solid rgba(34, 211, 238, 0.45); }
+.badge-emerald { background: rgba(52, 211, 153, 0.18); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.45); }
+.badge-amber { background: rgba(251, 191, 36, 0.18); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.45); }
+⋮----
+.sub-panel-meta,
+.sub-panel-meta strong,
+.sub-hint { color: #38bdf8; font-size: 10px; }
+⋮----
+.ladder-bar-track {
+#ladder-bar {
+⋮----
+/* Vehicle HUD */
+#vehicle-hud {
+.veh-hb {
+.veh-hb.active {
+.veh-speed { font-size: 13px; color: #cbd5e1; }
+.veh-speed strong { font-size: 17px; color: #fbbf24; }
+⋮----
+.veh-bars {
+.veh-bar-row {
+.veh-track {
+#veh-throttle-fill {
+.veh-center-tick {
+#veh-steer-pip {
+⋮----
+.veh-wheels {
+.wheel-cell {
+.wheel-cell.contact {
+.whl-bar {
+.whl-bar i {
+⋮----
+/* Vitals pill (bottom-left) */
+#vitals-hud {
+.vital-item { display: flex; align-items: baseline; gap: 6px; }
+.vital-item strong { font-size: 15px; color: #f8fafc; }
+.vital-item strong.low { color: #fb7185; }
+.vital-sep { width: 1px; height: 18px; background: rgba(148, 163, 184, 0.25); }
+⋮----
+/* Crosshair feedback states */
+#crosshair.grav-holding .ch-line { background: #22d3ee; box-shadow: 0 0 8px rgba(34, 211, 238, 0.85); }
+#crosshair.can-interact .ch-dot { background: #fbbf24; transform: scale(1.6); }
+⋮----
+/* Extra net_graph MoveState colors */
+.ng-ladder { color: #34d399; font-weight: 700; }
+.ng-water { color: #38bdf8; font-weight: 700; }
+⋮----
+@media (max-width: 640px) {
+⋮----
+#net-graph { display: none; }
+#weapon-hud { bottom: 110px; left: 10px; }
+.speed-card { min-width: 170px; padding: 6px 14px; }
+#speed-xy { font-size: 34px; }
+.menu-shell { padding: 16px; }
+</file>
+
+<file path="src/ui/CombatHudOverlay.ts">
+// src/ui/CombatHudOverlay.ts
+import { PlayerVitalState } from '../physics/GoldSrcPhysicsEngine';
+import { WeaponHudSnapshot } from '../gameplay/WeaponSystem';
+⋮----
+export class CombatHudOverlay
+⋮----
+constructor()
+⋮----
+public triggerHitMarker(isBlood: boolean, isKill: boolean): void
+⋮----
+public update(dt: number, vitals: Readonly<PlayerVitalState>, weapon: WeaponHudSnapshot): void
+⋮----
+// Scope overlay
+⋮----
+// Hitmarker decay
+⋮----
+// Pickup prompt
+⋮----
+// Death overlay
+⋮----
+// HP & Blood
+⋮----
+// Weapon slots (1, 2, 3, 5)
+⋮----
+// Ammo readout & context hint
+⋮----
+// Reload / restock bar
+⋮----
+private injectStyles(): void
+</file>
+
+<file path="src/ui/MenuController.ts">
+// src/ui/MenuController.ts
+import { f32 } from '../core/constants';
+import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
+import { DEFAULT_MAP_ID, getMapById, MAP_LIST, MapId } from '../maps/mapRegistry';
+⋮----
+export interface MenuCallbacks {
+  onPlay: () => void;
+  onRestart: () => void;
+  onMapSelect: (mapId: MapId) => void;
+  onSensitivityChange: (sens: number) => void;
+  onBaseFovChange: (fov: number) => void;
+  onScout260Change: (enabled: boolean) => void;
+  onStrafeHudChange: (visible: boolean) => void;
+  onDebugChange: (enabled: boolean) => void;
+  onMuteChange: (muted: boolean) => void;
+}
+⋮----
+export class MenuController
+⋮----
+constructor(
+    abi: PhysicsMemoryAbi,
+    callbacks: MenuCallbacks,
+    initialMapId: MapId = DEFAULT_MAP_ID,
+  )
+⋮----
+private mountMapSelector(): void
+⋮----
+public setSelectedMap(mapId: MapId): void
+⋮----
+public setDebugChecked(checked: boolean): void
+⋮----
+public syncAll(): void
+⋮----
+private applyPreset(name: 'default' | 'hardcore'): void
+</file>
+
+<file path="index.html">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CS 1.6 Surf — Phase 1 Offline Movement Sandbox</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <canvas id="viewport"></canvas>
+  <div id="screen-flash"></div>
+
+  <div id="hud">
+    <div id="top-left-status">
+      <div class="status-pill">
+        <span class="dot"></span>
+        <span>surf_sandbox_01 • 100Hz WASM ABI</span>
+      </div>
+      <div id="debug-pill" class="status-pill">
+        <span>DEBUG WIREFRAMES ACTIVE [F2]</span>
+      </div>
+    </div>
+
+    <div id="timer-panel">
+      <div class="timer-card">
+        <span id="timer-state" class="timer-badge">READY</span>
+        <span id="run-time">00:00.00</span>
+        <span id="run-delta" class="delta-neutral">--.--</span>
+      </div>
+      <div class="pb-strip">
+        <span>PB: <strong id="pb-display">--:--.--</strong></span>
+        <span class="top3-sep">|</span>
+        <span id="top3-display">TOP 3: --</span>
+      </div>
+    </div>
+
+    <div id="event-toast"></div>
+
+    <div id="crosshair" aria-hidden="true">
+      <div class="ch-line ch-top"></div>
+      <div class="ch-line ch-bottom"></div>
+      <div class="ch-line ch-left"></div>
+      <div class="ch-line ch-right"></div>
+      <div class="ch-line ch-dot"></div>
+    </div>
+
+    <div id="weapon-hud">
+      <div class="weapon-slot active" data-slot="1">
+        <span><span class="weapon-key">[1]</span>SCOUT</span>
+        <span class="weapon-spd" id="spd-slot-1">250 u/s</span>
+      </div>
+      <div class="weapon-slot" data-slot="2">
+        <span><span class="weapon-key">[2]</span>USP .45</span>
+        <span class="weapon-spd">250 u/s</span>
+      </div>
+      <div class="weapon-slot" data-slot="3">
+        <span><span class="weapon-key">[3]</span>KNIFE</span>
+        <span class="weapon-spd">250 u/s</span>
+      </div>
+      <div class="weapon-slot" data-slot="4">
+              <span><span class="weapon-key">[4]</span>PHYS GUN</span>
+              <span class="weapon-spd">PID 260kg</span>
+            </div>
+    </div>
+
+    <div id="speed-cluster">
+      <div id="strafe-overlay">
+        <div class="key-grid">
+          <div></div>
+          <div class="keycap warn-w" id="key-w">W</div>
+          <div></div>
+          <div class="keycap" id="key-a">A</div>
+          <div class="keycap" id="key-s">S</div>
+          <div class="keycap" id="key-d">D</div>
+        </div>
+        <div class="key-aux">
+          <div class="keycap keycap-wide" id="key-jump">JUMP</div>
+          <div class="keycap keycap-wide" id="key-duck">DUCK</div>
+        </div>
+        <div class="sync-box">
+          <div class="sync-header">
+            <span>STRAFE SYNC</span>
+            <span id="sync-pct">0%</span>
+          </div>
+          <div class="sync-track"><div id="sync-bar"></div></div>
+          <div class="yaw-meter">
+            <div class="yaw-center"></div>
+            <div id="yaw-pip"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="speed-card">
+        <div class="speed-main-row">
+          <span id="speed-xy">0</span>
+          <span class="speed-unit">u/s</span>
+          <span id="speed-gain"></span>
+        </div>
+        <div class="speed-sub-row">
+          <span>3D <strong id="speed-3d">0</strong></span>
+          <span>PEAK <strong id="speed-peak">0</strong></span>
+          <span>Z <strong id="speed-z">0</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="net-graph">
+      <div class="ng-row">
+        <span>fps: <strong id="ng-fps">0</strong></span>
+        <span>tick: <strong>100 Hz</strong></span>
+      </div>
+      <div class="ng-row">
+        <span>sim: <strong id="ng-sim">0.00</strong> ms</span>
+        <span class="ng-muted">lerp: 0.0ms (WASM ABI)</span>
+      </div>
+      <div class="ng-row">
+        <span>state: <span id="ng-state" class="ng-gnd">GROUND</span></span>
+        <span>hull: <strong id="ng-hull">72u</strong></span>
+      </div>
+      <div class="ng-row">
+        <span>sync: <strong id="ng-sync">0%</strong></span>
+        <span class="ng-muted" id="ng-cvars">aa:100 mv:3500</span>
+      </div>
+      <div class="ng-row">
+              <span>bodies: <strong id="ng-bodies">0/0</strong></span>
+              <span>joints: <strong id="ng-joints">0/0</strong></span>
+            </div>
+            <div class="ng-row">
+              <span>fluid: <strong id="ng-water">0%</strong></span>
+              <span class="ng-muted" id="ng-subsys">SUBSYS: IDLE</span>
+            </div>
+    </div>
+    <!-- Contextual Interaction Prompt (Pickup / Board Vehicle / Ladder) -->
+        <div id="interact-prompt" aria-live="polite">
+          <span id="interact-key" class="interact-kbd">E</span>
+          <span id="interact-label">INTERACT</span>
+        </div>
+
+        <!-- Gravity Gun PID Hold Telemetry -->
+        <div id="phys-held-panel">
+          <div class="sub-panel-header">
+            <span class="sub-badge badge-cyan">PID LOCK</span>
+            <span id="held-body-name">PROP</span>
+          </div>
+          <div class="sub-panel-meta">
+            <span>MASS <strong id="held-body-mass">0 kg</strong></span>
+            <span>DIST <strong id="held-body-dist">120u</strong></span>
+            <span class="sub-hint">[LMB] PUNT • [RMB] DROP</span>
+          </div>
+        </div>
+
+        <!-- Ladder Climb Telemetry -->
+        <div id="ladder-hud">
+          <div class="sub-panel-header">
+            <span class="sub-badge badge-emerald">LADDER</span>
+            <span id="ladder-id">lad_tower_1</span>
+          </div>
+          <div class="ladder-stats">
+            <span>ALT <strong id="ladder-z">0u</strong></span>
+            <span>CLIMB <strong id="ladder-vz">0 u/s</strong></span>
+          </div>
+          <div class="ladder-bar-track"><div id="ladder-bar"></div></div>
+        </div>
+
+        <!-- 4-Wheel Raycast Vehicle Telemetry (Visible while driving) -->
+        <div id="vehicle-hud">
+          <div class="veh-top">
+            <span class="sub-badge badge-amber">4WD BUGGY</span>
+            <span id="veh-hb-badge" class="veh-hb">HB</span>
+            <span class="veh-speed"><strong id="veh-kmh">0</strong> km/h</span>
+          </div>
+          <div class="veh-bars">
+            <div class="veh-bar-row">
+              <span>THR</span>
+              <div class="veh-track"><div id="veh-throttle-fill"></div></div>
+            </div>
+            <div class="veh-bar-row">
+              <span>STR</span>
+              <div class="veh-track veh-track-center">
+                <div class="veh-center-tick"></div>
+                <div id="veh-steer-pip"></div>
+              </div>
+            </div>
+          </div>
+          <div class="veh-wheels">
+            <div class="wheel-cell" id="whl-0"><span>FL</span><div class="whl-bar"><i id="whl-bar-0"></i></div></div>
+            <div class="wheel-cell" id="whl-1"><span>FR</span><div class="whl-bar"><i id="whl-bar-1"></i></div></div>
+            <div class="wheel-cell" id="whl-2"><span>RL</span><div class="whl-bar"><i id="whl-bar-2"></i></div></div>
+            <div class="wheel-cell" id="whl-3"><span>RR</span><div class="whl-bar"><i id="whl-bar-3"></i></div></div>
+          </div>
+        </div>
+
+        <!-- Vitals Bar (HP & Blood mL from GoldSrcPhysicsEngine.getVitals()) -->
+        <div id="vitals-hud">
+          <div class="vital-item">
+            <span>HP</span>
+            <strong id="vital-hp">100</strong>
+          </div>
+          <div class="vital-sep"></div>
+          <div class="vital-item">
+            <span>BLOOD</span>
+            <strong id="vital-blood">5000 mL</strong>
+          </div>
+        </div>
+  </div>
+
+  <div id="menu-overlay">
+    <div class="menu-shell">
+      <div class="menu-header">
+        <div>
+          <div class="brand-title">
+            <span class="brand-tag">PHASE 1 SANDBOX</span>
+            <h1>CS 1.6 Surf — GoldSrc 100Hz Physics Core</h1>
+          </div>
+          <div class="menu-subtitle">
+            Deterministic Float32 Linear Memory ABI • Swept AABB Convex Brushes • Procedural Dev-Grid Map
+          </div>
+        </div>
+      </div>
+
+      <div class="cta-row">
+        <button id="btn-play" type="button">CLICK TO SURF (POINTER LOCK)</button>
+        <button id="btn-restart-menu" type="button">RESET RUN [R]</button>
+        <div id="lock-hint"></div>
+      </div>
+
+      <div class="tip-banner">
+        <span class="tip-badge">SURF TIP</span>
+        <span>
+          Hold <strong>D</strong> on left-side ramps, <strong>A</strong> on right-side ramps, and <strong>never hold W in mid-air!</strong>
+          Match your mouse yaw smoothly to the ramp angle to accelerate past 2500+ u/s. Turn left at spawn to test the 30°/46°/52°/60° calibration wedges &amp; 48u crouch tunnel.
+        </span>
+      </div>
+
+      <div class="menu-grid">
+        <div class="panel-box">
+          <div class="panel-title">
+            <span>Server Physics CVars</span>
+            <span id="preset-indicator" style="color: #fbbf24;">DEFAULT</span>
+          </div>
+
+          <div class="preset-group">
+            <button type="button" class="preset-btn active" id="preset-default">
+              DEFAULT SURF
+              <small>aa 100 • maxvel 3500</small>
+            </button>
+            <button type="button" class="preset-btn" id="preset-hardcore">
+              HARDCORE PRESET
+              <small>aa 150 • maxvel 4500</small>
+            </button>
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-airaccel">sv_airaccelerate</label>
+              <span class="slider-val" id="val-airaccel">100</span>
+            </div>
+            <input type="range" id="sl-airaccel" min="10" max="250" step="5" value="100" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-maxvel">sv_maxvelocity</label>
+              <span class="slider-val" id="val-maxvel">3500</span>
+            </div>
+            <input type="range" id="sl-maxvel" min="1500" max="6000" step="100" value="3500" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-gravity">sv_gravity</label>
+              <span class="slider-val" id="val-gravity">800</span>
+            </div>
+            <input type="range" id="sl-gravity" min="400" max="1200" step="20" value="800" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-sens">Mouse Sensitivity</label>
+              <span class="slider-val" id="val-sens">1.80</span>
+            </div>
+            <input type="range" id="sl-sens" min="0.4" max="5.0" step="0.05" value="1.80" />
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-meta">
+              <label for="sl-fov">Base FOV (Scales +22° at 3000+ u/s)</label>
+              <span class="slider-val" id="val-fov">90°</span>
+            </div>
+            <input type="range" id="sl-fov" min="75" max="110" step="1" value="90" />
+          </div>
+        </div>
+
+        <div class="panel-box">
+          <div class="panel-title">
+            <span>Movement, Weapon &amp; HUD Options</span>
+          </div>
+
+          <div class="toggle-list">
+            <label class="toggle-row">
+              <span>
+                Auto-Bhop (Hold Space)
+                <small>Jump immediately on ground touch (Mouse Wheel also jumps)</small>
+              </span>
+              <input type="checkbox" id="tg-autobhop" checked />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Legacy Scout 260 u/s
+                <small>CS 1.6 classic Scout base ground speed (260 vs 250 u/s)</small>
+              </span>
+              <input type="checkbox" id="tg-scout260" />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Strafe Sync &amp; Keycap HUD
+                <small>Live yaw-to-strafe efficiency percentage &amp; key overlay</small>
+              </span>
+              <input type="checkbox" id="tg-strafe" checked />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Mapper Debug Wireframes [F2]
+                <small>Show trigger volumes (start/end/push/tp) &amp; convex hulls</small>
+              </span>
+              <input type="checkbox" id="tg-debug" />
+            </label>
+
+            <label class="toggle-row">
+              <span>
+                Mute Procedural Audio
+                <small>Wind rush, ramp slide hum, booster whoosh, landing thuds</small>
+              </span>
+              <input type="checkbox" id="tg-mute" />
+            </label>
+          </div>
+
+          <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(148,163,184,0.12); font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: #94a3b8; line-height: 1.55;">
+            Fixed Hulls: <span style="color:#e2e8f0;">32×32×72u</span> (stand) / <span style="color:#e2e8f0;">32×32×36u</span> (duck)<br/>
+            Fixed Ground CVars: <span style="color:#e2e8f0;">accel=10 • fric=4 • stop=100 • edge=2</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hotkey-bar">
+        <span class="hk"><kbd>W A S D</kbd> Move / Strafe</span>
+        <span class="hk"><kbd>SPACE</kbd> / <kbd>WHEEL</kbd> Jump</span>
+        <span class="hk"><kbd>CTRL</kbd> / <kbd>C</kbd> Duck (36u Hull)</span>
+        <span class="hk"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> Weapons</span>
+        <span class="hk"><kbd>R</kbd> Restart Run</span>
+        <span class="hk"><kbd>F2</kbd> Debug Triggers</span>
+        <span class="hk"><kbd>TAB</kbd> / <kbd>ESC</kbd> Menu</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+</file>
+
+<file path="package.json">
+{
+  "name": "surf-web-cs1.6",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite --host",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.23.0",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.23.0",
+  "type": "module",
+  "dependencies": {
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.187.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vite-plugin-singlefile": "^2.3.4"
+  }
+}
+</file>
+
+<file path="src/gameplay/InputController.ts">
+// src/gameplay/InputController.ts
+⋮----
+import { SpawnPoint } from '../physics/GoldSrcPhysicsEngine';
+⋮----
+export interface KeyState {
+  w: boolean;
+  a: boolean;
+  s: boolean;
+  d: boolean;
+  jump: boolean;
+  duck: boolean;
+  attack1: boolean;
+  attack2: boolean;
+  use: boolean;
+  reload: boolean;
+}
+⋮----
+export interface InputCallbacks {
+  onUnlockRequest?: () => void;
+  onSelectWeapon?: (slot: number) => void;
+  onQuickSwitch?: () => void;
+  onDropWeapon?: () => void;
+  onPickupWeapon?: () => void;
+  onReloadOrReset?: () => void;
+  onResetRun?: () => void;
+  onToggleDebug?: () => void;
+  onAttack1Press?: () => void;
+  onAttack2Press?: () => void;
+}
+⋮----
+export class InputController
+⋮----
+constructor(canvas: HTMLCanvasElement, spawn: SpawnPoint, callbacks: InputCallbacks = {})
+⋮----
+public resetView(yaw: number, pitch: number): void
+⋮----
+/** Apply recoil view punch in radians (+pitch kicks upward) */
+public applyRecoilKick(pitchRad: number, yawRad: number): void
+⋮----
+public consumeScrollJump(): boolean
+⋮----
+public consumeTickYawDelta(): number
+⋮----
+public decayVisuals(dtSec: number): void
+⋮----
+public requestLock(): void
+⋮----
+private openMenu(): void
+⋮----
+private closeMenu(): void
+⋮----
+// CS 1.6 m_yaw = 0.022 deg per count (scaled when scoped)
+</file>
+
+<file path="src/render/ViewmodelRig.ts">
+// src/render/ViewmodelRig.ts
+⋮----
+export class ViewmodelRig
+⋮----
+constructor()
+⋮----
+// --- Slot 1: Steyr Scout .308 ---
+⋮----
+// --- Slot 2: USP .45 Tactical ---
+⋮----
+// --- Slot 3: Combat Knife ---
+⋮----
+// --- Slot 5: HE Fragmentation Grenade ---
+⋮----
+public setActiveSlot(slot: number): void
+⋮----
+public setUspSilenced(silenced: boolean): void
+⋮----
+public setScoped(scoped: boolean): void
+⋮----
+public setGrenadeCount(count: number): void
+⋮----
+private syncVisibility(): void
+⋮----
+public triggerDeploy(): void
+⋮----
+public triggerFire(slot: 1 | 2, silenced = false): void
+⋮----
+public triggerKnifeAttack(heavy: boolean): void
+⋮----
+public triggerGrenadeThrow(underhand = false): void
+⋮----
+public triggerReload(durationSec = 1.15): void
+⋮----
+private resetGrenadeParts(): void
+⋮----
+public update(
+    dt: number,
+    spdXY: number,
+    grounded: boolean,
+    strafeA: boolean,
+    strafeD: boolean,
+    swayX: number,
+    swayY: number,
+  ): void
+⋮----
+// Walk bobbing & air drift
+⋮----
+// Decay deploy, recoil, flash, bolt cycle, reload, knife, and grenade timers
+⋮----
+// Scout bolt-action handle motion
+⋮----
+// Reload / grenade restock dip & tilt
+⋮----
+// Knife slash / heavy stab swing kinematics
+⋮----
+// HE Grenade pin-pull -> throw follow-through -> re-draw next grenade
+⋮----
+// Phase 1: Pull pin outward to the left and wind arm back
+⋮----
+// Phase 2: Fast forward throw release (spoon pops, grenade leaves hand)
+⋮----
+// Phase 3: Re-draw next grenade from below if any remain
+</file>
+
+<file path="src/ui/HudController.ts">
+// src/ui/HudController.ts
+import { MoveState } from '../core/constants';
+import { KeyState } from '../gameplay/InputController';
+import { RunTracker } from '../gameplay/RunTracker';
+import { PlayerVitalState, SourceVehicle } from '../physics/GoldSrcPhysicsEngine';
+⋮----
+export interface HeldPropTelemetry {
+  id: string;
+  mass: number;
+  holdDistance: number;
+}
+⋮----
+export interface LadderTelemetry {
+  id: string;
+  progressPct: number; // 0..100
+  posZ: number;
+  velZ: number;
+}
+⋮----
+progressPct: number; // 0..100
+⋮----
+export interface InteractPrompt {
+  key: string;
+  label: string;
+}
+⋮----
+export interface SubsystemTelemetry {
+  activeBodies: number;
+  totalBodies: number;
+  intactJoints: number;
+  totalJoints: number;
+  waterSubmersion: number; // 0..1
+  heldProp: HeldPropTelemetry | null;
+  ladder: LadderTelemetry | null;
+  drivingVehicle: {
+    vehicle: SourceVehicle;
+    speedUnits: number;
+  } | null;
+  interactPrompt: InteractPrompt | null;
+  vitals: Readonly<PlayerVitalState>;
+}
+⋮----
+waterSubmersion: number; // 0..1
+⋮----
+export interface HudGrenadeBadge {
+  count: number;
+  maxCount: number;
+}
+⋮----
+export interface HudSnapshot {
+  now: number;
+  spdXY: number;
+  spd3D: number;
+  velZ: number;
+  simMsAvg: number;
+  syncPct: number;
+  smoothYawVisual: number;
+  moveState: number;
+  ducking: boolean;
+  keys: KeyState;
+  cvarLabel: string;
+  subsystems?: SubsystemTelemetry;
+  grenade?: HudGrenadeBadge;
+}
+⋮----
+type MovementKey = 'w' | 'a' | 's' | 'd' | 'jump' | 'duck';
+⋮----
+export class HudController
+⋮----
+// Slot 5 (HE Grenade) badge in the main HUD weapon bar
+⋮----
+// Subsystem HUD nodes (optional lookup keeps backwards compatibility)
+⋮----
+constructor(runTracker: RunTracker)
+⋮----
+/** Locate existing Slot 5 weapon card or inject one next to the existing .weapon-slot cards */
+private ensureSlot5Element(): void
+⋮----
+public showToast(msg: string, borderColor = 'rgba(34,211,238,0.5)'): void
+⋮----
+public flashScreen(colorRgba: string): void
+⋮----
+public setScoutSpeedLabel(legacy260: boolean): void
+⋮----
+public setGrenadeAmmo(count: number, maxCount: number): void
+⋮----
+public setStrafeHudVisible(visible: boolean): void
+⋮----
+public setActiveWeaponSlot(slot: number): void
+⋮----
+public update(snap: HudSnapshot): void
+⋮----
+// FPS counter
+⋮----
+// Live keycaps
+⋮----
+// Strafe sync bar & yaw indicator
+⋮----
+// Run timer & PB delta
+⋮----
+// net_graph state & CVars
+⋮----
+// Slot 5 grenade badge
+⋮----
+// Subsystem overlays
+⋮----
+private updateSubsystems(sub: SubsystemTelemetry): void
+⋮----
+// 1. Contextual interact prompt
+⋮----
+// Crosshair feedback
+⋮----
+// 2. Gravity Gun held prop PID panel
+⋮----
+// 3. Ladder climb panel
+⋮----
+// 4. Raycast Vehicle panel
+⋮----
+// 1 Hammer unit ~= 0.01905m -> u/s * 0.06858 ~= km/h
+⋮----
+// 5. Vitals
+⋮----
+// 6. net_graph subsystem counters
+⋮----
+private refreshPbDisplay(): void
+⋮----
+private updateSpeedColor(speed: number): void
+</file>
+
+<file path="README.md">
+# surf-web-cs1.6
+Demo: https://theinkspots.github.io/surf-web-cs1.6/
+
+<img width="2491" height="1167" alt="image" src="https://github.com/user-attachments/assets/92dda728-00fe-45f7-a1fb-8b497154bfba" />
+
+###1. Core Gameplay & Match Rules
+The game is a browser-based, first-person multiplayer movement shooter replicating Counter-Strike 1.6 Surf mechanics. Matches operate on a dedicated, room-based server model with two configurable team structures controlled by the Room Master:
+
+Two-Team Competitive Surf (CT vs. T): Players split into Counter-Terrorists and Terrorists. Both teams surf parallel or shared courses toward a map finish zone. Reaching the end teleports the winner to a vantage/armory room ("Jail" or "Finish Arena") to eliminate opposing players who fail to finish before the round timer expires.
+
+Single-Team / Time-Trial Mode (Room Master Toggle): All players join a single unified roster with PvP damage disabled. Gameplay focuses purely on stage completion, personal bests, and live server leaderboard records.
+
+Player Collision (semiclip): Solid player-vs-player collision is disabled by default during surfing so players never block each other on ramps or spawns; nearby teammates/opponents dynamically fade in opacity based on proximity to preserve clear sightlines.
+
+Weapon Movement Speeds: Equipping specific classic weapons alters base max ground speed (250 u/s with Knife, USP, Glock, or Scout; 260 u/s with Scout zoomed-out legacy profile if enabled by room preset), while airborne surf velocity remains governed by sv_maxvelocity.
+
+###2. Deterministic GoldSrc Physics Specification
+To achieve authentic CS 1.6 surf feel, movement runs at a fixed 100 Hz (10 ms timestep) simulation rate using exact GoldSrc player bounding hulls ($32 \times 32 \times 72$ units standing; $32 \times 32 \times 36$ units ducking) and swept AABB collision traces.
+
+Server Physics CVars (Default & Room Presets)
+Parameter	Default Value	Hardcore Preset	Role in Simulation
+sv_airaccelerate	100	150	Multiplier controlling air-strafe acceleration responsiveness
+sv_maxvelocity	3500	4500	Hard speed cap per axis / total velocity clamp
+sv_gravity	800	800	Downward gravitational acceleration ($u/s^2$)
+sv_accelerate	10	10	Ground movement acceleration
+sv_friction	4	4	Ground deceleration (bypassed on surf ramps)
+sv_stopspeed	100	100	Minimum threshold for ground friction deceleration
+edgefriction	2	2	Ground edge friction multiplier (inactive while airborne)
+Surf Mechanics & Edge-Case Behavior
+Air-Strafe Wishspeed Cap: In GoldSrc's air-acceleration formula, the player's desired horizontal speed is clamped to a maximum cap of $30.0\text{ u/s}$ before projecting current velocity onto the wish direction:
+
+$$v_{\text{add}} = \min(\text{wishspeed}, 30.0) - (\vec{v} \cdot \hat{w})$$
+Because acceleration scales off the perpendicular difference between look/strafe direction ($\hat{w}$) and current velocity ($\vec{v}$), turning smoothly while holding A or D adds velocity every tick without hitting the $30\text{ u/s}$ projection ceiling.
+
+Ramp Sliding & Slope Detection: Any surface whose plane normal has a vertical component $n_z < 0.7$ (angles steeper than $\approx 45.5^\circ$, typically $30^\circ\text{–}60^\circ$ surf wedges) is classified as non-walkable. The player remains in the airborne state (FL_ONGROUND unset), preventing ground friction from triggering while ClipVelocity projects momentum smoothly along the ramp plane.
+
+Ramp Entry & Angle Matching: Entering a ramp while holding A (for a ramp on the left) or D (for a ramp on the right) presses the player's velocity vector into the angled plane. Smoothly matching mouse yaw rotation to the ramp's curvature maintains a near-$90^\circ$ angle between $\vec{v}$ and $\hat{w}$, maximizing per-tick speed gain.
+
+Airtime Chaining & Triggers: Leaving a ramp transitions seamlessly into standard air-strafing until the next ramp intercept. Touching flat ground ($n_z \ge 0.7$) either applies instant ground friction or triggers a trigger_teleport fail-state back to the current stage start.
+
+Boosters (trigger_push): Volume triggers configured with directional vectors and impulse magnitudes apply either additive velocity (preserving existing momentum) or velocity overrides (launching players across large gaps).
+
+Edge Boosts ("Perfs"): Flicking toward the top lip of a ramp right at apex separation redirects horizontal ramp speed upward without clipping the top flat surface, converting stored horizontal speed into vertical lift.
+
+###3. Dual-Format Map Pipeline
+The map loader supports both a modern 3D creator workflow and native legacy CS 1.6 map assets so community mappers can use Blender, TrenchBroom, or classic .bsp files.
+
+Primary Modern Format: glTF 2.0 (.glb) + Entity Naming Convention
+Creators build maps in Blender (or any 3D DCC tool) and export a single binary .glb file. The importer parses mesh node prefixes and custom properties automatically:
+
+col_ramp_* / col_solid_*: Static collision geometry decomposed into convex hulls and indexed into a Bounding Volume Hierarchy (BVH) for fast swept-box collision.
+
+trig_start / trig_end: Run timer start and finish volumes.
+
+trig_tp_<id> & dest_tp_<id>: Fail-zone teleporters and linked destination nodes (preserving or resetting velocity based on node metadata).
+
+trig_push_<id>: Directional booster pads with custom properties for direction (vec3) and speed (float).
+
+spawn_ct / spawn_t: Team spawn transforms.
+
+Zombie Escape Extensibility: The same .glb schema supports func_breakable (shootable barricades with HP metadata) and func_door (timed hold-point gates) so Zombie Escape maps can be imported without changing the underlying map format.
+
+Legacy CS 1.6 Format: GoldSrc .bsp (v30) & .wad
+Geometry & Hulls: Parses GoldSrc BSP lumps directly—specifically Hull 1 (standing player) and Hull 2 (crouching player) pre-compiled clipnodes—giving 1:1 collision parity with original CS 1.6 surf maps (surf_ski_2, surf_green, etc.).
+
+Textures & Lighting: Extracts embedded textures or resolves external .wad archives, applying original pre-baked lightmap lumps (LUMP_LIGHTING) for authentic visual tone and ultra-fast rendering.
+
+Entity Lump Parsing: Maps classic GoldSrc entities (info_player_start, info_player_deathmatch, trigger_teleport, info_teleport_destination, trigger_push, func_illusionary, func_wall) directly into the engine's runtime entity system.
+
+###4. Technical Architecture & WebAssembly (Wasm) Stack
+To guarantee zero physics drift between client prediction and server authority, the simulation core is written once in Rust and compiled to WebAssembly.
+
+Shared Wasm Simulation Core
+Single Source of Truth: Both the browser client and the authoritative game server load the exact same .wasm physics binary.
+
+Zero-Copy Shared Memory: Input commands, player state structs (position, velocity, view angles, duck state, ground flags), and BSP/BVH collision trees live in linear Wasm memory, read directly via typed views without JSON serialization overhead.
+
+Deterministic Fixed Timestep: Runs strictly at 100 ticks/sec (dt = 0.01s). Given identical input packets and tick numbers, client and server produce bit-identical coordinates.
+
+Client-Side Architecture (TypeScript + WebGL2 / WebGPU)
+Rendering Engine: Lightweight custom renderer built on Three.js (WebGL2 / WebGPU backend) with custom shaders supporting GoldSrc lightmaps, skyboxes, world-space grid overlays (optional mapper debug mode), and dynamic FOV scaling at high velocities.
+
+Input & Camera Pipeline: Uses the Pointer Lock API with raw unaccelerated mouse deltas (movementX/movementY). Mouse look updates at the monitor's native refresh rate (144Hz–240Hz+) for silky-smooth angle matching, while movement commands are sampled and quantized into 100Hz tick packets.
+
+Client-Side Prediction & Reconciliation: The client runs the Wasm physics step immediately on local input, stores a ring buffer of recent predicted states, and reconciles against authoritative server snapshots—replaying unacknowledged inputs only if a misprediction occurs (e.g., an external trigger_push or teleporter).
+
+Remote Entity Interpolation: Other players are rendered with a configurable 20–30 ms interpolation buffer, smoothly interpolating between authoritative server snapshots so nearby surfers glide without jitter.
+
+Spatial Audio (Web Audio API): Velocity-reactive wind rush audio (pitch and gain scaled from 500 u/s to 3500 u/s), classic CS 1.6 landing thuds, teleporter whooshes, and weapon audio.
+
+Backend & Multiplayer Networking
+Authoritative Tick Server: Node.js / Bun host running the shared Wasm physics module at 100 Hz per active room instance.
+
+Transport Layer: WebTransport (unreliable UDP-like datagrams for 100Hz movement/snapshot packets + reliable streams for chat, map load, and scoreboard events) with automatic fallback to WebSockets (binary ArrayBuffer frames) on browsers/networks blocking QUIC.
+
+Bandwidth Optimization: Binary bit-packed delta snapshots transmitting only active player transforms within visibility/proximity bounds, keeping bandwidth under ~15–25 KB/s per client even in 32-player surf lobbies.
+
+Map & Asset Delivery: Custom .glb and .bsp maps uploaded by room hosts are validated, hashed, and cached on object storage/CDN so joining players download the map binary once via HTTP range requests before entering the room.
+
+###5. HUD & Surf Telemetry Specification
+Speedometer: Center-lower digital readout displaying live horizontal speed (u/s), total 3D speed, and session peak velocity with color shifts at speed milestones (1000, 2000, 3000+ u/s).
+
+Strafe Sync & Angle Helper (Toggleable): Live percentage indicator showing how efficiently mouse yaw movements align with active A/D strafe inputs.
+
+Run Timer & Splits: Stage timer, total map timer, delta comparison against personal best (-0.42s), and top-3 server record overlay.
+
+Classic net_graph Overlay: Compact corner telemetry showing current ping (ms), server tickrate (100 Hz), packet loss (0%), and interpolation delay (lerp).
+
+###6. Phased Implementation Roadmap
+Phase 1 — Offline Wasm Movement Sandbox: Build the Rust/C++ Wasm physics core (PM_AirAccelerate, PM_ClipVelocity, hulls) paired with a browser test map containing standard $30^\circ\text{–}60^\circ$ ramps, boosters, and HUD speedometer to dial in exact CS 1.6 movement feel.
+
+Phase 2 — Dual Map Importer (.glb + .bsp): Implement the BVH collision builder for .glb scenes and the GoldSrc v30 .bsp / .wad parser with trigger volume detection.
+
+Phase 3 — Authoritative Multiplayer & Prediction: Stand up the 100Hz tick server, WebTransport/WebSocket binary protocol, client-side prediction/reconciliation, and semiclip interpolation.
+
+Phase 4 — Room Lobbies, Teams & Leaderboards: Add Room Master controls (1-team vs. 2-team mode, CVar presets, custom map upload) and persistent map/stage time records.
+
+Would you like to begin Phase 1 by implementing the Wasm GoldSrc physics core and local testbed first, or start with the .glb / .bsp map parser and renderer?
+
+###Recommended AI-Modular Repo Structure
+To keep LLM context windows small and prevent regressions as features grow, isolate the codebase into four strict boundaries:
+
+
+/surf-game
+├── /packages/physics-wasm     # Rust (or C++20) deterministic 100Hz GoldSrc movement + BVH/BSP collision
+├── /packages/shared-protocol  # Binary packet encoders/decoders (inputs, snapshots, room CVars)
+├── /apps/client               # Vite + TypeScript + Three.js renderer, Pointer Lock, audio, HTML/CSS HUD
+└── /apps/server               # Node.js / Bun 100Hz authoritative tick server loading physics-wasm
+
+
+client:
+
+surf-sandbox/
+├── index.html
+├── package.json
+├── tsconfig.json
+└── src/
+    ├── main.ts
+    ├── styles/
+    │   └── sandbox.css
+    ├── core/
+    │   ├── constants.ts          # 100Hz tickrate, hulls, flags, buttons, state enums
+    │   ├── memoryAbi.ts          # Float32/Int32 views over WebAssembly.Memory & CVars
+    │   └── coordinates.ts        # GoldSrc (Z-up) <-> Three.js (Y-up) conversions
+    ├── physics/
+    │   ├── BrushBuilder.ts       # Convex brush plane generation, boxes & surf ramps
+    │   └── GoldSrcPhysicsEngine.ts # Swept AABB trace, PM_FlyMove, PM_AirAccelerate, triggers
+    ├── maps/
+    │   └── surfSandbox01.ts      # Ramps, boosters, 30°–60° calibration wedges, 48u tunnel
+    ├── audio/
+    │   └── SurfAudioEngine.ts    # Web Audio velocity wind, surf hum, jump/land/boost SFX
+    ├── render/
+    │   ├── textures.ts           # Procedural CanvasTexture dev-grid & hazard textures
+    │   ├── ViewmodelRig.ts       # Scout, USP .45, and Knife viewmodels with sway & bob
+    │   └── WorldRenderer.ts      # Two-pass Three.js renderer, sky dome, debug wireframes
+    ├── gameplay/
+    │   ├── InputController.ts    # Pointer lock, raw mouse look, WASD, scroll jump, hotkeys
+    │   ├── RunTracker.ts         # Timer state machine, delta tracking, localStorage Top 3
+    │   └── StrafeSyncTracker.ts  # Ring-buffer strafe sync & yaw efficiency calculator
+    ├── ui/
+    │   ├── HudController.ts      # Speedometer, timer, keycaps, strafe bar, net_graph
+    │   └── MenuController.ts     # Presets, CVar sliders, toggles, restart/play actions
+    └── app/
+        └── SurfApp.ts            # Fixed 100Hz accumulator loop & subsystem wiring
+
+1. How Phase 2 Rust/C++ Wasm Binds to PhysicsMemoryAbi
+PhysicsMemoryAbi is already designed around a shared WebAssembly.Memory buffer rather than standard JavaScript objects. Connecting a Rust or C++ physics core requires four architectural pieces:
+
+Importing Linear Memory (--import-memory): By default, a compiled Wasm module allocates and exports its own internal memory block. To share PhysicsMemoryAbi, you pass the linker flag --import-memory (in both Rust's wasm32-unknown-unknown target and C++ clang --target=wasm32) and --no-entry so the module compiles as a pure library. When JavaScript calls WebAssembly.instantiate, you pass abi.memory inside the env import object—mapping Wasm's linear address space directly onto the exact same 128 KB ArrayBuffer backing abi.f32 and abi.i32.
+
+Zero-Copy Struct Mapping at Fixed Offsets: Because abi.f32 starts at byte offset 0 (0x0000) and abi.i32 starts at byte offset 1024 (0x0400), your Rust (#[repr(C)]) or C++ (struct with 4-byte alignment) code simply casts raw pointers to those exact base addresses. When TypeScript writes CMD_FMOVE, CMD_YAW, or CVAR_AIRACCEL before a tick, Wasm's simulate_tick() reads them straight from memory on the very next instruction with zero serialization, zero FFI copying, and zero garbage collection.
+
+Static Map Arena in Upper Memory: Player state and CVars only consume the first ~1.3 KB of the 128 KB buffer (expandable to more 64 KB pages if needed for large .bsp maps). Bytes 4096 (0x1000) onward serve as a static geometry arena. When a map loads, TypeScript writes the flattened convex brush planes and trigger AABBs into that upper region once and calls an exported load_map(brush_count, trigger_count) function so Wasm caches the pointers.
+
+Event Bitmasks Instead of Re-entrant Callbacks: Calling back from Wasm into JavaScript audio or HUD functions mid-tick adds FFI overhead and complicates deterministic replay or multiplayer rollback later. Instead, reserve one Int32 slot (such as I32.EVENTS) as a bitmask for jump, land, boost, teleport, start, and finish triggers, alongside a float slot for landing impact velocity. After simulate_tick() returns, SurfApp reads and clears that bitmask to trigger SurfAudioEngine and HudController.
+
+Drop-in Engine Swap: GoldSrcPhysicsEngine in TypeScript becomes a thin wrapper around the WebAssembly.Instance exports (simulate_tick, teleport_to_spawn, load_map), while WorldRenderer, InputController, HudController, and SurfAudioEngine remain completely untouched.
+</file>
+
+<file path="src/maps/surfSandbox01.ts">
+import { f32 } from '../core/constants';
+import { BrushBuilder, BrushStyle, ConvexBrush, TriggerVolume } from '../physics/BrushBuilder';
+import { createBoxRigidBody, SourceRigidBody, SpawnPoint } from '../physics/GoldSrcPhysicsEngine';
+⋮----
+export interface WorldSign {
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  text: string;
+  color: string;
+  scale: number;
+}
+⋮----
+export interface MapBuildResult {
+  brushes: ConvexBrush[];
+  triggers: TriggerVolume[];
+  signs: WorldSign[];
+  spawn: SpawnPoint;
+  createRigidBodies: () => SourceRigidBody[];
+}
+⋮----
+export function buildSurfSandbox01(): MapBuildResult
+⋮----
+// =========================================================================
+// STAGE 1: SPAWN, DROP-IN ENTRY, TRANSFER & SWEEPING CURVE
+// =========================================================================
+⋮----
+// --- 1. ELEVATED SPAWN PLATFORM ---
+⋮----
+// Start Gate pillars & trig_start volume
+⋮----
+// --- 2. RAMP 1: DROP-IN ENTRY WEDGE (50° double-sided) ---
+⋮----
+// --- 3. RAMP 2: OFFSET RIGHT-SIDE 54° SURF RAMP ---
+⋮----
+// --- 4. BOOSTER 1 (trig_push_1) + LAUNCH DECK ---
+⋮----
+// --- 5. CURVED 3-SEGMENT SURF BANK (52° -> 56° -> 58° sweeping left) ---
+⋮----
+// =========================================================================
+// STAGE 2: CHECKPOINT 2, DUAL-ANGLE SPLIT & SKY LAUNCH
+// =========================================================================
+⋮----
+// Stage 2 Checkpoint Trigger (spans exit of curved bank into Dual Split entry)
+⋮----
+// Side A (Left Branch): 48° Smooth Glide Ramp
+⋮----
+// Side B (Right Branch): 60° Steep Aggressive Speed Ramp
+⋮----
+// --- 6B. MID-AIR EXPLOSION BOOST GATE (rebalanced to ~1480 u/s arc onto Stage 3) ---
+⋮----
+// =========================================================================
+// STAGE 3: CHECKPOINT 3, HIGH-ALTITUDE APEX SWEEP & BLAST CANYON
+// =========================================================================
+⋮----
+// Stage 3 Checkpoint Trigger (covers sky deck and fly-over air corridor into Ramp 6)
+⋮----
+// --- 7. RAMP 6: 55° HIGH SPINE TURNING EAST-NORTHEAST ---
+⋮----
+// --- 8. RAMP 7: 58° APEX TURN SWEEPING SOUTHEAST ---
+⋮----
+// --- 9. RAMP 8: 60° THREAD-THE-NEEDLE DIVE + OVERHEAD ARCH ---
+⋮----
+// --- 10. BLAST CANYON (rebalanced to ~1460 u/s onto Stage 4 Slalom) ---
+⋮----
+// =========================================================================
+// STAGE 4: CHECKPOINT 4, SOUTH SLALOM, 62° HYPER-WALL & CITADEL FINISH
+// =========================================================================
+⋮----
+// Stage 4 Checkpoint Trigger (covers flight into Ramp 9 South Slalom)
+⋮----
+// --- 11. RAMP 9: 54° LEFT-SIDE SLALOM ---
+⋮----
+// --- 12. RAMP 10: 58° COUNTER-SLALOM RIGHT ---
+⋮----
+// --- 13. RAMP 11: 62° HYPER-STEEP FINALE WEDGE ---
+⋮----
+// --- 14. FINAL HYPER-LAUNCH (rebalanced to land cleanly on Citadel Finish) ---
+⋮----
+// --- 15. ELEVATED CITADEL FINISH PLATFORM (trig_end + Victory Crates) ---
+⋮----
+// =========================================================================
+// SIDE CALIBRATION & VPHYSICS PROP LAB (LEFT OF SPAWN)
+// =========================================================================
+⋮----
+// 48u Crouch-Height Hull Calibration Tunnel
+⋮----
+// Lab Blast Pad
+⋮----
+// =========================================================================
+// FAIL FLOOR TELEPORTER (covers full 4-stage world)
+// =========================================================================
+⋮----
+const createRigidBodies = (): SourceRigidBody[] =>
+⋮----
+// Calibration Lab crates
+⋮----
+// Stage 3 Sky Deck crates
+⋮----
+// Blast Canyon crates
+⋮----
+// Citadel Finish Victory Stack
+</file>
+
+<file path="src/render/WorldRenderer.ts">
+// src/render/WorldRenderer.ts
+⋮----
+import { SURF_NORMAL_Z } from '../core/constants';
+import { gsToThree } from '../core/coordinates';
+import { ConvexBrush, TriggerVolume } from '../physics/BrushBuilder';
+import {
+  LadderVolume,
+  SourceJoint,
+  SourceRigidBody,
+  SourceRope,
+  SourceVehicle,
+  Vec3,
+  WaterVolume,
+} from '../physics/GoldSrcPhysicsEngine';
+import { WorldSign } from '../maps/surfSandbox01';
+import { makeDevGridTexture, makeHazardTexture } from './textures';
+// Add to src/render/WorldRenderer.ts
+import { FL_DUCKING, FL_ONGROUND, HULL_DUCK, HULL_STAND } from '../core/constants';
+import {
+  ACTOR_F32_BASE_INDEX,
+  ACTOR_F32_STRIDE,
+  ACTOR_I32_BASE_INDEX,
+  ACTOR_I32_STRIDE,
+  ActorF32,
+  ActorI32,
+  MAX_ACTORS,
+  PhysicsMemoryAbi,
+  TeamId,
+} from '../core/memoryAbi';
+⋮----
+interface ActorRigVisual {
+  root: THREE.Group;
+  bodyPivot: THREE.Group;
+  head: THREE.Group;
+  torso: THREE.Mesh;
+  leftArm: THREE.Group;
+  rightArm: THREE.Group;
+  leftLeg: THREE.Group;
+  rightLeg: THREE.Group;
+  weaponScout: THREE.Group;
+  weaponUsp: THREE.Group;
+  weaponKnife: THREE.Group;
+  team: TeamId;
+  variant: number;
+  walkPhase: number;
+}
+interface ExplosionFx {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  age: number;
+  duration: number;
+  maxRadius: number;
+}
+⋮----
+interface TracerFx {
+  line: THREE.Line;
+  mat: THREE.LineBasicMaterial;
+  age: number;
+  duration: number;
+}
+⋮----
+interface ParticleFx {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  vel: THREE.Vector3;
+  age: number;
+  duration: number;
+  gravity: number;
+}
+⋮----
+interface DecalFx {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  age: number;
+  duration: number;
+}
+⋮----
+interface VehicleWheelVisual {
+  wheelMeshes: THREE.Group[];
+  strutLines: THREE.Line[];
+}
+⋮----
+export interface VehicleChaseCamInput {
+  pivotX: number;
+  pivotY: number;
+  pivotZ: number;
+  forwardX: number;
+  forwardY: number;
+  forwardZ: number;
+  clampedDist: number;
+  speedXY: number;
+}
+⋮----
+export class WorldRenderer
+⋮----
+// Gravity Gun PID tether beam + lock halo
+⋮----
+// Third-person vehicle chase camera spring-arm state (Hammer Z-up space)
+⋮----
+public resetVehicleChaseCamera(): void
+⋮----
+/**
+   * Computes smoothed third-person chase camera coordinates in Hammer Z-up space.
+   * Retracts fast when wall-clamped and extends smoothly when clear.
+   */
+public resolveVehicleChaseCamera(
+    dt: number,
+    input: VehicleChaseCamInput,
+  ): { x: number; y: number; z: number }
+⋮----
+// Snap inward quickly on wall collision; ease outward smoothly when clear
+⋮----
+// Subtle lift above the sightline so the roof/hood stays cleanly framed
+⋮----
+// Tighten tracking when wall-blocked so the spring never lags behind geometry
+⋮----
+// Optional speed FOV punch (+0..10 deg) you can add to your camera FOV in update()
+⋮----
+public getVehicleChaseFovOffset(): number
+⋮----
+private createActorVisual(team: TeamId, variant: number): ActorRigVisual
+⋮----
+// Distinct CS 1.6 faction palettes: T (Phoenix / Leet) vs CT (SAS / GIGN)
+⋮----
+? variant === 0 ? 0x3b3a36 : 0x5c533e  // Phoenix charcoal vs Leet olive/tan
+: variant === 0 ? 0x1e293b : 0x1d3557; // SAS dark navy vs GIGN slate blue
+⋮----
+// Track in sharedMaterials so dispose() automatically frees them
+⋮----
+// Dimensions match 72u Hammer standing height (Three.js Y-up: +X forward, +Y up, -Z left)
+⋮----
+// Team shoulder patch / visor accent
+⋮----
+// Arms pivoted at shoulders
+⋮----
+// Weapon attachments mounted to right hand
+⋮----
+// Legs pivoted at hips
+⋮----
+/** Per-frame sync for remote/bot T & CT actors (skips local player slot 0 in first-person) */
+public syncActors(abi: PhysicsMemoryAbi, dt: number, solidTeammates: boolean): void
+⋮----
+// Hide on death so VPhysics articulated ragdoll takes over seamlessly
+⋮----
+// Position root at actor feet (Hammer Z-up -> Three.js Y-up)
+⋮----
+// Crouch compression + walk/jump limb animations
+⋮----
+// Weapon aim pitch (+down Source pitch -> Z rotation in local +X forward rig)
+⋮----
+// Semiclip opacity fade for nearby teammates when mp_solid_teammates is disabled
+⋮----
+constructor(
+    canvas: HTMLCanvasElement,
+    brushes: ConvexBrush[],
+    triggers: TriggerVolume[],
+    signs: WorldSign[],
+    vmRoot: THREE.Group,
+  )
+⋮----
+// Track all shared materials so unused map styles/prop materials are still disposed cleanly
+⋮----
+// Debug joint segments
+⋮----
+// Gravity Gun PID tether + wireframe halo
+⋮----
+private disposeMaterialWithTextures(
+    mat: THREE.Material,
+    disposedMaterials: Set<THREE.Material>,
+    disposedTextures: Set<THREE.Texture>,
+  ): void
+⋮----
+public dispose(): void
+⋮----
+// Detach vmRoot without disposing it so SurfApp can reuse the viewmodel across maps
+⋮----
+public setDebugVisible(visible: boolean): void
+⋮----
+public setScopeZoom(level: 0 | 1 | 2): void
+⋮----
+/** Render translucent fluid surfaces & submerged volume tint for buoyancy tanks */
+public setWaterVolumes(volumes: readonly WaterVolume[]): void
+⋮----
+// Animated top water surface plane
+⋮----
+// Subtle volumetric depth tint
+⋮----
+/** Render emerald debug wireframes & outward normal arrows for ladders (visible under F2) */
+public setLadders(ladders: readonly LadderVolume[]): void
+⋮----
+// Outward climb normal indicator
+⋮----
+public spawnExplosionEffect(origin: Vec3, radius: number): void
+⋮----
+public spawnBulletTracer(start: Vec3, end: Vec3, color = 0xfef08a): void
+⋮----
+public spawnImpactEffect(
+    point: Vec3,
+    normal: Vec3,
+    material: 'world' | 'prop' | 'blood' | 'weapon',
+  ): void
+⋮----
+private createRigidBodyVisual(b: SourceRigidBody): THREE.Object3D
+⋮----
+// 1. Dropped weapons (Scout / USP .45)
+⋮----
+// 2. 4-Wheel Raycast Vehicle Chassis (Roll-cage buggy tub)
+⋮----
+// Roll cage pillars + roof bar
+⋮----
+// Headlights (+X front) & Taillights (-X rear)
+⋮----
+// 3. Articulated Ragdoll Segments vs Monolithic Combat Dummies
+⋮----
+// 4. Tactile Physics Props styled by role/mass
+⋮----
+public syncRigidBodies(bodies: readonly SourceRigidBody[]): void
+⋮----
+/** Sync Verlet rope/cable polylines */
+public syncRopes(ropes: readonly SourceRope[]): void
+⋮----
+/** Sync 4-wheel raycast vehicle tires (suspension travel, steering yaw, rolling spin) & struts */
+public syncVehicles(
+    vehicles: readonly SourceVehicle[],
+    bodies: readonly SourceRigidBody[],
+  ): void
+⋮----
+// Hardpoint in Three.js world space
+⋮----
+// Apply chassis orientation + front steering + rolling wheel spin around local Z axle
+⋮----
+// Update suspension strut line between chassis hardpoint and wheel hub
+⋮----
+private createVehicleWheelVisuals(veh: SourceVehicle): VehicleWheelVisual
+⋮----
+// Spoke bar makes wheel spin clearly readable while driving
+⋮----
+/** Sync debug constraint links inside debugGroup (visible when F2 debug is enabled) */
+public syncJoints(joints: readonly SourceJoint[], bodies: readonly SourceRigidBody[]): void
+⋮----
+/** Sync Gravity Gun cyan PID tether beam & lock wireframe halo */
+public syncGravityGunBeam(eyePos: Vec3 | null, heldBody: SourceRigidBody | null): void
+⋮----
+/** Unified per-frame sync for all dynamic physics subsystems */
+public syncSubsystems(
+    bodies: readonly SourceRigidBody[],
+    ropes: readonly SourceRope[],
+    vehicles: readonly SourceVehicle[],
+    joints: readonly SourceJoint[],
+    gravEyePos: Vec3 | null,
+    gravHeldBody: SourceRigidBody | null,
+  ): void
+⋮----
+public update(
+    frameDt: number,
+    rx: number,
+    ry: number,
+    eyeZ: number,
+    renderYaw: number,
+    renderPitch: number,
+    spdXY: number,
+  ): void
+⋮----
+public render(): void
+⋮----
+private buildSkyDome(): void
+⋮----
+private buildVisualWorld(
+    brushes: ConvexBrush[],
+    triggers: TriggerVolume[],
+    mats: Record<string, THREE.MeshStandardMaterial>,
+  ): void
+⋮----
+private buildWorldSigns(signs: WorldSign[]): void
+</file>
+
+<file path="src/app/SurfApp.ts">
+// src/app/SurfApp.ts
+import {
+  f32,
+  FIXED_DT,
+  FL_DUCKING,
+  FL_ONGROUND,
+  IN_DUCK,
+  IN_JUMP,
+  MoveState,
+} from '../core/constants';
+import { F32, HitGroup, I32, PhysicsMemoryAbi, TeamId } from '../core/memoryAbi';
+import {
+  CheckpointState,
+  computeAngleVectors,
+  createBoxRigidBody,
+  GoldSrcPhysicsEngine,
+  IN_ATTACK,
+  IN_ATTACK2,
+  IN_RELOAD,
+  IN_USE,
+  LadderVolume,
+  Quat,
+  SourceJoint,
+  SourceRigidBody,
+  SourceRope,
+  SourceVehicle,
+  SpawnPoint,
+  WaterVolume,
+} from '../physics/GoldSrcPhysicsEngine';
+import { MapBuildResult } from '../maps/surfSandbox01';
+import { DEFAULT_MAP_ID, getMapById, MapId } from '../maps/mapRegistry';
+import { SurfAudioEngine } from '../audio/SurfAudioEngine';
+import { WorldRenderer } from '../render/WorldRenderer';
+import { ViewmodelRig } from '../render/ViewmodelRig';
+import { InputController } from '../gameplay/InputController';
+import { RunTracker } from '../gameplay/RunTracker';
+import { StrafeSyncTracker } from '../gameplay/StrafeSyncTracker';
+import { WeaponSystem } from '../gameplay/WeaponSystem';
+import { BotController, MapNavGraph, NavWaypoint } from '../gameplay/BotController';
+import { TeamMatchManager } from '../gameplay/TeamMatchManager';
+import { HudController, InteractPrompt, SubsystemTelemetry } from '../ui/HudController';
+import { CombatHudOverlay } from '../ui/CombatHudOverlay';
+import { MenuController } from '../ui/MenuController';
+⋮----
+/** Optional subsystem & combat/nav hooks provided by extended maps */
+interface SubsystemMapExtensions {
+  createJoints?: () => SourceJoint[];
+  createRopes?: () => SourceRope[];
+  createWaterVolumes?: () => WaterVolume[];
+  createVehicles?: () => SourceVehicle[];
+  ladders?: LadderVolume[];
+  navGraph?: MapNavGraph;
+  tSpawns?: SpawnPoint[];
+  ctSpawns?: SpawnPoint[];
+}
+⋮----
+type ExtendedMapBuildResult = MapBuildResult & SubsystemMapExtensions;
+⋮----
+function wrapAngleRad(a: number): number
+⋮----
+/** Extract horizontal heading yaw from a Hammer Z-up chassis quaternion */
+function getChassisYaw(q: Quat, fallbackYaw: number): number
+⋮----
+export class SurfApp
+⋮----
+// T vs. CT match state
+⋮----
+// Subsystem interaction states
+⋮----
+constructor(canvas: HTMLCanvasElement, initialMapId: MapId = DEFAULT_MAP_ID)
+⋮----
+public loadMap(mapId: MapId, prebuilt?: MapBuildResult, announce = true): void
+⋮----
+// Initialize PODBot / ZBot AI controller
+⋮----
+// Initialize T vs. CT round & team match manager
+⋮----
+/**
+   * Generates a lightweight 4-node perimeter patrol graph around the spawn deck
+   * when a surf map does not define an explicit MapNavGraph.
+   */
+private buildFallbackNavGraph(spawn: SpawnPoint): MapNavGraph
+⋮----
+private registerMapSubsystems(mapData: ExtendedMapBuildResult): void
+⋮----
+private resetSubsystemsAndProps(): void
+⋮----
+// Clear existing joints, ropes, vehicles before repopulating
+⋮----
+private fullReset(): void
+⋮----
+// ---------------------------------------------------------------------------
+// Gravity Gun, Tactile Pickup & Vehicle Driving Actions
+// ---------------------------------------------------------------------------
+⋮----
+private setGravityGunMode(enabled: boolean): void
+⋮----
+private handlePrimaryAction(): void
+⋮----
+// Direct Gravity Gun punt impulse on looked-at rigid body
+⋮----
+private handleSecondaryAction(): void
+⋮----
+private handleUseAction(): void
+⋮----
+// 1. Exit vehicle if currently driving
+⋮----
+// 2. Drop held prop if carrying one
+⋮----
+// 3. Enter nearby vehicle
+⋮----
+// 4. Pick up looked-at weapon
+⋮----
+// 5. Tactile quick-pickup for nearby physics prop via Gravity Gun PID
+⋮----
+private findNearbyVehicle(maxRange: number): SourceVehicle | null
+⋮----
+private enterVehicle(vehicleId: string): void
+⋮----
+// Align initial camera heading with the buggy chassis
+⋮----
+private exitVehicle(announce = true): void
+⋮----
+// Classic CS 1.6 team-switch hotkey [M]
+⋮----
+// Toggle mp_solid_teammates [N] (Boosting vs. Semiclip)
+⋮----
+private spawnCrateAhead(): void
+⋮----
+private detonateBlastAhead(): void
+⋮----
+private computeInteractPrompt(): InteractPrompt | null
+⋮----
+private buildSubsystemTelemetry(): SubsystemTelemetry
+⋮----
+private stepPhysicsTick(): void
+⋮----
+// Route WASD + Space into 4-wheel raycast vehicle controller
+⋮----
+// 1. Write bot ActorInputCmds before stepping simulation
+⋮----
+// 2. Step Actor 0 + VPhysics subsystems
+⋮----
+// 3. Step bot actors through GoldSrc CGameMovement + resolve solid PvP hulls / boosting
+⋮----
+// 4. Evaluate T vs. CT round status & delayed round restart
+⋮----
+this.roundRestartAtTick = nextTick + 300; // 3.0 s round-end cooldown at 100 Hz
+⋮----
+// Sync driving state if chassis was removed/destroyed during simulateTick()
+⋮----
+/**
+   * Smoothly rotates view yaw with the buggy chassis + subtle apex look-in,
+   * while yielding immediately whenever the player free-looks with the mouse.
+   */
+private updateVehicleSteeringCamera(frameDt: number, nowSec: number): void
+⋮----
+// Detect manual mouse movement since the previous frame
+⋮----
+// 1. Inherit chassis turn delta so turning naturally carries the view
+⋮----
+// 2. Smoothly re-center behind the chassis after free-look timeout
+⋮----
+// Subtle ~8 deg apex look-in when steering forward
+⋮----
+// Clamp pitch tighter in chase cam so it won't burrow under the floor
+⋮----
+public start(): void
+</file>
+
+<file path="src/physics/GoldSrcPhysicsEngine.ts">
+// src/physics/GoldSrcPhysicsEngine.ts
+import {
+  AIR_WISH_CAP,
+  DIST_EPSILON,
+  f32,
+  FIXED_DT,
+  FL_DUCKING,
+  FL_ONGROUND,
+  HULL_DUCK,
+  HULL_STAND,
+  IN_DUCK,
+  IN_JUMP,
+  MAX_CLIP_PLANES,
+  MoveState,
+  STEPSIZE,
+  STOP_EPSILON,
+  SURF_NORMAL_Z,
+} from '../core/constants';
+import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
+import { ConvexBrush, TriggerVolume } from './BrushBuilder';
+⋮----
+export type WeaponSlot = 1 | 2 | 3 | 5;
+export type RigidBodyKind = 'prop' | 'weapon' | 'target' | 'vehicle' | 'grenade';
+export type JointKind = 'ball' | 'distance' | 'hinge' | 'fixed';
+⋮----
+export interface SpawnPoint {
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+}
+export interface GrenadeData {
+  /** World tick at which the grenade detonates */
+  detonateTick: number;
+  /** Radial impulse magnitude forwarded to applyExplosionImpulse */
+  maxDamage: number;
+  /** Blast radius in Hammer units */
+  radius: number;
+  /** Optional push scale override */
+  pushScale?: number;
+  /** Whether the blast deals HP damage to the player */
+  applyPlayerHpDamage?: boolean;
+}
+⋮----
+/** World tick at which the grenade detonates */
+⋮----
+/** Radial impulse magnitude forwarded to applyExplosionImpulse */
+⋮----
+/** Blast radius in Hammer units */
+⋮----
+/** Optional push scale override */
+⋮----
+/** Whether the blast deals HP damage to the player */
+⋮----
+export interface CheckpointState {
+  index: number;
+  label: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  velX?: number;
+  velY?: number;
+  velZ?: number;
+}
+⋮----
+/** Compact deterministic snapshot for client-side prediction / server lag compensation */
+export interface PlayerSnapshot {
+  tick: number;
+  posX: number;
+  posY: number;
+  posZ: number;
+  velX: number;
+  velY: number;
+  velZ: number;
+  baseVelX: number;
+  baseVelY: number;
+  baseVelZ: number;
+  yaw: number;
+  prevYaw: number;
+  pitch: number;
+  viewOfsZ: number;
+  flags: number;
+  moveState: number;
+  prevButtons: number;
+  surfNz: number;
+}
+⋮----
+export interface SourcePhysicsConfig {
+  sourceMaxVelocity?: number;
+  svBounce?: number;
+  playerMass?: number;
+  surfaceFriction?: number;
+  linearDamping?: number;
+  angularDamping?: number;
+  physPushScale?: number;
+  fallDamageThreshold?: number;
+  fallDamageScale?: number;
+  /** Rapier-style TGS Soft / NGS solver tuning */
+  tgsSubsteps?: number;
+  tgsIterations?: number;
+  ngsIterations?: number;
+  contactFrequencyHz?: number;
+  contactDampingRatio?: number;
+  sleepLinearThreshold?: number;
+  sleepAngularThreshold?: number;
+  sleepTimeThreshold?: number;
+  /** Player-to-VPhysics shadow controller force cap (Hammer units * mass / s) */
+  playerMaxPushForce?: number;
+  /** Enable midpoint yaw evaluation for smoother fixed-tick air-strafing */
+  subTickYaw?: boolean;
+  /** Enable ramp-seam dead-stop recovery on steep surf ramps */
+  enableRampSeamFix?: boolean;
+}
+⋮----
+/** Rapier-style TGS Soft / NGS solver tuning */
+⋮----
+/** Player-to-VPhysics shadow controller force cap (Hammer units * mass / s) */
+⋮----
+/** Enable midpoint yaw evaluation for smoother fixed-tick air-strafing */
+⋮----
+/** Enable ramp-seam dead-stop recovery on steep surf ramps */
+⋮----
+export interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+⋮----
+export interface Quat {
+  w: number;
+  x: number;
+  y: number;
+  z: number;
+}
+⋮----
+/** 3x3 row-major matrix */
+export type Mat3 = [
+  number, number, number,
+  number, number, number,
+  number, number, number,
+];
+⋮----
+export interface DroppedWeaponData {
+  slot: 1 | 2;
+  clipAmmo: number;
+  reserveAmmo: number;
+  silenced?: boolean;
+  /** World tick before which auto-pickup ignores the player who dropped it */
+  pickupCooldownTick: number;
+}
+⋮----
+/** World tick before which auto-pickup ignores the player who dropped it */
+⋮----
+export interface SourceRigidBody {
+  id: string;
+  kind?: RigidBodyKind;
+  pos: Vec3;
+  vel: Vec3;
+  quat: Quat;
+  angVel: Vec3;
+  /** Diagonal principal moments of inertia in local body frame */
+  inertiaLocal: Vec3;
+  hx: number;
+  hy: number;
+  hz: number;
+  mass: number;
+  restitution: number;
+  gravityScale: number;
+  surfaceFriction?: number;
+  /** Combat & damage state */
+  hp?: number;
+  maxHp?: number;
+  bleeds?: boolean;
+  bloodLostMl?: number;
+
+  /** Solver & buoyancy extensions */
+  sleeping?: boolean;
+  sleepTimer?: number;
+  buoyancyRatio?: number;
+  linearDrag?: number;
+  angularDrag?: number;
+  enableCcd?: boolean;
+  weaponData?: DroppedWeaponData;
+    grenadeData?: GrenadeData;
+}
+⋮----
+/** Diagonal principal moments of inertia in local body frame */
+⋮----
+/** Combat & damage state */
+⋮----
+/** Solver & buoyancy extensions */
+⋮----
+interface WaterTriggerMeta {
+  water?: boolean;
+  surfaceZ?: number;
+  density?: number;
+  linearDrag?: number;
+  angularDrag?: number;
+}
+⋮----
+// Add these interfaces & methods to src/physics/GoldSrcPhysicsEngine.ts
+import {
+  ACTOR_F32_BASE_INDEX,
+  ACTOR_F32_STRIDE,
+  ACTOR_I32_BASE_INDEX,
+  ACTOR_I32_STRIDE,
+  ActorF32,
+  ActorI32,
+  HitGroup,
+  HITGROUP_DAMAGE_MULT,
+  initActorSlot,
+  MAX_ACTORS,
+  TeamId,
+} from '../core/memoryAbi';
+⋮----
+export interface ActorInputCmd {
+  fmove: number;
+  smove: number;
+  yaw: number;
+  pitch: number; // Source pitch (+down)
+  buttons: number;
+}
+⋮----
+pitch: number; // Source pitch (+down)
+⋮----
+export interface ActorHitboxDef {
+  hitGroup: HitGroup;
+  /** Center offset relative to actor feet (Z-up) and yaw-aligned forward/right */
+  zMin: number;
+  zMax: number;
+  hx: number;
+  hy: number;
+}
+⋮----
+/** Center offset relative to actor feet (Z-up) and yaw-aligned forward/right */
+⋮----
+export interface ActorRayHitResult extends RayHitResult {
+  actorId?: number;
+  hitGroup?: HitGroup;
+}
+⋮----
+export interface ActorDamageResult {
+  appliedDamage: number;
+  armorAbsorbed: number;
+  hitGroup: HitGroup;
+  killed: boolean;
+  ragdollPrefix?: string;
+}
+⋮----
+// Authentic CS 1.6 Z-up hitbox segments relative to actor feet (pos.z - halfZ)
+⋮----
+export interface SourceJoint {
+  id: string;
+  kind: JointKind;
+  bodyAId: string;
+  /** Null or omitted pins the joint to a static world anchor */
+  bodyBId?: string | null;
+  /** Anchor in body A local coordinates */
+  localAnchorA: Vec3;
+  /** Anchor in body B local coordinates (or world coordinates when bodyBId is null) */
+  localAnchorB: Vec3;
+  /** Local hinge axis (unit vector) used by 'hinge' joints */
+  localAxisA?: Vec3;
+  localAxisB?: Vec3;
+  /** Rest length for 'distance' joints */
+  restLength?: number;
+  /** Harmonic soft compliance frequency (Hz) and damping ratio */
+  frequencyHz?: number;
+  dampingRatio?: number;
+  /** Joint severs if accumulated impulse exceeds breakForce (<= 0 = unbreakable) */
+  breakForce?: number;
+  broken?: boolean;
+  /** Warm-start cached constraint impulse */
+  lambdaX?: number;
+  lambdaY?: number;
+  lambdaZ?: number;
+}
+⋮----
+/** Null or omitted pins the joint to a static world anchor */
+⋮----
+/** Anchor in body A local coordinates */
+⋮----
+/** Anchor in body B local coordinates (or world coordinates when bodyBId is null) */
+⋮----
+/** Local hinge axis (unit vector) used by 'hinge' joints */
+⋮----
+/** Rest length for 'distance' joints */
+⋮----
+/** Harmonic soft compliance frequency (Hz) and damping ratio */
+⋮----
+/** Joint severs if accumulated impulse exceeds breakForce (<= 0 = unbreakable) */
+⋮----
+/** Warm-start cached constraint impulse */
+⋮----
+export interface RopePin {
+  /** Static world anchor if bodyId is omitted */
+  bodyId?: string | null;
+  anchor: Vec3;
+}
+⋮----
+/** Static world anchor if bodyId is omitted */
+⋮----
+export interface SourceRope {
+  id: string;
+  nodes: Vec3[];
+  prevNodes: Vec3[];
+  segmentLength: number;
+  damping: number;
+  gravityScale: number;
+  iterations: number;
+  startPin?: RopePin;
+  endPin?: RopePin;
+  collideWorld?: boolean;
+}
+⋮----
+export interface WaterVolume {
+  id: string;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  surfaceZ: number;
+  density?: number;
+  linearDrag?: number;
+  angularDrag?: number;
+  currentVel?: Vec3;
+}
+⋮----
+export interface WheelConfig {
+  /** Wheel hardpoint in chassis local space */
+  localHardpoint: Vec3;
+  restLength: number;
+  radius: number;
+  stiffness: number;
+  damping: number;
+  grip: number;
+  steerable: boolean;
+  driven: boolean;
+  /** Runtime state populated each tick */
+  compression: number;
+  prevCompression: number;
+  inContact: boolean;
+  contactPoint: Vec3;
+  contactNormal: Vec3;
+  spinAngle: number;
+}
+⋮----
+/** Wheel hardpoint in chassis local space */
+⋮----
+/** Runtime state populated each tick */
+⋮----
+export interface SourceVehicle {
+  id: string;
+  chassisId: string;
+  wheels: WheelConfig[];
+  maxSteerRad: number;
+  engineForce: number;
+  brakeForce: number;
+  /** Runtime inputs: throttle [-1, 1], steer [-1, 1], handbrake [0, 1] */
+  throttle: number;
+  steer: number;
+  handbrake: number;
+}
+⋮----
+/** Runtime inputs: throttle [-1, 1], steer [-1, 1], handbrake [0, 1] */
+⋮----
+export interface GravityGunState {
+  heldBodyId: string | null;
+  holdDistance: number;
+  targetOffsetQuat: Quat;
+  integralErr: Vec3;
+  prevErr: Vec3;
+}
+⋮----
+export interface PlayerVitalState {
+  hp: number;
+  maxHp: number;
+  bloodMl: number;
+  maxBloodMl: number;
+  bloodLossCount: number;
+  dead: boolean;
+}
+⋮----
+export interface RayHitResult {
+  hit: boolean;
+  kind: 'none' | 'world' | 'rigidBody';
+  fraction: number;
+  distance: number;
+  point: Vec3;
+  normal: Vec3;
+  brushId?: string;
+  body?: SourceRigidBody;
+}
+⋮----
+export interface PhysicsCallbacks {
+  onLand?: (impactSpeed: number) => void;
+  onJump?: () => void;
+  onStartRun?: () => void;
+  onFinishRun?: () => void;
+  onBoost?: (triggerId: string) => void;
+  onTeleport?: (isFail: boolean) => void;
+  onRigidBodyHit?: (bodyId: string, impulseMag: number, pos: Vec3, kind: RigidBodyKind) => void;
+  onRigidBodyDestroyed?: (body: SourceRigidBody, hitPoint: Vec3) => void;
+  onExplosion?: (triggerId: string, origin: Vec3, radius: number) => void;
+  onCheckpoint?: (cp: CheckpointState) => void;
+  onPlayerDamage?: (amount: number, source: 'fall' | 'explosion' | 'hazard', bloodLostMl: number) => void;
+  onPlayerDeath?: (source: 'fall' | 'explosion' | 'hazard') => void;
+  onJointBroken?: (jointId: string, pos: Vec3) => void;
+  onGravityGunGrab?: (bodyId: string) => void;
+  onGravityGunRelease?: (bodyId: string, punted: boolean) => void;
+}
+⋮----
+export interface LadderVolume {
+  id: string;
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+  /** Outward unit normal pointing away from the ladder face toward the climber */
+  normalX: number;
+  normalY: number;
+  normalZ?: number;
+  climbSpeed?: number;
+}
+⋮----
+/** Outward unit normal pointing away from the ladder face toward the climber */
+⋮----
+export interface RagdollBundle {
+  bodies: SourceRigidBody[];
+  joints: SourceJoint[];
+}
+interface TraceResult {
+  fraction: number;
+  endX: number;
+  endY: number;
+  endZ: number;
+  normalX: number;
+  normalY: number;
+  normalZ: number;
+  startSolid: boolean;
+  allSolid: boolean;
+  brushId: string;
+}
+⋮----
+interface ContactManifold {
+  key: string;
+  idxA: number;
+  idxB: number;
+  nx: number;
+  ny: number;
+  nz: number;
+  t1x: number;
+  t1y: number;
+  t1z: number;
+  t2x: number;
+  t2y: number;
+  t2z: number;
+  cx: number;
+  cy: number;
+  cz: number;
+  penetration: number;
+  restitution: number;
+  friction: number;
+  patchRadius: number;
+  lambdaN: number;
+  lambdaT1: number;
+  lambdaT2: number;
+  lambdaTwist: number;
+  relVelNInitial: number;
+}
+⋮----
+interface CachedImpulse {
+  lambdaN: number;
+  lambdaT1: number;
+  lambdaT2: number;
+  lambdaTwist: number;
+}
+⋮----
+/**
+ * Source AngleVectors:
+ * Given Euler view angles — pitch theta (positive looks downward), yaw psi, roll phi —
+ * computes orthonormal forward, right, and up basis vectors in Z-up Hammer space.
+ */
+export function computeAngleVectors(
+  sourcePitch: number,
+  yaw: number,
+  roll = 0,
+): { forward: Vec3; right: Vec3; up: Vec3 }
+⋮----
+/**
+ * 6-segment articulated ragdoll (pelvis, torso, head, L/R arms, L/R legs)
+ * linked via ball/hinge joints with breakable impulse thresholds.
+ */
+export function createArticulatedRagdoll(
+  idPrefix: string,
+  footOrigin: Vec3,
+  opts: { breakForce?: number; massScale?: number } = {},
+): RagdollBundle
+⋮----
+/** Create a box rigid body with exact cuboid principal inertia tensor I = (m/12) * (w^2 + h^2) */
+export function createBoxRigidBody(
+  id: string,
+  pos: Vec3,
+  halfExtents: Vec3,
+  mass: number,
+  opts: {
+    kind?: RigidBodyKind;
+    vel?: Vec3;
+    angVel?: Vec3;
+    quat?: Quat;
+    restitution?: number;
+    gravityScale?: number;
+    surfaceFriction?: number;
+    hp?: number;
+    maxHp?: number;
+    bleeds?: boolean;
+    weaponData?: DroppedWeaponData;
+    buoyancyRatio?: number;
+    enableCcd?: boolean;
+    grenadeData?: GrenadeData;
+  } = {},
+): SourceRigidBody
+⋮----
+/** Create a droppable VPhysics weapon rigid body (Scout or USP .45) */
+export function createWeaponRigidBody(
+  id: string,
+  pos: Vec3,
+  weaponData: DroppedWeaponData,
+  vel: Vec3 = { x: 0, y: 0, z: 0 },
+  angVel: Vec3 = { x: 0, y: 0, z: 0 },
+): SourceRigidBody
+/** Create a live VPhysics HE grenade rigid body with a deterministic tick fuse */
+export function createGrenadeRigidBody(
+  id: string,
+  pos: Vec3,
+  vel: Vec3,
+  detonateTick: number,
+  opts: {
+    angVel?: Vec3;
+    maxDamage?: number;
+    radius?: number;
+    pushScale?: number;
+    applyPlayerHpDamage?: boolean;
+  } = {},
+): SourceRigidBody
+/** Create a bleeding combat dummy rigid body (reacts to bullet/knife impulses + loses HP & blood) */
+export function createTargetRigidBody(
+  id: string,
+  pos: Vec3,
+  hp = 100,
+): SourceRigidBody
+⋮----
+/** Create a Verlet cable/rope chain between two world points */
+export function createVerletRope(
+  id: string,
+  start: Vec3,
+  end: Vec3,
+  segments = 10,
+  opts: {
+    damping?: number;
+    gravityScale?: number;
+    iterations?: number;
+    startPin?: RopePin;
+    endPin?: RopePin;
+    collideWorld?: boolean;
+  } = {},
+): SourceRope
+⋮----
+/** Create a standard 4-wheel Source-style raycast vehicle bound to a chassis rigid body */
+export function createFourWheelVehicle(
+  id: string,
+  chassisId: string,
+  opts: {
+    halfTrackY?: number;
+    frontAxleX?: number;
+    rearAxleX?: number;
+    hubZ?: number;
+    restLength?: number;
+    wheelRadius?: number;
+    stiffness?: number;
+    damping?: number;
+    grip?: number;
+    maxSteerRad?: number;
+    engineForce?: number;
+    brakeForce?: number;
+  } = {},
+): SourceVehicle
+⋮----
+const makeWheel = (x: number, y: number, steerable: boolean, driven: boolean): WheelConfig =>
+⋮----
+function normalizeQuat(q: Quat): Quat
+⋮----
+function mulQuat(a: Quat, b: Quat): Quat
+⋮----
+function conjQuat(q: Quat): Quat
+⋮----
+/** Shortest-arc axis-angle orientation error e_q = log(qTarget * qCurrent^-1) */
+function computeQuatLogError(qTarget: Quat, qCurrent: Quat): Vec3
+⋮----
+function quatFromYawPitch(yaw: number, pitch: number): Quat
+⋮----
+function wrapAngleRad(a: number): number
+⋮----
+function quatToMat3(q: Quat): Mat3
+⋮----
+function mulMat3Vec3(m: Mat3, v: Vec3): Vec3
+⋮----
+function mulMat3TransposeVec3(m: Mat3, v: Vec3): Vec3
+⋮----
+function crossVec3(a: Vec3, b: Vec3): Vec3
+⋮----
+function dotVec3(a: Vec3, b: Vec3): number
+⋮----
+/**
+ * Exact world-space inertia I = R * diag(I_local) * R^T and its inverse
+ * I^-1 = R * diag(I_local^-1) * R^T (avoids cofactor inversion drift).
+ */
+function computeWorldInertia(rot: Mat3, inertiaLocal: Vec3): { inertia: Mat3; invInertia: Mat3 }
+⋮----
+/** Build two orthonormal tangent vectors spanning the contact plane perpendicular to n */
+function buildContactBasis(nx: number, ny: number, nz: number): {
+  t1x: number; t1y: number; t1z: number;
+  t2x: number; t2y: number; t2z: number;
+}
+⋮----
+/**
+ * Flat TypedArray BVH over static ConvexBrushes for O(log N) broad-phase sweeps
+ * with zero per-query heap allocations.
+ */
+class StaticBrushBvh
+⋮----
+constructor(brushes: ConvexBrush[])
+⋮----
+public rebuild(): void
+⋮----
+private buildNode(start: number, count: number): number
+⋮----
+/** Collect overlapping brush indices into outBuf without allocating */
+public queryAabb(
+    qMinX: number,
+    qMinY: number,
+    qMinZ: number,
+    qMaxX: number,
+    qMaxY: number,
+    qMaxZ: number,
+    outBuf: Int32Array,
+  ): number
+⋮----
+export class GoldSrcPhysicsEngine
+⋮----
+// Source CGameMovement basevelocity (conveyors / moving platforms)
+⋮----
+public solidTeammates = true; // mp_solid_teammates
+public friendlyFire = false;  // mp_friendlyfire
+⋮----
+/** Register or respawn an actor in slot 0..MAX_ACTORS-1 */
+public spawnActor(
+    actorId: number,
+    team: TeamId,
+    spawn: SpawnPoint,
+    isBot: boolean,
+    loadout: { armor?: number; helmet?: boolean; cash?: number; weaponMask?: number; activeSlot?: WeaponSlot } = {},
+  ): void
+⋮----
+/** Write bot or remote player input for the upcoming 100 Hz tick */
+public setActorInput(actorId: number, cmd: ActorInputCmd): void
+⋮----
+/**
+   * Step all active bots (actors 1..MAX_ACTORS-1) through the exact same
+   * GoldSrc movement math by temporarily swapping each actor into the active slice,
+   * then resolving solid PvP hulls (boosting) across all active actors.
+   */
+public simulateAllBotsAndPvp(): void
+⋮----
+// 1. Copy local player (actor 0) live registers into Actor 0 ABI slot
+⋮----
+// 2. Step each alive bot using the engine's deterministic CGameMocopyPrimaryToActorSlotvement pipeline
+⋮----
+// 3. Resolve solid hull-vs-hull collisions + teammate head-boosting
+⋮----
+// 4. Write Actor 0 post-PvP collision position/velocity back to primary registers
+⋮----
+/**
+   * Solid 32x32x72 (standing) / 32x32x36 (ducking) hull-vs-hull resolution.
+   * Supports CS 1.6 teammate boosting (landing on top of another player's hull).
+   */
+private resolveActorHullCollisions(): void
+⋮----
+// Reset ground-actor links
+⋮----
+//const halfXY = HULL_STAND.halfXY; // 16u -> 32x32 footprint
+⋮----
+// Minimum translation axis
+⋮----
+// Vertical stack -> classic CS 1.6 player boost!
+⋮----
+// Grant ground state and ride the base player's horizontal velocity
+⋮----
+// Cancel closing relative velocity along X
+⋮----
+/**
+   * Extended hitscan raycast testing static BSP brushes, VPhysics props,
+   * and segmented actor hitboxes (Head 4.0x, Stomach 1.25x, Chest 1.0x, Legs 0.75x).
+   */
+public traceRayWithActors(
+    origin: Vec3,
+    dir: Vec3,
+    maxDistance: number,
+    shooterActorId: number,
+    ignoreBodyIds?: ReadonlySet<string>,
+  ): ActorRayHitResult
+⋮----
+// Quick bounding-sphere reject before testing all 4 hitbox OBBs
+⋮----
+// Rotate local normal back to world Z-up
+⋮----
+/**
+   * CS 1.6 hitbox + Kevlar/Helmet damage math and seamless handoff to createArticulatedRagdoll() on death.
+   */
+public applyActorDamage(
+    victimId: number,
+    baseDamage: number,
+    hitGroup: HitGroup,
+    armorRatio: number, // e.g. Scout = 0.85, USP = 0.50, Knife = 0.85
+    hitPoint: Vec3,
+    impulseDir: Vec3,
+    impulseMag: number,
+  ): ActorDamageResult
+⋮----
+armorRatio: number, // e.g. Scout = 0.85, USP = 0.50, Knife = 0.85
+⋮----
+// CS 1.6 armor rule: legs ignore armor; head requires helmet
+⋮----
+// Sync Actor 0 HP into legacy PlayerVitalState if local player was hit
+⋮----
+// Seamless handoff to existing VPhysics articulated ragdoll solver
+⋮----
+// Apply lethal bullet kick to head or torso segment
+⋮----
+// Note on stepSingleBotMovement(id): Add two small private helpers (copyPrimaryToActorSlot(id) and copyActorSlotToPrimary(id)) that copy the 16 ActorF32 / ActorI32 values into the engine's primary F32.*/I32.* slice, run the existing duck -> categorizePosition -> checkJump -> gravity -> walkMove/airMove -> finishGravity steps (skipping stepSecondaryPhysics() so rigid bodies only step once per tick), and copy the updated state back to slot id. This guarantees 100% identical GoldSrc physics for humans and bots with zero duplicated movement math.
+/** Copy the engine's primary F32/I32 movement registers into actor slot `actorId` */
+private copyPrimaryToActorSlot(actorId: number): void
+⋮----
+/** Load actor slot `actorId` into the engine's primary F32/I32 movement registers */
+private copyActorSlotToPrimary(actorId: number): void
+⋮----
+/**
+    * Step a single bot through the exact GoldSrc CGameMovement pipeline by swapping
+    * its ABI slot into the primary registers, skipping stepSecondaryPhysics() and triggers.
+    */
+private stepSingleBotMovement(actorId: number): void
+⋮----
+// 1. Duck / uncrouch hull update
+⋮----
+// 2. Categorize ground/air & water submersion state
+⋮----
+// 3. CheckJumpButton (no autobhop for bots; fresh press only)
+⋮----
+// 4. StartGravity + baseVelocity (supports riding boosted teammates)
+⋮----
+// 5. AngleVectors (ActorInputCmd.pitch is Source pitch +down) -> wish velocity
+⋮----
+// 6. Ground vs Water vs Air/Surf movement branch
+⋮----
+// 7. FinishGravity
+⋮----
+// 8. MoveState & velocity clamp (skipping stepSecondaryPhysics & checkTriggers)
+⋮----
+// Gravity Gun (Velocity-Level PID Controller)
+⋮----
+// Player life / health / blood state
+⋮----
+// src/physics/GoldSrcPhysicsEngine.ts — add field & setter:
+⋮----
+public setDrivenVehicle(vehicleId: string | null): void
+public getDrivenVehicleId(): string | null
+⋮----
+// Add to class fields:
+⋮----
+// Add to public subsystem APIs:
+public addLadder(ladder: LadderVolume): void
+⋮----
+public clearLadders(): void
+⋮----
+public getLadders(): readonly LadderVolume[]
+⋮----
+public getActiveLadder(): Readonly<LadderVolume> | null
+⋮----
+public getPlayerWaterSubmersion(): number
+⋮----
+/** Detect overlap with any registered LadderVolume */
+private findTouchingLadder(): LadderVolume | null
+⋮----
+/**
+     * Authentic GoldSrc/Source PM_LadderMove:
+     * Projects look-space forward/side speed onto the ladder plane so looking up + W
+     * climbs upward and diagonal W+A/D fast-climbs at sqrt(2) * climbSpeed.
+     */
+private ladderMove(
+      ladder: LadderVolume,
+      forward: Vec3,
+      right: Vec3,
+      fmove: number,
+      smove: number,
+    ): void
+⋮----
+// perp = normalize(up x ladderNormal)
+⋮----
+// tmp = ladderNormal x perp -> points along ladder up-axis
+⋮----
+// Pull gently toward ladder face if climbing so player tracks cleanly to the top lip
+⋮----
+constructor(
+    abi: PhysicsMemoryAbi,
+    brushes: ConvexBrush[],
+    triggers: TriggerVolume[],
+    spawn: SpawnPoint,
+    callbacks: PhysicsCallbacks = {},
+    rigidBodies: SourceRigidBody[] = [],
+    sourceConfig: SourcePhysicsConfig = {},
+  )
+⋮----
+// Auto-register any trigger volumes tagged as water
+// Auto-register any trigger volumes tagged as water
+⋮----
+/** Rebuild static brush BVH if map brushes were mutated externally */
+public rebuildBroadPhase(): void
+⋮----
+// ---------------------------------------------------------------------------
+// Support System Management APIs (Joints, Ropes, Water, Vehicles, Gravity Gun)
+// ---------------------------------------------------------------------------
+⋮----
+public addJoint(joint: SourceJoint): void
+⋮----
+public removeJoint(id: string): SourceJoint | null
+⋮----
+public getJoints(): readonly SourceJoint[]
+⋮----
+public addRope(rope: SourceRope): void
+⋮----
+public removeRope(id: string): SourceRope | null
+⋮----
+public getRopes(): readonly SourceRope[]
+⋮----
+public addWaterVolume(vol: WaterVolume): void
+⋮----
+public removeWaterVolume(id: string): WaterVolume | null
+⋮----
+public getWaterVolumes(): readonly WaterVolume[]
+⋮----
+public addVehicle(vehicle: SourceVehicle): void
+⋮----
+public removeVehicle(id: string): SourceVehicle | null
+⋮----
+public getVehicles(): readonly SourceVehicle[]
+⋮----
+public setVehicleControls(
+    vehicleId: string,
+    throttle: number,
+    steer: number,
+    handbrake = 0,
+  ): void
+⋮----
+public getGravityGunState(): Readonly<GravityGunState>
+⋮----
+/** Grab a rigid body in view with the Velocity-Level PID Gravity Gun */
+public tryGrabRigidBody(
+    origin: Vec3,
+    dir: Vec3,
+    maxRange = 360,
+    maxMass = 260,
+    holdDistance = 120,
+  ): SourceRigidBody | null
+⋮----
+/** Drop or punt the currently held Gravity Gun rigid body */
+public releaseHeldBody(puntImpulse = 0, puntDir?: Vec3): SourceRigidBody | null
+⋮----
+// ---------------------------------------------------------------------------
+// Deterministic Rollback Snapshot (Player Layer Only)
+// ---------------------------------------------------------------------------
+⋮----
+public capturePlayerSnapshot(): PlayerSnapshot
+⋮----
+public restorePlayerSnapshot(snap: PlayerSnapshot): void
+⋮----
+public setBaseVelocity(vx: number, vy: number, vz: number): void
+⋮----
+// ---------------------------------------------------------------------------
+// Player Vitals & Rigid Body Collection APIs
+// ---------------------------------------------------------------------------
+⋮----
+public getVitals(): Readonly<PlayerVitalState>
+⋮----
+public restoreVitals(): void
+⋮----
+public damagePlayer(amount: number, source: 'fall' | 'explosion' | 'hazard'): void
+⋮----
+public getRigidBodies(): readonly SourceRigidBody[]
+⋮----
+public addRigidBody(body: SourceRigidBody): void
+/** Spawn a live VPhysics HE grenade with a deterministic 100 Hz tick fuse */
+public spawnGrenade(
+      id: string,
+      pos: Vec3,
+      vel: Vec3,
+      fuseSec = 1.8,
+      opts: {
+        angVel?: Vec3;
+        maxDamage?: number;
+        radius?: number;
+        pushScale?: number;
+        applyPlayerHpDamage?: boolean;
+      } = {},
+    ): SourceRigidBody
+public removeRigidBody(id: string): SourceRigidBody | null
+⋮----
+public setRigidBodies(bodies: SourceRigidBody[]): void
+⋮----
+private findBodyById(id: string): SourceRigidBody | null
+⋮----
+private wakeBody(body: SourceRigidBody): void
+⋮----
+private wakeBodyById(id: string): void
+⋮----
+public getPlayerEyePosition(): Vec3
+⋮----
+/** Find nearest pickupable dropped weapon within range (and optionally aligned with aim ray) */
+public findNearbyWeapon(
+    maxRange: number,
+    aimOrigin?: Vec3,
+    aimDir?: Vec3,
+    minAimDot = 0.72,
+    respectAutoCooldown = false,
+  ): SourceRigidBody | null
+⋮----
+/**
+   * Hitscan raycast against BOTH static BSP convex brushes (BVH-accelerated)
+   * and oriented VPhysics rigid bodies (OBBs).
+   */
+public traceRay(
+    origin: Vec3,
+    dir: Vec3,
+    maxDistance: number,
+    ignoreBodyIds?: ReadonlySet<string>,
+  ): RayHitResult
+⋮----
+/**
+   * CS 1.6-style knife melee trace: tries center ray first, then falls back to an expanded
+   * melee hull (half-extent 10u) so close-quarters slashes connect cleanly with targets & props.
+   */
+public traceMelee(origin: Vec3, dir: Vec3, maxDistance: number): RayHitResult
+⋮----
+/** Local-space AABB slab test for exact OBB ray intersection */
+private intersectRayLocalBox(
+    o: Vec3,
+    d: Vec3,
+    hx: number,
+    hy: number,
+    hz: number,
+    maxDist: number,
+  ): { t: number; localNormal: Vec3 } | null
+⋮----
+// X slab
+⋮----
+// Y slab
+⋮----
+// Z slab
+⋮----
+/**
+   * Apply a Source VPhysics point impact impulse (gunshot or knife strike) at world hit point p:
+   *   r = p - x_B
+   *   delta_v = (j / m_B) * dir
+   *   delta_omega = I_B^-1 * (r x (j * dir))
+   */
+public applyPointImpulse(
+    body: SourceRigidBody,
+    hitPoint: Vec3,
+    direction: Vec3,
+    impulseMag: number,
+    damage = 0,
+  ): { destroyed: boolean; remainingHp?: number; bled: boolean; bloodLostMl: number }
+⋮----
+public captureCheckpointState(index = 0, label = 'CUSTOM SAVE-STATE'): CheckpointState
+⋮----
+public teleportToCheckpoint(cp: CheckpointState): void
+⋮----
+/**
+   * Radial explosion impulse:
+   *   I_mag = D_max * max(0, 1 - ||x_obj - x_exp|| / R) * k_push
+   *   delta_v = (I_mag / m) * (x_obj - x_exp) / ||x_obj - x_exp||
+   */
+public applyExplosionImpulse(
+    origin: Vec3,
+    maxDamage: number,
+    radius: number,
+    pushScaleOverride?: number,
+    sourceId = 'manual_blast',
+    applyPlayerHpDamage = true,
+  ): void
+⋮----
+public getHullHalfZ(): number
+⋮----
+public teleportToSpawn(isFail = false): void
+⋮----
+/** Half-step Velocity-Verlet gravity: v_z <- v_z - 0.5 * g_ent * g * dt */
+private applyHalfGravity(gravity: number, gravityScale = 1.0): void
+⋮----
+public simulateTick(): void
+⋮----
+// If dead, keep stepping VPhysics props/ropes/vehicles while player movement is frozen
+⋮----
+// Driving mode: step vehicles/props without player hull colliding against chassis
+⋮----
+// 1. Duck / uncrouch hull update
+⋮----
+// 2. Categorize ground/air & water submersion state
+⋮----
+// 2b. Check ladder engagement before jump & gravity
+// 2b. Check ladder engagement before jump & gravity
+⋮----
+// Classic Source/GoldSrc jump-off away from ladder normal
+⋮----
+// 3. CheckJumpButton: v_z = sqrt(2 * g * h_jump), h_jump = 45u (CS:S / GoldSrc)
+⋮----
+// Give an extra water-jump boost near the surface so player can hop onto the pool rim
+⋮----
+// 4. StartGravity (skip gravity in water — buoyancy is solved inside waterMove)
+⋮----
+// 5. AngleVectors with optional midpoint sub-tick yaw -> wish velocity & unit wish direction
+⋮----
+// 6. Ground vs Water vs Air/Surf movement branch
+⋮----
+// 7. FinishGravity (preserve upward swimming velocity in water)
+⋮----
+// 8. Determine telemetry state (GROUND / SURF / AIR) before player-shadow push check
+⋮----
+// 9. VPhysics (TGS Soft + NGS), Gravity Gun PID, Vehicles, Buoyancy, Joints, Ropes & Player Shadow
+⋮----
+// 10. Trigger volumes
+⋮----
+// ---------------------------------------------------------------------------
+// Rapier-Style Rigid-Body Pipeline (TGS Soft + NGS + Support Subsystems)
+// ---------------------------------------------------------------------------
+/** Advance live HE grenade fuses deterministically and detonate via existing explosion physics */
+private stepGrenades(): void
+⋮----
+// Keep live grenades awake until detonation even after settling on the ground
+⋮----
+private stepSecondaryPhysics(playerAlive: boolean, playerIsSurfing = false): void
+⋮----
+/**
+   * Substepped TGS Soft velocity solver + unbiased relaxation + NGS position projection,
+   * implicit damping, Coulomb + torsional patch friction, selective CCD, and sleeping.
+   */
+private stepRigidBodiesTgsSoft(): void
+⋮----
+// 1. Collect rigid-body contact manifolds & fetch warm-start impulses
+⋮----
+// 2. Run TGS Soft substeps
+⋮----
+// 2a. Forces, gyroscopic torque, and unconditionally stable implicit damping
+⋮----
+// 2b. Warm-start contact & joint impulses on first substep
+⋮----
+// 2c. Iterative TGS Soft velocity solver for contacts & joints
+⋮----
+// 2d. Integrate positions (with selective CCD world sweep) and orientations
+⋮----
+// 2e. Unbiased velocity relaxation pass (beta_soft = 0, restitution = 0)
+⋮----
+// 3. Persist contact warm-start cache for next tick
+⋮----
+// 4. NGS (Non-Linear Gauss-Seidel) position projection (zero velocity kick)
+⋮----
+// 5. Update body sleeping state
+⋮----
+// Inside stepRigidBodiesTgsSoft() step 5, right next to the gravityGun check:
+⋮----
+/** Integrate a single body over subDt with selective CCD sweep against static BSP world */
+/** Integrate a single body over subDt with selective CCD and 2-pass surface sliding */
+private integrateRigidBodyWorldPose(b: SourceRigidBody, subDt: number): void
+⋮----
+// Quaternion integration: q <- normalize(q + 0.5 * [0, w] * q * dt)
+⋮----
+// 2-pass slide loop so resting/scraping bodies still move horizontally
+⋮----
+// Skip ground-belly friction on vehicle chassis (tires handle traction)
+⋮----
+private collectContactManifolds(): void
+⋮----
+// Wake sleeping partner when hit by an active body
+⋮----
+private warmStartContacts(scale: number): void
+⋮----
+private solveContactManifoldsVelocity(
+    subDt: number,
+    omega: number,
+    zeta: number,
+    useBiasAndRestitution: boolean,
+  ): void
+⋮----
+// 1. Normal impulse (TGS Soft harmonic oscillator parameters)
+⋮----
+// 2. Circular Coulomb friction cone across orthonormal tangents t1, t2
+⋮----
+// 3. Torsional patch friction around contact normal n
+⋮----
+/** NGS (Non-Linear Gauss-Seidel) position projection: resolves residual overlap without velocity bounce */
+private solveContactsNgsPosition(): void
+⋮----
+private applyPairImpulse(
+    a: SourceRigidBody,
+    b: SourceRigidBody,
+    invIA: Mat3,
+    invIB: Mat3,
+    rA: Vec3,
+    rB: Vec3,
+    impulse: Vec3,
+  ): void
+⋮----
+// ---------------------------------------------------------------------------
+// Support System A: Constraint & Joint Solver (phys_constraintsystem)
+// ---------------------------------------------------------------------------
+⋮----
+private warmStartJoints(scale: number): void
+⋮----
+private solveJointsVelocity(subDt: number): void
+⋮----
+// Ball-socket, hinge, and fixed joints all enforce 3D anchor coincidence pA == pB
+⋮----
+// Angular constraint for hinge (axis alignment) or fixed (full orientation lock)
+⋮----
+// Breakable threshold check
+⋮----
+private solveJointsNgsPosition(): void
+⋮----
+// ---------------------------------------------------------------------------
+// Support System B: Verlet Rope & Cable Dynamics (CRopeKeyframe)
+// ---------------------------------------------------------------------------
+⋮----
+private stepRopes(): void
+⋮----
+// 1. Verlet integration
+⋮----
+// 2. Pin endpoints & iterative distance relaxation
+⋮----
+// 3. Optional world collision projection for interior nodes
+⋮----
+private resolveRopePinWorldPos(pin: RopePin): Vec3
+⋮----
+// ---------------------------------------------------------------------------
+// Support System C: Gravity Gun (Velocity-Level PID Controller)
+// ---------------------------------------------------------------------------
+⋮----
+private stepGravityGunPid(): void
+⋮----
+// Prevent pushing held prop into static walls
+⋮----
+// Auto-drop if prop gets snagged too far away
+⋮----
+// Velocity-level PID: v_cmd = Kp * e + Ki * integral(e) + Kd * de/dt
+⋮----
+// Orientation PID via quaternion log-error
+⋮----
+// ---------------------------------------------------------------------------
+// Support System D: Player-to-VPhysics Shadow Controller (IPhysicsPlayerController)
+// ---------------------------------------------------------------------------
+⋮----
+/**
+   * Bridges QPhysics player AABB and VPhysics rigid bodies:
+   * - One-way authority on surf ramps so props never corrupt player surf momentum.
+   * - Bounded push force (playerMaxPushForce) so barrels push cleanly without launching dumpsters.
+   */
+private resolvePlayerShadowCollisions(playerIsSurfing: boolean): void
+⋮----
+// ---------------------------------------------------------------------------
+// Support System E: Buoyancy & Fluid Drag (CPhysicsFluidController)
+// ---------------------------------------------------------------------------
+⋮----
+private stepRigidBodyBuoyancy(): void
+⋮----
+// Upward buoyancy acceleration: a_buoy = g * rho_ratio * f_sub
+⋮----
+// Implicit fluid linear & angular drag relative to water current
+⋮----
+// Self-righting torque from offset between submerged centroid and center of mass
+⋮----
+private computePlayerWaterSubmersion(): number
+⋮----
+private waterMove(
+      forward: Vec3,
+      right: Vec3,
+      fmove: number,
+      smove: number,
+      maxSpeed: number,
+    ): number
+⋮----
+// Implicit water drag
+⋮----
+// Self-stabilizing player buoyancy: gently floats with head above water (~0.62 submersion)
+⋮----
+// ---------------------------------------------------------------------------
+// Support System F: Raycast Vehicle Suspension & Tire Friction
+// ---------------------------------------------------------------------------
+⋮----
+private stepVehicles(): void
+⋮----
+// 1. Hookean Spring-Damper Suspension (clamped >= 0 so rebound never pulls car down)
+⋮----
+// Gentle rolling resistance when coasting
+⋮----
+// Apply tire force at reduced vertical lever arm to prevent rear bumper squat
+⋮----
+// ---------------------------------------------------------------------------
+// BSP Minkowski Plane Sweeps & BVH Broad-Phase Queries
+// ---------------------------------------------------------------------------
+⋮----
+/** BSP Minkowski plane expansion + swept point ray test with DIST_EPSILON (1/32u) */
+private clipBoxToBrush(
+    brush: ConvexBrush,
+    sX: number,
+    sY: number,
+    sZ: number,
+    eX: number,
+    eY: number,
+    eZ: number,
+    hx: number,
+    hy: number,
+    hz: number,
+    trace: TraceResult,
+  ): void
+⋮----
+private traceWorld(
+    sX: number,
+    sY: number,
+    sZ: number,
+    eX: number,
+    eY: number,
+    eZ: number,
+    hx: number,
+    hy: number,
+    hz: number,
+    out: TraceResult = this.traceScratch,
+  ): TraceResult
+⋮----
+// Reuse cached union-AABB candidate list inside StepMove when active
+⋮----
+// ---------------------------------------------------------------------------
+// Core CGameMovement (GoldSrc / Source Exact Velocity Math)
+// ---------------------------------------------------------------------------
+⋮----
+/** ClipVelocity: v' = v - (v . n) * beta * n */
+private clipVelocity(
+    inX: number,
+    inY: number,
+    inZ: number,
+    nx: number,
+    ny: number,
+    nz: number,
+    overbounce: number,
+  ): void
+⋮----
+private checkVelocity(): void
+⋮----
+/** AirAccelerate: v_cap = min(v_wish, 30), v_add = v_cap - (v . w_hat) */
+private airAccelerate(
+    wishDirX: number,
+    wishDirY: number,
+    wishDirZ: number,
+    wishspeed: number,
+    accel: number,
+    surfaceFriction: number,
+  ): void
+⋮----
+/** Ground Accelerate: v_add = v_wish - (v . w_hat) */
+private accelerate(
+    wishDirX: number,
+    wishDirY: number,
+    wishDirZ: number,
+    wishspeed: number,
+    accel: number,
+    surfaceFriction: number,
+  ): void
+⋮----
+/** Ground Friction with sv_stopspeed, sv_friction, mu_surface, and leading-edge drop-off */
+private friction(surfaceFriction: number): void
+⋮----
+/**
+   * TryPlayerMove / PM_FlyMove: multi-plane iterative sliding with crease cross-product,
+   * duplicate-normal clamping, and optional surf ramp-seam dead-stop recovery.
+   */
+private flyMove(): number
+⋮----
+// Surf ramp-seam glitch recovery: if an internal brush seam abruptly kills high-speed ramp slide,
+// nudge outward along the surf ramp normal by 2*DIST_EPSILON and re-trace once.
+⋮----
+// Duplicate plane normal clamping (prevents dense seams from tripping 3-plane dead-stop)
+⋮----
+private categorizePosition(): void
+⋮----
+private duck(): void
+⋮----
+/**
+   * StepMove / WalkMove with single union-AABB BVH candidate caching and overhang early-out.
+   */
+private walkMove(
+    wishDirX: number,
+    wishDirY: number,
+    wishspeed: number,
+    surfaceFriction: number,
+  ): void
+⋮----
+// Pre-fetch candidate brushes once for the union AABB covering Path A and Path B
+⋮----
+// Path A (Slide)
+⋮----
+// Early-out of Path B when hitting a ceiling/overhang (n_z < -0.1)
+⋮----
+// Path B (Step Up -> Forward -> Drop)
+⋮----
+private airMove(
+    wishDirX: number,
+    wishDirY: number,
+    wishspeed: number,
+    surfaceFriction: number,
+  ): number
+⋮----
+private checkTriggers(): void
+</file>
+
+</files>

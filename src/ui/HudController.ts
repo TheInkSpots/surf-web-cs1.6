@@ -3,7 +3,43 @@ import { MoveState } from '../core/constants';
 import { KeyState } from '../gameplay/InputController';
 import { RunTracker } from '../gameplay/RunTracker';
 import { PlayerVitalState, SourceVehicle } from '../physics/GoldSrcPhysicsEngine';
+import { TeamId } from '../core/memoryAbi';
 
+export interface KillFeedEntry {
+  id: number;
+  killerName: string;
+  killerTeam: TeamId;
+  victimName: string;
+  victimTeam: TeamId;
+  weapon: string;
+  headshot: boolean;
+  isLocalInvolved?: boolean;
+  expiresAtMs: number;
+}
+
+export interface ScoreboardRow {
+  actorId: number;
+  name: string;
+  team: TeamId;
+  alive: boolean;
+  hp: number;
+  kills: number;
+  deaths: number;
+  cash: number;
+  isLocal?: boolean;
+}
+
+export interface MatchHudState {
+  active: boolean;
+  tScore: number;
+  ctScore: number;
+  tAlive: number;
+  ctAlive: number;
+  roundNumber: number;
+  roundTimerSec: number;
+  phase: 'FREEZETIME' | 'LIVE' | 'ROUND_END';
+  rows?: ScoreboardRow[];
+}
 export interface HeldPropTelemetry {
   id: string;
   mass: number;
@@ -57,6 +93,7 @@ export interface HudSnapshot {
   cvarLabel: string;
   subsystems?: SubsystemTelemetry;
   grenade?: HudGrenadeBadge;
+  match?: MatchHudState;
 }
 
 type MovementKey = 'w' | 'a' | 's' | 'd' | 'jump' | 'duck';
@@ -143,6 +180,143 @@ export class HudController {
   private lastBestRun = -1;
   private lastGrenadeText = '';
 
+  // Match HUD, Kill Feed & Scoreboard DOM refs
+    private readonly elMatchHud = document.getElementById('match-hud');
+    private readonly elScoreT = document.getElementById('score-t');
+    private readonly elScoreCt = document.getElementById('score-ct');
+    private readonly elAliveT = document.getElementById('alive-t');
+    private readonly elAliveCt = document.getElementById('alive-ct');
+    private readonly elRoundTimer = document.getElementById('round-timer');
+    private readonly elRoundPhase = document.getElementById('round-phase');
+    private readonly elRoundNum = document.getElementById('round-num');
+    private readonly elKillFeed = document.getElementById('kill-feed');
+    private readonly elScoreboard = document.getElementById('scoreboard-overlay');
+    private readonly elSbRoundMeta = document.getElementById('sb-round-meta');
+    private readonly elSbScoreT = document.getElementById('sb-score-t');
+    private readonly elSbScoreCt = document.getElementById('sb-score-ct');
+    private readonly elSbBodyT = document.getElementById('sb-body-t');
+    private readonly elSbBodyCt = document.getElementById('sb-body-ct');
+
+    private readonly killFeed: KillFeedEntry[] = [];
+    private nextKillId = 1;
+    private scoreboardVisible = false;
+    private lastScoreboardRenderMs = 0;
+
+    public setScoreboardVisible(visible: boolean): void {
+      this.scoreboardVisible = visible;
+      this.elScoreboard?.classList.toggle('hidden', !visible);
+    }
+
+    public pushKillFeed(entry: Omit<KillFeedEntry, 'id' | 'expiresAtMs'>, ttlMs = 5000): void {
+      this.killFeed.unshift({
+        ...entry,
+        id: this.nextKillId++,
+        expiresAtMs: performance.now() + ttlMs,
+      });
+      if (this.killFeed.length > 5) this.killFeed.length = 5;
+      this.renderKillFeed(performance.now());
+    }
+
+    private renderKillFeed(nowMs: number): void {
+      if (!this.elKillFeed) return;
+      let changed = false;
+      for (let i = this.killFeed.length - 1; i >= 0; i--) {
+        if (nowMs >= this.killFeed[i].expiresAtMs) {
+          this.killFeed.splice(i, 1);
+          changed = true;
+        }
+      }
+      if (!changed && this.elKillFeed.childElementCount === this.killFeed.length) return;
+
+      this.elKillFeed.innerHTML = '';
+      for (const k of this.killFeed) {
+        const row = document.createElement('div');
+        row.className = `kf-item${k.isLocalInvolved ? ' kf-local' : ''}`;
+
+        const killer = document.createElement('span');
+        killer.className = k.killerTeam === TeamId.T ? 'kf-t' : 'kf-ct';
+        killer.textContent = k.killerName;
+
+        const wpn = document.createElement('span');
+        wpn.className = 'kf-wpn';
+        wpn.textContent = k.weapon.toUpperCase();
+
+        const victim = document.createElement('span');
+        victim.className = k.victimTeam === TeamId.T ? 'kf-t' : 'kf-ct';
+        victim.textContent = k.victimName;
+
+        row.append(killer, wpn);
+        if (k.headshot) {
+          const hs = document.createElement('span');
+          hs.className = 'kf-hs';
+          hs.textContent = '[HS]';
+          row.append(hs);
+        }
+        row.append(victim);
+        this.elKillFeed.append(row);
+      }
+    }
+
+    private updateMatchHud(match: MatchHudState, nowMs: number): void {
+      if (this.elMatchHud) {
+        this.elMatchHud.classList.toggle('hidden', !match.active);
+      }
+      if (!match.active) return;
+
+      const secs = Math.max(0, Math.ceil(match.roundTimerSec));
+      const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+      const ss = String(secs % 60).padStart(2, '0');
+      const clockStr = `${mm}:${ss}`;
+
+      if (this.elScoreT) this.elScoreT.textContent = String(match.tScore);
+      if (this.elScoreCt) this.elScoreCt.textContent = String(match.ctScore);
+      if (this.elAliveT) this.elAliveT.textContent = `${match.tAlive} alive`;
+      if (this.elAliveCt) this.elAliveCt.textContent = `${match.ctAlive} alive`;
+      if (this.elRoundNum) this.elRoundNum.textContent = `R${match.roundNumber}`;
+      if (this.elRoundPhase) this.elRoundPhase.textContent = match.phase;
+      if (this.elRoundTimer) {
+        this.elRoundTimer.textContent = clockStr;
+        this.elRoundTimer.classList.toggle('low', match.phase === 'LIVE' && secs <= 15);
+      }
+
+      // Re-render full scoreboard at ~5 Hz while visible
+      if (this.scoreboardVisible && match.rows && nowMs - this.lastScoreboardRenderMs > 180) {
+        this.lastScoreboardRenderMs = nowMs;
+        if (this.elSbRoundMeta) {
+          this.elSbRoundMeta.textContent = `ROUND ${match.roundNumber} • ${match.phase} • ${clockStr}`;
+        }
+        if (this.elSbScoreT) this.elSbScoreT.textContent = String(match.tScore);
+        if (this.elSbScoreCt) this.elSbScoreCt.textContent = String(match.ctScore);
+        this.fillScoreboardTeam(this.elSbBodyT, match.rows, TeamId.T);
+        this.fillScoreboardTeam(this.elSbBodyCt, match.rows, TeamId.CT);
+      }
+    }
+
+    private fillScoreboardTeam(
+      tbody: HTMLElement | null,
+      rows: ScoreboardRow[],
+      team: TeamId,
+    ): void {
+      if (!tbody) return;
+      const filtered = rows
+        .filter((r) => r.team === team)
+        .sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
+
+      tbody.innerHTML = '';
+      for (const r of filtered) {
+        const tr = document.createElement('tr');
+        if (!r.alive) tr.classList.add('sb-row-dead');
+        if (r.isLocal) tr.classList.add('sb-row-local');
+        tr.innerHTML = `
+          <td>${r.name}</td>
+          <td>${r.alive ? r.hp : 'DEAD'}</td>
+          <td>${r.kills}</td>
+          <td>${r.deaths}</td>
+          <td>$${r.cash}</td>
+        `;
+        tbody.append(tr);
+      }
+    }
   constructor(runTracker: RunTracker) {
     this.runTracker = runTracker;
     this.ensureSlot5Element();
@@ -331,6 +505,10 @@ export class HudController {
     if (snap.subsystems) {
       this.updateSubsystems(snap.subsystems);
     }
+    this.renderKillFeed(snap.now);
+        if (snap.match) {
+          this.updateMatchHud(snap.match, snap.now);
+        }
   }
 
   private updateSubsystems(sub: SubsystemTelemetry): void {

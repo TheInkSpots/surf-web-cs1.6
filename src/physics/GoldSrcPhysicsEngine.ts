@@ -177,6 +177,67 @@ interface WaterTriggerMeta {
   linearDrag?: number;
   angularDrag?: number;
 }
+
+// Add these interfaces & methods to src/physics/GoldSrcPhysicsEngine.ts
+import {
+  ACTOR_F32_BASE_INDEX,
+  ACTOR_F32_STRIDE,
+  ACTOR_I32_BASE_INDEX,
+  ACTOR_I32_STRIDE,
+  ActorF32,
+  ActorI32,
+  HitGroup,
+  HITGROUP_DAMAGE_MULT,
+  initActorSlot,
+  MAX_ACTORS,
+  TeamId,
+} from '../core/memoryAbi';
+
+export interface ActorInputCmd {
+  fmove: number;
+  smove: number;
+  yaw: number;
+  pitch: number; // Source pitch (+down)
+  buttons: number;
+}
+
+export interface ActorHitboxDef {
+  hitGroup: HitGroup;
+  /** Center offset relative to actor feet (Z-up) and yaw-aligned forward/right */
+  zMin: number;
+  zMax: number;
+  hx: number;
+  hy: number;
+}
+
+export interface ActorRayHitResult extends RayHitResult {
+  actorId?: number;
+  hitGroup?: HitGroup;
+}
+
+export interface ActorDamageResult {
+  appliedDamage: number;
+  armorAbsorbed: number;
+  hitGroup: HitGroup;
+  killed: boolean;
+  ragdollPrefix?: string;
+}
+
+// Authentic CS 1.6 Z-up hitbox segments relative to actor feet (pos.z - halfZ)
+const STAND_HITBOXES: readonly ActorHitboxDef[] = [
+  { hitGroup: HitGroup.HEAD,    zMin: 58, zMax: 72, hx: 6.5, hy: 6.5 },
+  { hitGroup: HitGroup.CHEST,   zMin: 44, zMax: 58, hx: 10.5, hy: 12.0 },
+  { hitGroup: HitGroup.STOMACH, zMin: 30, zMax: 44, hx: 9.5, hy: 11.0 },
+  { hitGroup: HitGroup.LEGS,    zMin: 0,  zMax: 30, hx: 8.5, hy: 10.5 },
+];
+
+const DUCK_HITBOXES: readonly ActorHitboxDef[] = [
+  { hitGroup: HitGroup.HEAD,    zMin: 27, zMax: 37, hx: 6.5, hy: 6.5 },
+  { hitGroup: HitGroup.CHEST,   zMin: 18, zMax: 27, hx: 11.0, hy: 12.0 },
+  { hitGroup: HitGroup.STOMACH, zMin: 11, zMax: 18, hx: 10.0, hy: 11.0 },
+  { hitGroup: HitGroup.LEGS,    zMin: 0,  zMax: 11, hx: 9.5, hy: 10.5 },
+];
+
 export interface SourceJoint {
   id: string;
   kind: JointKind;
@@ -1218,6 +1279,551 @@ export class GoldSrcPhysicsEngine {
   private prevCmdYaw = f32(0);
   private hasPrevYaw = false;
   private playerWaterSubmersion = f32(0);
+
+  public solidTeammates = true; // mp_solid_teammates
+  public friendlyFire = false;  // mp_friendlyfire
+  //private activeActorId = 0;
+
+  /** Register or respawn an actor in slot 0..MAX_ACTORS-1 */
+  public spawnActor(
+    actorId: number,
+    team: TeamId,
+    spawn: SpawnPoint,
+    isBot: boolean,
+    loadout: { armor?: number; helmet?: boolean; cash?: number; weaponMask?: number; activeSlot?: WeaponSlot } = {},
+  ): void {
+    if (actorId < 0 || actorId >= MAX_ACTORS) return;
+    initActorSlot(this.abi.f32, this.abi.i32, actorId, team, isBot, spawn.x, spawn.y, spawn.z, spawn.yaw);
+    const i = ACTOR_I32_BASE_INDEX + actorId * ACTOR_I32_STRIDE;
+    if (loadout.armor !== undefined) this.abi.i32[i + ActorI32.ARMOR] = loadout.armor;
+    if (loadout.helmet !== undefined) this.abi.i32[i + ActorI32.HAS_HELMET] = loadout.helmet ? 1 : 0;
+    if (loadout.cash !== undefined) this.abi.i32[i + ActorI32.CASH] = loadout.cash;
+    if (loadout.weaponMask !== undefined) this.abi.i32[i + ActorI32.WEAPON_MASK] = loadout.weaponMask;
+    if (loadout.activeSlot !== undefined) this.abi.i32[i + ActorI32.ACTIVE_SLOT] = loadout.activeSlot;
+  }
+
+  /** Write bot or remote player input for the upcoming 100 Hz tick */
+  public setActorInput(actorId: number, cmd: ActorInputCmd): void {
+    const f = ACTOR_F32_BASE_INDEX + actorId * ACTOR_F32_STRIDE;
+    const i = ACTOR_I32_BASE_INDEX + actorId * ACTOR_I32_STRIDE;
+    this.abi.f32[f + ActorF32.CMD_FMOVE] = f32(cmd.fmove);
+    this.abi.f32[f + ActorF32.CMD_SMOVE] = f32(cmd.smove);
+    this.abi.f32[f + ActorF32.PREV_YAW] = this.abi.f32[f + ActorF32.YAW];
+    this.abi.f32[f + ActorF32.YAW] = f32(cmd.yaw);
+    this.abi.f32[f + ActorF32.PITCH] = f32(cmd.pitch);
+    this.abi.i32[i + ActorI32.BUTTONS] = cmd.buttons | 0;
+  }
+
+  /**
+   * Step all active bots (actors 1..MAX_ACTORS-1) through the exact same
+   * GoldSrc movement math by temporarily swapping each actor into the active slice,
+   * then resolving solid PvP hulls (boosting) across all active actors.
+   */
+  public simulateAllBotsAndPvp(): void {
+    // 1. Copy local player (actor 0) live registers into Actor 0 ABI slot
+    this.copyPrimaryToActorSlot(0);
+
+    // 2. Step each alive bot using the engine's deterministic CGameMocopyPrimaryToActorSlotvement pipeline
+    for (let id = 1; id < MAX_ACTORS; id++) {
+      const i = ACTOR_I32_BASE_INDEX + id * ACTOR_I32_STRIDE;
+      if (this.abi.i32[i + ActorI32.ACTIVE] === 0 || this.abi.i32[i + ActorI32.ALIVE] === 0) {
+        continue;
+      }
+      this.stepSingleBotMovement(id);
+    }
+
+    // 3. Resolve solid hull-vs-hull collisions + teammate head-boosting
+    this.resolveActorHullCollisions();
+
+    // 4. Write Actor 0 post-PvP collision position/velocity back to primary registers
+    this.copyActorSlotToPrimary(0);
+  }
+
+  /**
+   * Solid 32x32x72 (standing) / 32x32x36 (ducking) hull-vs-hull resolution.
+   * Supports CS 1.6 teammate boosting (landing on top of another player's hull).
+   */
+  private resolveActorHullCollisions(): void {
+    const f32Arr = this.abi.f32;
+    const i32Arr = this.abi.i32;
+
+    // Reset ground-actor links
+    for (let id = 0; id < MAX_ACTORS; id++) {
+      i32Arr[ACTOR_I32_BASE_INDEX + id * ACTOR_I32_STRIDE + ActorI32.GROUND_ACTOR] = -1;
+    }
+
+    for (let a = 0; a < MAX_ACTORS; a++) {
+      const ia = ACTOR_I32_BASE_INDEX + a * ACTOR_I32_STRIDE;
+      if (i32Arr[ia + ActorI32.ACTIVE] === 0 || i32Arr[ia + ActorI32.ALIVE] === 0) continue;
+
+      for (let b = a + 1; b < MAX_ACTORS; b++) {
+        const ib = ACTOR_I32_BASE_INDEX + b * ACTOR_I32_STRIDE;
+        if (i32Arr[ib + ActorI32.ACTIVE] === 0 || i32Arr[ib + ActorI32.ALIVE] === 0) continue;
+
+        const sameTeam = i32Arr[ia + ActorI32.TEAM] === i32Arr[ib + ActorI32.TEAM];
+        if (sameTeam && !this.solidTeammates) continue;
+
+        const fa = ACTOR_F32_BASE_INDEX + a * ACTOR_F32_STRIDE;
+        const fb = ACTOR_F32_BASE_INDEX + b * ACTOR_F32_STRIDE;
+
+        const duckA = (i32Arr[ia + ActorI32.FLAGS] & FL_DUCKING) !== 0;
+        const duckB = (i32Arr[ib + ActorI32.FLAGS] & FL_DUCKING) !== 0;
+        const halfZA = duckA ? HULL_DUCK.hz : HULL_STAND.hz;
+        const halfZB = duckB ? HULL_DUCK.hz : HULL_STAND.hz;
+        //const halfXY = HULL_STAND.halfXY; // 16u -> 32x32 footprint
+
+        const dx = f32Arr[fa + ActorF32.POS_X] - f32Arr[fb + ActorF32.POS_X];
+        const dy = f32Arr[fa + ActorF32.POS_Y] - f32Arr[fb + ActorF32.POS_Y];
+        const dz = f32Arr[fa + ActorF32.POS_Z] - f32Arr[fb + ActorF32.POS_Z];
+
+        const penX = HULL_STAND.hx * 2 - Math.abs(dx);
+                const penY = HULL_STAND.hy * 2 - Math.abs(dy);
+                const penZ = (halfZA + halfZB) - Math.abs(dz);
+
+        if (penX <= 0 || penY <= 0 || penZ <= 0) continue;
+
+        // Minimum translation axis
+        if (penZ <= penX && penZ <= penY) {
+          // Vertical stack -> classic CS 1.6 player boost!
+          const topIsA = dz >= 0;
+          const topF = topIsA ? fa : fb;
+          const topI = topIsA ? ia : ib;
+          const botF = topIsA ? fb : fa;
+          const botId = topIsA ? b : a;
+
+          f32Arr[topF + ActorF32.POS_Z] = f32(f32Arr[topF + ActorF32.POS_Z] + penZ);
+          if (f32Arr[topF + ActorF32.VEL_Z] < f32Arr[botF + ActorF32.VEL_Z]) {
+            f32Arr[topF + ActorF32.VEL_Z] = f32Arr[botF + ActorF32.VEL_Z];
+          }
+          // Grant ground state and ride the base player's horizontal velocity
+          i32Arr[topI + ActorI32.FLAGS] |= FL_ONGROUND;
+          i32Arr[topI + ActorI32.GROUND_ACTOR] = botId;
+          f32Arr[topF + ActorF32.BASE_VEL_X] = f32Arr[botF + ActorF32.VEL_X];
+          f32Arr[topF + ActorF32.BASE_VEL_Y] = f32Arr[botF + ActorF32.VEL_Y];
+        } else if (penX < penY) {
+          const sign = dx >= 0 ? 1 : -1;
+          const push = f32(penX * 0.5);
+          f32Arr[fa + ActorF32.POS_X] = f32(f32Arr[fa + ActorF32.POS_X] + sign * push);
+          f32Arr[fb + ActorF32.POS_X] = f32(f32Arr[fb + ActorF32.POS_X] - sign * push);
+          // Cancel closing relative velocity along X
+          const relVx = f32Arr[fa + ActorF32.VEL_X] - f32Arr[fb + ActorF32.VEL_X];
+          if (relVx * sign < 0) {
+            const avgVx = f32((f32Arr[fa + ActorF32.VEL_X] + f32Arr[fb + ActorF32.VEL_X]) * 0.5);
+            f32Arr[fa + ActorF32.VEL_X] = avgVx;
+            f32Arr[fb + ActorF32.VEL_X] = avgVx;
+          }
+        } else {
+          const sign = dy >= 0 ? 1 : -1;
+          const push = f32(penY * 0.5);
+          f32Arr[fa + ActorF32.POS_Y] = f32(f32Arr[fa + ActorF32.POS_Y] + sign * push);
+          f32Arr[fb + ActorF32.POS_Y] = f32(f32Arr[fb + ActorF32.POS_Y] - sign * push);
+          const relVy = f32Arr[fa + ActorF32.VEL_Y] - f32Arr[fb + ActorF32.VEL_Y];
+          if (relVy * sign < 0) {
+            const avgVy = f32((f32Arr[fa + ActorF32.VEL_Y] + f32Arr[fb + ActorF32.VEL_Y]) * 0.5);
+            f32Arr[fa + ActorF32.VEL_Y] = avgVy;
+            f32Arr[fb + ActorF32.VEL_Y] = avgVy;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Extended hitscan raycast testing static BSP brushes, VPhysics props,
+   * and segmented actor hitboxes (Head 4.0x, Stomach 1.25x, Chest 1.0x, Legs 0.75x).
+   */
+  public traceRayWithActors(
+    origin: Vec3,
+    dir: Vec3,
+    maxDistance: number,
+    shooterActorId: number,
+    ignoreBodyIds?: ReadonlySet<string>,
+  ): ActorRayHitResult {
+    const baseHit: ActorRayHitResult = this.traceRay(origin, dir, maxDistance, ignoreBodyIds);
+    let bestDist = baseHit.hit ? baseHit.distance : maxDistance;
+
+    const f32Arr = this.abi.f32;
+    const i32Arr = this.abi.i32;
+    const shooterTeam = i32Arr[ACTOR_I32_BASE_INDEX + shooterActorId * ACTOR_I32_STRIDE + ActorI32.TEAM];
+
+    for (let id = 0; id < MAX_ACTORS; id++) {
+      if (id === shooterActorId) continue;
+      const idxI = ACTOR_I32_BASE_INDEX + id * ACTOR_I32_STRIDE;
+      if (i32Arr[idxI + ActorI32.ACTIVE] === 0 || i32Arr[idxI + ActorI32.ALIVE] === 0) continue;
+
+      const targetTeam = i32Arr[idxI + ActorI32.TEAM];
+      if (!this.friendlyFire && targetTeam === shooterTeam) continue;
+
+      const idxF = ACTOR_F32_BASE_INDEX + id * ACTOR_F32_STRIDE;
+      const ax = f32Arr[idxF + ActorF32.POS_X];
+      const ay = f32Arr[idxF + ActorF32.POS_Y];
+      const az = f32Arr[idxF + ActorF32.POS_Z];
+      const yaw = f32Arr[idxF + ActorF32.YAW];
+      const ducking = (i32Arr[idxI + ActorI32.FLAGS] & FL_DUCKING) !== 0;
+      const halfZ = ducking ? HULL_DUCK.hz : HULL_STAND.hz;
+      const footZ = az - halfZ;
+
+      // Quick bounding-sphere reject before testing all 4 hitbox OBBs
+      const toX = ax - origin.x;
+      const toY = ay - origin.y;
+      const toZ = az - origin.z;
+      const proj = toX * dir.x + toY * dir.y + toZ * dir.z;
+      if (proj < -40 || proj > bestDist + 40) continue;
+
+      const cosY = Math.cos(-yaw);
+      const sinY = Math.sin(-yaw);
+      const localDir: Vec3 = {
+        x: dir.x * cosY - dir.y * sinY,
+        y: dir.x * sinY + dir.y * cosY,
+        z: dir.z,
+      };
+
+      const boxes = ducking ? DUCK_HITBOXES : STAND_HITBOXES;
+      for (let b = 0; b < boxes.length; b++) {
+        const box = boxes[b];
+        const boxCenterZ = footZ + (box.zMin + box.zMax) * 0.5;
+        const boxHz = (box.zMax - box.zMin) * 0.5;
+
+        const relX = origin.x - ax;
+        const relY = origin.y - ay;
+        const localOrigin: Vec3 = {
+          x: relX * cosY - relY * sinY,
+          y: relX * sinY + relY * cosY,
+          z: origin.z - boxCenterZ,
+        };
+
+        const hit = this.intersectRayLocalBox(localOrigin, localDir, box.hx, box.hy, boxHz, bestDist);
+        if (hit && hit.t < bestDist) {
+          bestDist = hit.t;
+          // Rotate local normal back to world Z-up
+          const cosW = Math.cos(yaw);
+          const sinW = Math.sin(yaw);
+          baseHit.hit = true;
+          baseHit.kind = 'rigidBody';
+          baseHit.distance = hit.t;
+          baseHit.fraction = hit.t / maxDistance;
+          baseHit.point = {
+            x: origin.x + dir.x * hit.t,
+            y: origin.y + dir.y * hit.t,
+            z: origin.z + dir.z * hit.t,
+          };
+          baseHit.normal = {
+            x: hit.localNormal.x * cosW - hit.localNormal.y * sinW,
+            y: hit.localNormal.x * sinW + hit.localNormal.y * cosW,
+            z: hit.localNormal.z,
+          };
+          baseHit.actorId = id;
+          baseHit.hitGroup = box.hitGroup;
+          baseHit.body = undefined;
+        }
+      }
+    }
+
+    return baseHit;
+  }
+
+  /**
+   * CS 1.6 hitbox + Kevlar/Helmet damage math and seamless handoff to createArticulatedRagdoll() on death.
+   */
+  public applyActorDamage(
+    victimId: number,
+    baseDamage: number,
+    hitGroup: HitGroup,
+    armorRatio: number, // e.g. Scout = 0.85, USP = 0.50, Knife = 0.85
+    hitPoint: Vec3,
+    impulseDir: Vec3,
+    impulseMag: number,
+  ): ActorDamageResult {
+    const idxI = ACTOR_I32_BASE_INDEX + victimId * ACTOR_I32_STRIDE;
+    const idxF = ACTOR_F32_BASE_INDEX + victimId * ACTOR_F32_STRIDE;
+    const i32Arr = this.abi.i32;
+    const f32Arr = this.abi.f32;
+
+    if (i32Arr[idxI + ActorI32.ALIVE] === 0) {
+      return { appliedDamage: 0, armorAbsorbed: 0, hitGroup, killed: false };
+    }
+
+    let dmg = baseDamage * HITGROUP_DAMAGE_MULT[hitGroup];
+    let armor = i32Arr[idxI + ActorI32.ARMOR];
+    const hasHelmet = i32Arr[idxI + ActorI32.HAS_HELMET] === 1;
+    let armorAbsorbed = 0;
+
+    // CS 1.6 armor rule: legs ignore armor; head requires helmet
+    const armorApplies =
+      armor > 0 &&
+      hitGroup !== HitGroup.LEGS &&
+      (hitGroup !== HitGroup.HEAD || hasHelmet);
+
+    if (armorApplies) {
+      const newDmg = dmg * armorRatio;
+      const armorCost = Math.ceil((dmg - newDmg) * 0.5);
+      if (armorCost > armor) {
+        armorAbsorbed = armor * 2;
+        dmg = Math.max(1, dmg - armorAbsorbed);
+        armor = 0;
+      } else {
+        armorAbsorbed = dmg - newDmg;
+        dmg = newDmg;
+        armor -= armorCost;
+      }
+      i32Arr[idxI + ActorI32.ARMOR] = armor;
+    }
+
+    const finalDmg = Math.max(1, Math.round(dmg));
+    const nextHp = Math.max(0, i32Arr[idxI + ActorI32.HP] - finalDmg);
+    i32Arr[idxI + ActorI32.HP] = nextHp;
+
+    // Sync Actor 0 HP into legacy PlayerVitalState if local player was hit
+    if (victimId === 0) {
+      this.damagePlayer(finalDmg, 'hazard');
+    }
+
+    if (nextHp <= 0) {
+      i32Arr[idxI + ActorI32.ALIVE] = 0;
+      const ducking = (i32Arr[idxI + ActorI32.FLAGS] & FL_DUCKING) !== 0;
+      const halfZ = ducking ? HULL_DUCK.hz : HULL_STAND.hz;
+      const footOrigin: Vec3 = {
+        x: f32Arr[idxF + ActorF32.POS_X],
+        y: f32Arr[idxF + ActorF32.POS_Y],
+        z: f32Arr[idxF + ActorF32.POS_Z] - halfZ,
+      };
+      const vel: Vec3 = {
+        x: f32Arr[idxF + ActorF32.VEL_X],
+        y: f32Arr[idxF + ActorF32.VEL_Y],
+        z: f32Arr[idxF + ActorF32.VEL_Z],
+      };
+
+      // Seamless handoff to existing VPhysics articulated ragdoll solver
+      const prefix = `ragdoll_actor_${victimId}_${this.abi.i32[I32.TICK]}`;
+      const ragdoll = createArticulatedRagdoll(prefix, footOrigin, { breakForce: 18000 });
+      for (const seg of ragdoll.bodies) {
+        seg.vel.x = vel.x;
+        seg.vel.y = vel.y;
+        seg.vel.z = vel.z;
+        this.addRigidBody(seg);
+      }
+      for (const j of ragdoll.joints) {
+        this.addJoint(j);
+      }
+      // Apply lethal bullet kick to head or torso segment
+      const struckName = hitGroup === HitGroup.HEAD ? `${prefix}_head` : `${prefix}_torso`;
+      const struckBody = ragdoll.bodies.find((b) => b.id === struckName) ?? ragdoll.bodies[0];
+      if (struckBody) {
+        this.applyPointImpulse(struckBody, hitPoint, impulseDir, impulseMag, 0);
+      }
+
+      return { appliedDamage: finalDmg, armorAbsorbed, hitGroup, killed: true, ragdollPrefix: prefix };
+    }
+
+    return { appliedDamage: finalDmg, armorAbsorbed, hitGroup, killed: false };
+  }
+
+ // Note on stepSingleBotMovement(id): Add two small private helpers (copyPrimaryToActorSlot(id) and copyActorSlotToPrimary(id)) that copy the 16 ActorF32 / ActorI32 values into the engine's primary F32.*/I32.* slice, run the existing duck -> categorizePosition -> checkJump -> gravity -> walkMove/airMove -> finishGravity steps (skipping stepSecondaryPhysics() so rigid bodies only step once per tick), and copy the updated state back to slot id. This guarantees 100% identical GoldSrc physics for humans and bots with zero duplicated movement math.
+ /** Copy the engine's primary F32/I32 movement registers into actor slot `actorId` */
+   private copyPrimaryToActorSlot(actorId: number): void {
+     const { f32: vf, i32: vi } = this.abi;
+     const f = ACTOR_F32_BASE_INDEX + actorId * ACTOR_F32_STRIDE;
+     const i = ACTOR_I32_BASE_INDEX + actorId * ACTOR_I32_STRIDE;
+
+     vf[f + ActorF32.POS_X] = vf[F32.POS_X];
+     vf[f + ActorF32.POS_Y] = vf[F32.POS_Y];
+     vf[f + ActorF32.POS_Z] = vf[F32.POS_Z];
+     vf[f + ActorF32.VEL_X] = vf[F32.VEL_X];
+     vf[f + ActorF32.VEL_Y] = vf[F32.VEL_Y];
+     vf[f + ActorF32.VEL_Z] = vf[F32.VEL_Z];
+     vf[f + ActorF32.BASE_VEL_X] = this.baseVelX;
+     vf[f + ActorF32.BASE_VEL_Y] = this.baseVelY;
+     vf[f + ActorF32.BASE_VEL_Z] = this.baseVelZ;
+     vf[f + ActorF32.YAW] = vf[F32.CMD_YAW];
+     vf[f + ActorF32.PREV_YAW] = this.prevCmdYaw;
+     vf[f + ActorF32.PITCH] = vf[F32.CMD_PITCH];
+     vf[f + ActorF32.VIEW_OFS_Z] = vf[F32.VIEW_OFS_Z];
+     vf[f + ActorF32.SURF_NZ] = vf[F32.SURF_NZ];
+     vf[f + ActorF32.CMD_FMOVE] = vf[F32.CMD_FMOVE];
+     vf[f + ActorF32.CMD_SMOVE] = vf[F32.CMD_SMOVE];
+
+     vi[i + ActorI32.FLAGS] = vi[I32.FLAGS];
+     vi[i + ActorI32.MOVE_STATE] = vi[I32.MOVESTATE];
+     vi[i + ActorI32.BUTTONS] = vi[I32.BUTTONS];
+     vi[i + ActorI32.PREV_BUTTONS] = vi[I32.PREV_BUTTONS];
+   }
+
+   /** Load actor slot `actorId` into the engine's primary F32/I32 movement registers */
+   private copyActorSlotToPrimary(actorId: number): void {
+     const { f32: vf, i32: vi } = this.abi;
+     const f = ACTOR_F32_BASE_INDEX + actorId * ACTOR_F32_STRIDE;
+     const i = ACTOR_I32_BASE_INDEX + actorId * ACTOR_I32_STRIDE;
+
+     vf[F32.POS_X] = vf[f + ActorF32.POS_X];
+     vf[F32.POS_Y] = vf[f + ActorF32.POS_Y];
+     vf[F32.POS_Z] = vf[f + ActorF32.POS_Z];
+     vf[F32.VEL_X] = vf[f + ActorF32.VEL_X];
+     vf[F32.VEL_Y] = vf[f + ActorF32.VEL_Y];
+     vf[F32.VEL_Z] = vf[f + ActorF32.VEL_Z];
+     this.baseVelX = vf[f + ActorF32.BASE_VEL_X];
+     this.baseVelY = vf[f + ActorF32.BASE_VEL_Y];
+     this.baseVelZ = vf[f + ActorF32.BASE_VEL_Z];
+     vf[F32.YAW] = vf[f + ActorF32.YAW];
+     vf[F32.CMD_YAW] = vf[f + ActorF32.YAW];
+     this.prevCmdYaw = vf[f + ActorF32.PREV_YAW];
+     this.hasPrevYaw = true;
+     vf[F32.PITCH] = vf[f + ActorF32.PITCH];
+     vf[F32.CMD_PITCH] = vf[f + ActorF32.PITCH];
+     vf[F32.VIEW_OFS_Z] = vf[f + ActorF32.VIEW_OFS_Z];
+     vf[F32.SURF_NZ] = vf[f + ActorF32.SURF_NZ];
+     vf[F32.CMD_FMOVE] = vf[f + ActorF32.CMD_FMOVE];
+     vf[F32.CMD_SMOVE] = vf[f + ActorF32.CMD_SMOVE];
+
+     vi[I32.FLAGS] = vi[i + ActorI32.FLAGS];
+     vi[I32.MOVESTATE] = vi[i + ActorI32.MOVE_STATE];
+     vi[I32.BUTTONS] = vi[i + ActorI32.BUTTONS];
+     vi[I32.PREV_BUTTONS] = vi[i + ActorI32.PREV_BUTTONS];
+   }
+
+   /**
+    * Step a single bot through the exact GoldSrc CGameMovement pipeline by swapping
+    * its ABI slot into the primary registers, skipping stepSecondaryPhysics() and triggers.
+    */
+   private stepSingleBotMovement(actorId: number): void {
+     const { f32: vf, i32: vi } = this.abi;
+     const savedMaxSpeed = vf[F32.CMD_MAXSPEED];
+
+     //this.activeActorId = actorId;
+     this.copyActorSlotToPrimary(actorId);
+
+     try {
+       vf[F32.SURF_NZ] = f32(0);
+       const gravity = vf[F32.CVAR_GRAVITY];
+
+       // 1. Duck / uncrouch hull update
+       this.duck();
+
+       // 2. Categorize ground/air & water submersion state
+       this.categorizePosition();
+       this.playerWaterSubmersion = this.computePlayerWaterSubmersion();
+       const inWater = this.playerWaterSubmersion > 0.35;
+
+       // 3. CheckJumpButton (no autobhop for bots; fresh press only)
+       const buttons = vi[I32.BUTTONS];
+       const prevButtons = vi[I32.PREV_BUTTONS];
+       const jumpPressed = (buttons & IN_JUMP) !== 0;
+       const duckPressed = (buttons & IN_DUCK) !== 0;
+       const freshJump = jumpPressed && (prevButtons & IN_JUMP) === 0;
+
+       if (inWater) {
+         if (jumpPressed) {
+           vi[I32.FLAGS] &= ~FL_ONGROUND;
+           const nearSurface = this.playerWaterSubmersion < 0.68;
+           vf[F32.VEL_Z] = f32(Math.max(vf[F32.VEL_Z], nearSurface ? 275.0 : 185.0));
+         } else if (duckPressed) {
+           vi[I32.FLAGS] &= ~FL_ONGROUND;
+           vf[F32.VEL_Z] = f32(Math.min(vf[F32.VEL_Z], -150.0));
+         }
+       } else if (freshJump && (vi[I32.FLAGS] & FL_ONGROUND)) {
+         vi[I32.FLAGS] &= ~FL_ONGROUND;
+         vf[F32.VEL_Z] = f32(Math.sqrt(2.0 * gravity * 45.0));
+       }
+
+       // 4. StartGravity + baseVelocity (supports riding boosted teammates)
+       const isGroundedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0;
+       if (!isGroundedNow && !inWater) {
+         this.applyHalfGravity(gravity, 1.0);
+       }
+
+       if (this.baseVelX !== 0 || this.baseVelY !== 0 || this.baseVelZ !== 0) {
+         vf[F32.VEL_X] = f32(vf[F32.VEL_X] + this.baseVelX);
+         vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] + this.baseVelY);
+         vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] + this.baseVelZ);
+       }
+
+       // 5. AngleVectors (ActorInputCmd.pitch is Source pitch +down) -> wish velocity
+       const cmdYaw = vf[F32.CMD_YAW];
+       const effYaw =
+         this.sourceConfig.subTickYaw && this.hasPrevYaw
+           ? f32(this.prevCmdYaw + wrapAngleRad(cmdYaw - this.prevCmdYaw) * 0.5)
+           : cmdYaw;
+       this.prevCmdYaw = cmdYaw;
+
+       const { forward, right } = computeAngleVectors(vf[F32.CMD_PITCH], effYaw, 0);
+       const fLenXY = Math.hypot(forward.x, forward.y);
+       const rLenXY = Math.hypot(right.x, right.y);
+       const fxyX = fLenXY > 1e-6 ? forward.x / fLenXY : 0;
+       const fxyY = fLenXY > 1e-6 ? forward.y / fLenXY : 0;
+       const rxyX = rLenXY > 1e-6 ? right.x / rLenXY : 0;
+       const rxyY = rLenXY > 1e-6 ? right.y / rLenXY : 0;
+
+       const fmove = vf[F32.CMD_FMOVE];
+       const smove = vf[F32.CMD_SMOVE];
+       const botMaxSpeed = f32(250);
+       vf[F32.CMD_MAXSPEED] = botMaxSpeed;
+       const maxSpeed =
+         (vi[I32.FLAGS] & FL_DUCKING) && isGroundedNow
+           ? f32(botMaxSpeed * 0.34)
+           : botMaxSpeed;
+
+       const rawWishX = f32(fmove * fxyX + smove * rxyX);
+       const rawWishY = f32(fmove * fxyY + smove * rxyY);
+       const wishMag = f32(Math.hypot(rawWishX, rawWishY));
+       const wishspeed = f32(Math.min(wishMag, maxSpeed));
+       const wishDirX = wishMag > 1e-5 ? f32(rawWishX / wishMag) : f32(0);
+       const wishDirY = wishMag > 1e-5 ? f32(rawWishY / wishMag) : f32(0);
+
+       // 6. Ground vs Water vs Air/Surf movement branch
+       let flyBlocked = 0;
+       if (inWater) {
+         flyBlocked = this.waterMove(forward, right, fmove, smove, maxSpeed);
+       } else if (isGroundedNow) {
+         this.friction(this.sourceConfig.surfaceFriction);
+         this.walkMove(wishDirX, wishDirY, wishspeed, this.sourceConfig.surfaceFriction);
+       } else {
+         flyBlocked = this.airMove(wishDirX, wishDirY, wishspeed, this.sourceConfig.surfaceFriction);
+       }
+
+       if (this.baseVelX !== 0 || this.baseVelY !== 0 || this.baseVelZ !== 0) {
+         vf[F32.VEL_X] = f32(vf[F32.VEL_X] - this.baseVelX);
+         vf[F32.VEL_Y] = f32(vf[F32.VEL_Y] - this.baseVelY);
+         vf[F32.VEL_Z] = f32(vf[F32.VEL_Z] - this.baseVelZ);
+         this.baseVelX = f32(0);
+         this.baseVelY = f32(0);
+         this.baseVelZ = f32(0);
+       }
+
+       // 7. FinishGravity
+       this.categorizePosition();
+       const landedNow = (vi[I32.FLAGS] & FL_ONGROUND) !== 0 && !(inWater && vf[F32.VEL_Z] > 5);
+       if (inWater && vf[F32.VEL_Z] > 5) {
+         vi[I32.FLAGS] &= ~FL_ONGROUND;
+       }
+
+       if (!landedNow) {
+         if (!inWater) this.applyHalfGravity(gravity, 1.0);
+       } else {
+         vf[F32.VEL_Z] = f32(0);
+       }
+
+       // 8. MoveState & velocity clamp (skipping stepSecondaryPhysics & checkTriggers)
+       const isSurfing =
+         !landedNow &&
+         ((flyBlocked & 4) !== 0 || (vf[F32.SURF_NZ] > 0.05 && vf[F32.SURF_NZ] < SURF_NORMAL_Z));
+
+       if (inWater) {
+         vi[I32.MOVESTATE] = MoveState.WATER;
+       } else if (landedNow) {
+         vi[I32.MOVESTATE] = MoveState.GROUND;
+       } else if (isSurfing) {
+         vi[I32.MOVESTATE] = MoveState.SURF;
+       } else {
+         vi[I32.MOVESTATE] = MoveState.AIR;
+       }
+
+       this.checkVelocity();
+       vi[I32.PREV_BUTTONS] = buttons;
+     } finally {
+       this.copyPrimaryToActorSlot(actorId);
+       vf[F32.CMD_MAXSPEED] = savedMaxSpeed;
+       //this.activeActorId = 0;
+     }
+   }
 
   // Gravity Gun (Velocity-Level PID Controller)
   private readonly gravityGun: GravityGunState = {

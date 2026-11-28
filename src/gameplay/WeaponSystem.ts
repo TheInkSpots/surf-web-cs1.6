@@ -1,6 +1,13 @@
 // src/gameplay/WeaponSystem.ts
 import { f32 } from '../core/constants';
-import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
+import {
+  ACTOR_I32_BASE_INDEX,
+  ActorI32,
+  F32,
+  HitGroup,
+  I32,
+  PhysicsMemoryAbi,
+} from '../core/memoryAbi';
 import {
   computeAngleVectors,
   createWeaponRigidBody,
@@ -44,6 +51,8 @@ export interface WeaponSystemCallbacks {
   onToast?: (msg: string, color: string) => void;
   onHitMarker?: (isBlood: boolean, isKill: boolean) => void;
   onActiveSlotChanged?: (slot: WeaponSlot) => void;
+  onPlayerFired?: (origin: Vec3, soundRadiusHu: number) => void;
+  onActorKilled?: (victimId: number, hitGroup: HitGroup) => void;
 }
 
 export class WeaponSystem {
@@ -143,7 +152,6 @@ export class WeaponSystem {
   }
 
   public selectSlot(slot: number, silent = false): boolean {
-    console.log('[weapon] selectSlot:', slot);
     if (slot !== 1 && slot !== 2 && slot !== 3 && slot !== 5) return false;
     if (slot === 1 && !this.scout.owned) {
       if (!silent) {
@@ -167,18 +175,19 @@ export class WeaponSystem {
     this.setScopeZoom(0);
     this.activeSlot = slot;
     this.abi.i32[I32.WEAPON] = slot;
+    this.abi.i32[ACTOR_I32_BASE_INDEX + ActorI32.ACTIVE_SLOT] = slot;
 
     this.viewmodel.setActiveSlot(slot);
-        if (slot === 5) {
-          this.viewmodel.setGrenadeCount(this.grenade.count);
-          if (!silent) {
-            this.callbacks.onToast?.(
-              `HE GRENADE [5] (${this.grenade.count}/${this.grenade.maxCount})  •  [LMB/5] THROW  •  [RMB] LOB  •  [R] RESTOCK`,
-              'rgba(249, 115, 22, 0.85)',
-            );
-          }
-        }
-        this.viewmodel.triggerDeploy();
+    if (slot === 5) {
+      this.viewmodel.setGrenadeCount(this.grenade.count);
+      if (!silent) {
+        this.callbacks.onToast?.(
+          `HE GRENADE [5] (${this.grenade.count}/${this.grenade.maxCount})  •  [LMB/5] THROW  •  [RMB] LOB  •  [R] RESTOCK`,
+          'rgba(249, 115, 22, 0.85)',
+        );
+      }
+    }
+    this.viewmodel.triggerDeploy();
 
     if (!silent) {
       this.audio.playWeaponSwitch();
@@ -450,7 +459,7 @@ export class WeaponSystem {
 
     this.grenade.count -= 1;
     this.viewmodel.setGrenadeCount(this.grenade.count);
-        this.viewmodel.triggerGrenadeThrow(underhand);
+    this.viewmodel.triggerGrenadeThrow(underhand);
     const cooldown = 0.72;
     this.nextPrimaryAt = nowSec + cooldown;
     this.nextSecondaryAt = nowSec + cooldown;
@@ -564,7 +573,7 @@ export class WeaponSystem {
     this.viewmodel.triggerFire(1, false);
     this.input.applyRecoilKick(0.036, (Math.random() - 0.5) * 0.01);
 
-    this.fireHitscanRay(8192, spreadRad, 75, 19500, 0xfef08a);
+    this.fireHitscanRay(8192, spreadRad, 75, 0.85, 19500, 0xfef08a, 2400);
 
     if (wasScoped) {
       this.setScopeZoom(0);
@@ -592,28 +601,46 @@ export class WeaponSystem {
     this.viewmodel.triggerFire(2, silenced);
     this.input.applyRecoilKick(silenced ? 0.012 : 0.018, (Math.random() - 0.5) * 0.007);
 
-    this.fireHitscanRay(4096, spreadRad, silenced ? 30 : 34, 8200, silenced ? 0xbae6fd : 0xfde047);
+    this.fireHitscanRay(
+      4096,
+      spreadRad,
+      silenced ? 30 : 34,
+      0.5,
+      8200,
+      silenced ? 0xbae6fd : 0xfde047,
+      silenced ? 900 : 1800,
+    );
   }
 
   private fireHitscanRay(
     range: number,
     spreadRad: number,
     damage: number,
+    armorRatio: number,
     impulseMag: number,
     tracerColor: number,
+    soundRadiusHu: number,
   ): void {
     const eye = this.physics.getPlayerEyePosition();
     const { forward, right, up } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
 
     const sx = (Math.random() - 0.5) * 2 * spreadRad;
     const sy = (Math.random() - 0.5) * 2 * spreadRad;
+    const rx = forward.x + right.x * sx + up.x * sy;
+    const ry = forward.y + right.y * sx + up.y * sy;
+    const rz = forward.z + right.z * sx + up.z * sy;
+    const invLen = 1 / Math.max(1e-6, Math.hypot(rx, ry, rz));
     const dir: Vec3 = {
-      x: f32(forward.x + right.x * sx + up.x * sy),
-      y: f32(forward.y + right.y * sx + up.y * sy),
-      z: f32(forward.z + right.z * sx + up.z * sy),
+      x: f32(rx * invLen),
+      y: f32(ry * invLen),
+      z: f32(rz * invLen),
     };
 
-    const hit = this.physics.traceRay(eye, dir, range);
+    // Notify enemy bots of gunshot sound cue
+    this.callbacks.onPlayerFired?.(eye, soundRadiusHu);
+
+    // Hitscan against BSP brushes, VPhysics props, AND segmented actor hitboxes
+    const hit = this.physics.traceRayWithActors(eye, dir, range, 0);
 
     const muzzleStart: Vec3 = {
       x: f32(eye.x + forward.x * 20 + right.x * 6 - up.x * 4),
@@ -631,16 +658,39 @@ export class WeaponSystem {
 
     if (!hit.hit) return;
 
+    // 1. Segmented actor hitbox strike (Head 4.0x, Stomach 1.25x, Chest 1.0x, Legs 0.75x)
+    if (hit.actorId !== undefined && hit.hitGroup !== undefined) {
+      const dmgRes = this.physics.applyActorDamage(
+        hit.actorId,
+        damage,
+        hit.hitGroup,
+        armorRatio,
+        hit.point,
+        dir,
+        impulseMag,
+      );
+      this.renderer.spawnImpactEffect(hit.point, hit.normal, 'blood');
+      this.audio.playImpact(hit.point, 'blood', impulseMag);
+      this.callbacks.onHitMarker?.(true, dmgRes.killed);
+      if (dmgRes.killed) {
+        this.callbacks.onActorKilled?.(hit.actorId, hit.hitGroup);
+      }
+      return;
+    }
+
+    // 2. VPhysics rigid body prop / dummy
     if (hit.kind === 'rigidBody' && hit.body) {
       const res = this.physics.applyPointImpulse(hit.body, hit.point, dir, impulseMag, damage);
       const mat = res.bled ? 'blood' : hit.body.kind === 'weapon' ? 'weapon' : 'prop';
       this.renderer.spawnImpactEffect(hit.point, hit.normal, mat);
       this.audio.playImpact(hit.point, mat, impulseMag, hit.body.vel);
       this.callbacks.onHitMarker?.(res.bled, res.destroyed);
-    } else {
-      this.renderer.spawnImpactEffect(hit.point, hit.normal, 'world');
-      this.audio.playImpact(hit.point, 'world', impulseMag * 0.45);
+      return;
     }
+
+    // 3. Static world brush
+    this.renderer.spawnImpactEffect(hit.point, hit.normal, 'world');
+    this.audio.playImpact(hit.point, 'world', impulseMag * 0.45);
   }
 
   private performKnifeAttack(nowSec: number, heavy: boolean): void {
@@ -654,12 +704,32 @@ export class WeaponSystem {
     const eye = this.physics.getPlayerEyePosition();
     const { forward } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
     const reach = heavy ? 68 : 74;
-    const hit = this.physics.traceMelee(eye, forward, reach);
-
-    if (!hit.hit) return;
-
     const damage = heavy ? 65 : 25;
     const impulse = heavy ? 17500 : 8800;
+
+    // Check segmented actor hitboxes first for close-quarters melee
+    const actorHit = this.physics.traceRayWithActors(eye, forward, reach, 0);
+    if (actorHit.hit && actorHit.actorId !== undefined && actorHit.hitGroup !== undefined) {
+      const dmgRes = this.physics.applyActorDamage(
+        actorHit.actorId,
+        damage,
+        actorHit.hitGroup,
+        0.85,
+        actorHit.point,
+        forward,
+        impulse,
+      );
+      this.renderer.spawnImpactEffect(actorHit.point, actorHit.normal, 'blood');
+      this.audio.playImpact(actorHit.point, 'blood', impulse);
+      this.callbacks.onHitMarker?.(true, dmgRes.killed);
+      if (dmgRes.killed) {
+        this.callbacks.onActorKilled?.(actorHit.actorId, actorHit.hitGroup);
+      }
+      return;
+    }
+
+    const hit = this.physics.traceMelee(eye, forward, reach);
+    if (!hit.hit) return;
 
     if (hit.kind === 'rigidBody' && hit.body) {
       const res = this.physics.applyPointImpulse(hit.body, hit.point, forward, impulse, damage);

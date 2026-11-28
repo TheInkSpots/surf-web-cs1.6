@@ -1,7 +1,24 @@
 // src/render/WorldRenderer.ts
 import * as THREE from 'three';
-import { SURF_NORMAL_Z } from '../core/constants';
+import {
+  FL_DUCKING,
+  FL_ONGROUND,
+  HULL_DUCK,
+  HULL_STAND,
+  SURF_NORMAL_Z,
+} from '../core/constants';
 import { gsToThree } from '../core/coordinates';
+import {
+  ACTOR_F32_BASE_INDEX,
+  ACTOR_F32_STRIDE,
+  ACTOR_I32_BASE_INDEX,
+  ACTOR_I32_STRIDE,
+  ActorF32,
+  ActorI32,
+  MAX_ACTORS,
+  PhysicsMemoryAbi,
+  TeamId,
+} from '../core/memoryAbi';
 import { ConvexBrush, TriggerVolume } from '../physics/BrushBuilder';
 import {
   LadderVolume,
@@ -14,6 +31,23 @@ import {
 } from '../physics/GoldSrcPhysicsEngine';
 import { WorldSign } from '../maps/surfSandbox01';
 import { makeDevGridTexture, makeHazardTexture } from './textures';
+
+interface ActorRigVisual {
+  root: THREE.Group;
+  bodyPivot: THREE.Group;
+  head: THREE.Group;
+  torso: THREE.Mesh;
+  leftArm: THREE.Group;
+  rightArm: THREE.Group;
+  leftLeg: THREE.Group;
+  rightLeg: THREE.Group;
+  weaponScout: THREE.Group;
+  weaponUsp: THREE.Group;
+  weaponKnife: THREE.Group;
+  team: TeamId;
+  variant: number;
+  walkPhase: number;
+}
 
 interface ExplosionFx {
   mesh: THREE.Mesh;
@@ -63,8 +97,12 @@ export interface VehicleChaseCamInput {
 }
 
 export class WorldRenderer {
+  public readonly scene = new THREE.Scene();
+  public readonly debugGroup = new THREE.Group();
+  public baseFov = 90;
+
+  private actorVisuals = new Map<number, ActorRigVisual>();
   private readonly renderer: THREE.WebGLRenderer;
-  private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly vmScene = new THREE.Scene();
   private readonly vmCamera: THREE.PerspectiveCamera;
@@ -108,9 +146,6 @@ export class WorldRenderer {
   private readonly particleEffects: ParticleFx[] = [];
   private readonly decals: DecalFx[] = [];
 
-  public readonly debugGroup = new THREE.Group();
-  public baseFov = 90;
-
   private disposed = false;
   private scopeZoomLevel: 0 | 1 | 2 = 0;
   private currentFov = 90;
@@ -142,14 +177,12 @@ export class WorldRenderer {
   ): { x: number; y: number; z: number } {
     const clampedDt = Math.min(0.05, Math.max(0, dt));
 
-    // Snap inward quickly on wall collision; ease outward smoothly when clear
     const distRate = input.clampedDist < this.chaseCurrentDist ? 26 : 7.5;
     const distAlpha = 1 - Math.exp(-distRate * clampedDt);
     this.chaseCurrentDist = this.chaseInitialized
       ? this.chaseCurrentDist + (input.clampedDist - this.chaseCurrentDist) * distAlpha
       : input.clampedDist;
 
-    // Subtle lift above the sightline so the roof/hood stays cleanly framed
     const liftZ = 14 + (this.chaseCurrentDist / 220) * 10;
     const targetX = input.pivotX - input.forwardX * this.chaseCurrentDist;
     const targetY = input.pivotY - input.forwardY * this.chaseCurrentDist;
@@ -161,7 +194,6 @@ export class WorldRenderer {
       this.chasePos.z = targetZ;
       this.chaseInitialized = true;
     } else {
-      // Tighten tracking when wall-blocked so the spring never lags behind geometry
       const posRate = input.clampedDist < 120 ? 28 : 14;
       const posAlpha = 1 - Math.exp(-posRate * clampedDt);
       this.chasePos.x += (targetX - this.chasePos.x) * posAlpha;
@@ -169,7 +201,6 @@ export class WorldRenderer {
       this.chasePos.z += (targetZ - this.chasePos.z) * posAlpha;
     }
 
-    // Optional speed FOV punch (+0..10 deg) you can add to your camera FOV in update()
     const targetFovBoost = Math.min(10, Math.max(0, (input.speedXY - 220) * 0.014));
     this.chaseFovOffset += (targetFovBoost - this.chaseFovOffset) * (1 - Math.exp(-6 * clampedDt));
 
@@ -178,6 +209,201 @@ export class WorldRenderer {
 
   public getVehicleChaseFovOffset(): number {
     return this.chaseFovOffset;
+  }
+
+  private createActorVisual(team: TeamId, variant: number): ActorRigVisual {
+    const isT = team === TeamId.T;
+
+    // Distinct CS 1.6 faction palettes: T (Phoenix / Leet) vs CT (SAS / GIGN)
+    const uniformHex = isT
+      ? variant === 0 ? 0x3b3a36 : 0x5c533e  // Phoenix charcoal vs Leet olive/tan
+      : variant === 0 ? 0x1e293b : 0x1d3557; // SAS dark navy vs GIGN slate blue
+    const vestHex = isT ? 0x8a6d4b : 0x334155;
+    const trimHex = isT ? 0xdc2626 : 0x38bdf8;
+    const headHex = isT ? (variant === 0 ? 0x1f2937 : 0xd6a57c) : 0x111827;
+
+    const uniformMat = new THREE.MeshStandardMaterial({ color: uniformHex, roughness: 0.78, transparent: true });
+    const vestMat = new THREE.MeshStandardMaterial({ color: vestHex, roughness: 0.65, transparent: true });
+    const headMat = new THREE.MeshStandardMaterial({ color: headHex, roughness: 0.7, transparent: true });
+    const trimMat = new THREE.MeshStandardMaterial({ color: trimHex, roughness: 0.4, transparent: true });
+    const gunMat = new THREE.MeshStandardMaterial({ color: 0x1e242b, metalness: 0.55, roughness: 0.4 });
+
+    this.sharedMaterials.push(uniformMat, vestMat, headMat, trimMat, gunMat);
+
+    const root = new THREE.Group();
+    const bodyPivot = new THREE.Group();
+    root.add(bodyPivot);
+
+    // Dimensions match 72u Hammer standing height (Three.js Y-up: +X forward, +Y up, -Z left)
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(14, 24, 18), vestMat);
+    torso.position.set(0, 44, 0);
+    bodyPivot.add(torso);
+
+    const head = new THREE.Group();
+    head.position.set(0, 58, 0);
+    const skull = new THREE.Mesh(new THREE.BoxGeometry(11, 12, 11), headMat);
+    skull.position.set(0, 6, 0);
+    head.add(skull);
+
+    const headgear = new THREE.Mesh(
+      isT ? new THREE.BoxGeometry(11.6, 2.5, 11.6) : new THREE.BoxGeometry(12.4, 5.5, 12.4),
+      isT ? trimMat : uniformMat,
+    );
+    headgear.position.set(0, isT ? 9.5 : 10.5, 0);
+    head.add(headgear);
+    bodyPivot.add(head);
+
+    const leftArm = new THREE.Group();
+    leftArm.position.set(0, 53, -12);
+    const leftArmMesh = new THREE.Mesh(new THREE.BoxGeometry(6, 20, 6), uniformMat);
+    leftArmMesh.position.set(0, -9, 0);
+    leftArm.add(leftArmMesh);
+    bodyPivot.add(leftArm);
+
+    const rightArm = new THREE.Group();
+    rightArm.position.set(0, 53, 12);
+    const rightArmMesh = new THREE.Mesh(new THREE.BoxGeometry(6, 20, 6), uniformMat);
+    rightArmMesh.position.set(0, -9, 0);
+    rightArm.add(rightArmMesh);
+    bodyPivot.add(rightArm);
+
+    const weaponScout = new THREE.Group();
+    const scoutBarrel = new THREE.Mesh(new THREE.BoxGeometry(34, 3.2, 2.8), gunMat);
+    scoutBarrel.position.set(14, -14, -3);
+    weaponScout.add(scoutBarrel);
+    rightArm.add(weaponScout);
+
+    const weaponUsp = new THREE.Group();
+    const uspSlide = new THREE.Mesh(new THREE.BoxGeometry(12, 3.2, 2.2), gunMat);
+    uspSlide.position.set(6, -14, -2);
+    weaponUsp.add(uspSlide);
+    rightArm.add(weaponUsp);
+
+    const weaponKnife = new THREE.Group();
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(9, 1.4, 1.2), trimMat);
+    blade.position.set(5, -14, -1);
+    weaponKnife.add(blade);
+    rightArm.add(weaponKnife);
+
+    const leftLeg = new THREE.Group();
+    leftLeg.position.set(0, 32, -5.5);
+    const leftLegMesh = new THREE.Mesh(new THREE.BoxGeometry(7.5, 32, 7.5), uniformMat);
+    leftLegMesh.position.set(0, -16, 0);
+    leftLeg.add(leftLegMesh);
+    bodyPivot.add(leftLeg);
+
+    const rightLeg = new THREE.Group();
+    rightLeg.position.set(0, 32, 5.5);
+    const rightLegMesh = new THREE.Mesh(new THREE.BoxGeometry(7.5, 32, 7.5), uniformMat);
+    rightLegMesh.position.set(0, -16, 0);
+    rightLeg.add(rightLegMesh);
+    bodyPivot.add(rightLeg);
+
+    this.scene.add(root);
+    return {
+      root,
+      bodyPivot,
+      head,
+      torso,
+      leftArm,
+      rightArm,
+      leftLeg,
+      rightLeg,
+      weaponScout,
+      weaponUsp,
+      weaponKnife,
+      team,
+      variant,
+      walkPhase: 0,
+    };
+  }
+
+  /** Per-frame sync for remote/bot T & CT actors (skips local player slot 0 in first-person) */
+  public syncActors(abi: PhysicsMemoryAbi, dt: number, solidTeammates: boolean): void {
+    const f32Arr = abi.f32;
+    const i32Arr = abi.i32;
+
+    const p0x = f32Arr[ACTOR_F32_BASE_INDEX + ActorF32.POS_X];
+    const p0y = f32Arr[ACTOR_F32_BASE_INDEX + ActorF32.POS_Y];
+    const p0z = f32Arr[ACTOR_F32_BASE_INDEX + ActorF32.POS_Z];
+    const p0Team = i32Arr[ACTOR_I32_BASE_INDEX + ActorI32.TEAM] as TeamId;
+
+    for (let id = 1; id < MAX_ACTORS; id++) {
+      const idxI = ACTOR_I32_BASE_INDEX + id * ACTOR_I32_STRIDE;
+      const active = i32Arr[idxI + ActorI32.ACTIVE] === 1;
+      const alive = i32Arr[idxI + ActorI32.ALIVE] === 1;
+      const team = i32Arr[idxI + ActorI32.TEAM] as TeamId;
+      const variant = i32Arr[idxI + ActorI32.MODEL_VARIANT];
+
+      let vis = this.actorVisuals.get(id);
+
+      // Hide on death so VPhysics articulated ragdoll takes over seamlessly
+      if (!active || !alive || team === TeamId.SPEC) {
+        if (vis) vis.root.visible = false;
+        continue;
+      }
+
+      if (!vis || vis.team !== team || vis.variant !== variant) {
+        if (vis) this.scene.remove(vis.root);
+        vis = this.createActorVisual(team, variant);
+        this.actorVisuals.set(id, vis);
+      }
+
+      vis.root.visible = true;
+      const idxF = ACTOR_F32_BASE_INDEX + id * ACTOR_F32_STRIDE;
+      const flags = i32Arr[idxI + ActorI32.FLAGS];
+      const ducking = (flags & FL_DUCKING) !== 0;
+      const grounded = (flags & FL_ONGROUND) !== 0;
+      const halfZ = ducking ? HULL_DUCK.hz : HULL_STAND.hz;
+
+      // Position root at actor feet (Hammer Z-up -> Three.js Y-up)
+      const gx = f32Arr[idxF + ActorF32.POS_X];
+      const gy = f32Arr[idxF + ActorF32.POS_Y];
+      const gz = f32Arr[idxF + ActorF32.POS_Z] - halfZ;
+      gsToThree(gx, gy, gz, vis.root.position);
+      vis.root.rotation.y = f32Arr[idxF + ActorF32.YAW];
+
+      // Crouch compression + walk/jump limb animations
+      const spdXY = Math.hypot(f32Arr[idxF + ActorF32.VEL_X], f32Arr[idxF + ActorF32.VEL_Y]);
+      vis.bodyPivot.scale.y = ducking ? 0.56 : 1.0;
+
+      if (!grounded) {
+        vis.leftLeg.rotation.z = 0.55;
+        vis.rightLeg.rotation.z = -0.35;
+      } else if (spdXY > 15) {
+        vis.walkPhase += dt * Math.min(14, spdXY * 0.045);
+        const swing = Math.sin(vis.walkPhase) * 0.65;
+        vis.leftLeg.rotation.z = swing;
+        vis.rightLeg.rotation.z = -swing;
+      } else {
+        vis.leftLeg.rotation.z *= 0.85;
+        vis.rightLeg.rotation.z *= 0.85;
+      }
+
+      // Weapon aim pitch (+down Source pitch -> Z rotation in local +X forward rig)
+      const pitch = f32Arr[idxF + ActorF32.PITCH];
+      vis.head.rotation.z = -pitch * 0.85;
+      vis.rightArm.rotation.z = Math.PI * 0.45 - pitch;
+      vis.leftArm.rotation.z = Math.PI * 0.35 - pitch * 0.6;
+
+      const slot = i32Arr[idxI + ActorI32.ACTIVE_SLOT];
+      vis.weaponScout.visible = slot === 1;
+      vis.weaponUsp.visible = slot === 2;
+      vis.weaponKnife.visible = slot === 3 || slot === 5;
+
+      // Semiclip opacity fade for nearby teammates when mp_solid_teammates is disabled
+      const isTeammate = team === p0Team;
+      let alpha = 1.0;
+      if (isTeammate && !solidTeammates) {
+        const dist = Math.hypot(gx - p0x, gy - p0y, f32Arr[idxF + ActorF32.POS_Z] - p0z);
+        alpha = Math.max(0.25, Math.min(1.0, (dist - 36) / 110));
+      }
+      vis.root.traverse((obj) => {
+        if (obj instanceof THREE.Mesh && obj.material instanceof THREE.MeshStandardMaterial) {
+          obj.material.opacity = alpha;
+        }
+      });
+    }
   }
 
   constructor(
@@ -325,7 +551,6 @@ export class WorldRenderer {
       }),
     };
 
-    // Track all shared materials so unused map styles/prop materials are still disposed cleanly
     this.sharedMaterials.push(
       this.rigidBodyMat,
       this.foamPropMat,
@@ -338,7 +563,6 @@ export class WorldRenderer {
       ...Object.values(mats),
     );
 
-    // Debug joint segments
     const jointGeo = new THREE.BufferGeometry();
     jointGeo.setAttribute('position', new THREE.BufferAttribute(this.jointDebugPositions, 3));
     jointGeo.setDrawRange(0, 0);
@@ -349,7 +573,6 @@ export class WorldRenderer {
     this.debugGroup.add(this.ladderDebugGroup, this.jointDebugLines);
     this.scene.add(this.debugGroup, this.waterGroup);
 
-    // Gravity Gun PID tether + wireframe halo
     const beamGeo = new THREE.BufferGeometry();
     beamGeo.setAttribute('position', new THREE.BufferAttribute(this.gravBeamPositions, 3));
     this.gravBeamLine = new THREE.Line(
@@ -446,6 +669,8 @@ export class WorldRenderer {
         } else if (obj.material) {
           this.disposeMaterialWithTextures(obj.material, disposedMats, disposedTexs);
         }
+      } else if (obj instanceof THREE.Sprite) {
+        this.disposeMaterialWithTextures(obj.material, disposedMats, disposedTexs);
       }
     });
 
@@ -470,6 +695,7 @@ export class WorldRenderer {
     }
 
     this.rigidBodyMeshes.clear();
+    this.actorVisuals.clear();
     this.seenRigidBodyIds.clear();
     this.ropeLines.clear();
     this.seenRopeIds.clear();
@@ -514,7 +740,6 @@ export class WorldRenderer {
       const cx = (w.minX + w.maxX) * 0.5;
       const cy = (w.minY + w.maxY) * 0.5;
 
-      // Animated top water surface plane
       const surfGeo = new THREE.PlaneGeometry(sx, sy);
       surfGeo.rotateX(-Math.PI / 2);
       const surfMat = new THREE.MeshStandardMaterial({
@@ -533,7 +758,6 @@ export class WorldRenderer {
       gsToThree(cx, cy, w.surfaceZ, surfMesh.position);
       this.waterGroup.add(surfMesh);
 
-      // Subtle volumetric depth tint
       const volGeo = new THREE.BoxGeometry(sx, depth, sy);
       const volMat = new THREE.MeshBasicMaterial({
         color: 0x0ea5e9,
@@ -578,7 +802,6 @@ export class WorldRenderer {
       gsToThree(cx, cy, cz, edges.position);
       boxGeo.dispose();
 
-      // Outward climb normal indicator
       const p0 = gsToThree(cx, cy, cz);
       const p1 = gsToThree(cx + l.normalX * 42, cy + l.normalY * 42, cz + (l.normalZ ?? 0) * 42);
       const normLine = new THREE.Line(
@@ -770,7 +993,6 @@ export class WorldRenderer {
       const hood = new THREE.Mesh(new THREE.BoxGeometry(b.hx * 0.85, b.hz * 0.65, b.hy * 1.5), frameMat);
       hood.position.set(b.hx * 0.52, b.hz * 0.62, 0);
 
-      // Roll cage pillars + roof bar
       const cageRoof = new THREE.Mesh(new THREE.BoxGeometry(b.hx * 0.9, 4, b.hy * 1.55), frameMat);
       cageRoof.position.set(-10, b.hz + 28, 0);
       const pillarOffsets: Array<[number, number]> = [
@@ -785,7 +1007,6 @@ export class WorldRenderer {
         group.add(post);
       }
 
-      // Headlights (+X front) & Taillights (-X rear)
       const hlL = new THREE.Mesh(new THREE.BoxGeometry(3, 6, 10), headlightMat);
       hlL.position.set(b.hx + 1, 2, b.hy * 0.62);
       const hlR = hlL.clone();
@@ -1022,7 +1243,6 @@ export class WorldRenderer {
         const strutLine = visual.strutLines[wIdx];
         if (!wheelGroup || !strutLine) continue;
 
-        // Hardpoint in Three.js world space
         const hpWorld = this.tmpVecC
           .set(wheel.localHardpoint.x, wheel.localHardpoint.z, -wheel.localHardpoint.y)
           .applyQuaternion(this.tmpQuat)
@@ -1031,7 +1251,6 @@ export class WorldRenderer {
         const ext = Math.max(0, wheel.restLength - wheel.compression);
         wheelGroup.position.copy(hpWorld).addScaledVector(chassisUp, -ext);
 
-        // Apply chassis orientation + front steering + rolling wheel spin around local Z axle
         wheelGroup.quaternion.copy(this.tmpQuat);
         if (wheel.steerable) {
           wheelGroup.rotateY(steerAngle);
@@ -1041,7 +1260,6 @@ export class WorldRenderer {
           tireMesh.rotation.z = -wheel.spinAngle;
         }
 
-        // Update suspension strut line between chassis hardpoint and wheel hub
         const attr = strutLine.geometry.getAttribute('position') as THREE.BufferAttribute;
         const arr = attr.array as Float32Array;
         arr[0] = hpWorld.x;
@@ -1099,7 +1317,6 @@ export class WorldRenderer {
       tireGeo.rotateX(Math.PI * 0.5);
       const tire = new THREE.Mesh(tireGeo, tireMat);
 
-      // Spoke bar makes wheel spin clearly readable while driving
       const spoke = new THREE.Mesh(new THREE.BoxGeometry(w.radius * 1.4, 3.2, 12.2), rimMat);
       const spokeCross = new THREE.Mesh(new THREE.BoxGeometry(3.2, w.radius * 1.4, 12.2), rimMat);
 

@@ -23,6 +23,59 @@
       </div>
     </div>
 
+    <div id="match-hud" class="hidden">
+          <div class="match-team match-t">
+            <span class="team-tag">T</span>
+            <strong id="score-t">0</strong>
+            <span class="alive-count" id="alive-t">0 alive</span>
+          </div>
+          <div class="match-clock">
+            <span id="round-phase">LIVE</span>
+            <strong id="round-timer">01:55</strong>
+            <span id="round-num">R1</span>
+          </div>
+          <div class="match-team match-ct">
+            <span class="alive-count" id="alive-ct">0 alive</span>
+            <strong id="score-ct">0</strong>
+            <span class="team-tag">CT</span>
+          </div>
+        </div>
+
+        <!-- Top-Right Kill Feed -->
+        <div id="kill-feed" aria-live="polite"></div>
+
+        <!-- Center T vs. CT Scoreboard (Hold Tab / Toggle) -->
+        <div id="scoreboard-overlay" class="hidden">
+          <div class="sb-shell">
+            <div class="sb-header">
+              <span>CS 1.6 MATCH SCOREBOARD</span>
+              <span id="sb-round-meta">ROUND 1 • 01:55</span>
+            </div>
+            <div class="sb-columns">
+              <div class="sb-team-box sb-t">
+                <div class="sb-team-head">
+                  <span>TERRORISTS</span>
+                  <strong id="sb-score-t">0</strong>
+                </div>
+                <table class="sb-table">
+                  <thead><tr><th>PLAYER</th><th>HP</th><th>K</th><th>D</th><th>$</th></tr></thead>
+                  <tbody id="sb-body-t"></tbody>
+                </table>
+              </div>
+              <div class="sb-team-box sb-ct">
+                <div class="sb-team-head">
+                  <span>COUNTER-TERRORISTS</span>
+                  <strong id="sb-score-ct">0</strong>
+                </div>
+                <table class="sb-table">
+                  <thead><tr><th>PLAYER</th><th>HP</th><th>K</th><th>D</th><th>$</th></tr></thead>
+                  <tbody id="sb-body-ct"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
     <div id="timer-panel">
       <div class="timer-card">
         <span id="timer-state" class="timer-badge">READY</span>

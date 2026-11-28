@@ -8,7 +8,17 @@ import {
   IN_JUMP,
   MoveState,
 } from '../core/constants';
-import { F32, I32, PhysicsMemoryAbi } from '../core/memoryAbi';
+import {
+  ACTOR_I32_BASE_INDEX,
+  ACTOR_I32_STRIDE,
+  ActorI32,
+  F32,
+  HitGroup,
+  I32,
+  MAX_ACTORS,
+  PhysicsMemoryAbi,
+  TeamId,
+} from '../core/memoryAbi';
 import {
   CheckpointState,
   computeAngleVectors,
@@ -24,28 +34,41 @@ import {
   SourceRigidBody,
   SourceRope,
   SourceVehicle,
+  SpawnPoint,
   WaterVolume,
 } from '../physics/GoldSrcPhysicsEngine';
 import { MapBuildResult } from '../maps/surfSandbox01';
 import { DEFAULT_MAP_ID, getMapById, MapId } from '../maps/mapRegistry';
 import { SurfAudioEngine } from '../audio/SurfAudioEngine';
 import { WorldRenderer } from '../render/WorldRenderer';
+import { TeammateNameplates } from '../render/TeammateNameplates';
 import { ViewmodelRig } from '../render/ViewmodelRig';
 import { InputController } from '../gameplay/InputController';
 import { RunTracker } from '../gameplay/RunTracker';
 import { StrafeSyncTracker } from '../gameplay/StrafeSyncTracker';
 import { WeaponSystem } from '../gameplay/WeaponSystem';
-import { HudController, InteractPrompt, SubsystemTelemetry } from '../ui/HudController';
+import { BotController, MapNavGraph, NavWaypoint } from '../gameplay/BotController';
+import { TeamMatchManager } from '../gameplay/TeamMatchManager';
+import {
+  HudController,
+  InteractPrompt,
+  MatchHudState,
+  ScoreboardRow,
+  SubsystemTelemetry,
+} from '../ui/HudController';
 import { CombatHudOverlay } from '../ui/CombatHudOverlay';
 import { MenuController } from '../ui/MenuController';
 
-/** Optional subsystem hooks provided by subsystem-enabled maps (e.g., surfSandbox04) */
+/** Optional subsystem & combat/nav hooks provided by extended maps */
 interface SubsystemMapExtensions {
   createJoints?: () => SourceJoint[];
   createRopes?: () => SourceRope[];
   createWaterVolumes?: () => WaterVolume[];
   createVehicles?: () => SourceVehicle[];
   ladders?: LadderVolume[];
+  navGraph?: MapNavGraph;
+  tSpawns?: SpawnPoint[];
+  ctSpawns?: SpawnPoint[];
 }
 
 type ExtendedMapBuildResult = MapBuildResult & SubsystemMapExtensions;
@@ -82,7 +105,41 @@ export class SurfApp {
   private createInitialRigidBodies!: () => SourceRigidBody[];
   private physics!: GoldSrcPhysicsEngine;
   private renderer!: WorldRenderer;
+  private nameplates: TeammateNameplates | null = null;
   private weapons!: WeaponSystem;
+  private bots!: BotController;
+  private matchManager!: TeamMatchManager;
+
+  // T vs. CT match state & HUD telemetry
+  private playerTeam: TeamId = TeamId.CT;
+  private botsPerTeam = 3;
+  private roundRestartAtTick = 0;
+  private readonly actorNames: string[] = [
+    'YOU',
+    'BOT Maverick',
+    'BOT Viper',
+    'BOT Goose',
+    'BOT Phoenix',
+    'BOT Crusher',
+    'BOT Nomad',
+    'BOT Razor',
+    'BOT Wolf',
+    'BOT Hawk',
+    'BOT Echo',
+    'BOT Shade',
+    'BOT Frost',
+    'BOT Blaze',
+    'BOT Rook',
+    'BOT Ghost',
+  ];
+  private readonly actorKills = new Int32Array(MAX_ACTORS);
+  private readonly actorDeaths = new Int32Array(MAX_ACTORS);
+  private matchActive = true;
+  private tScore = 0;
+  private ctScore = 0;
+  private roundNumber = 1;
+  private roundTimerSec = 115;
+  private roundPhase: 'FREEZETIME' | 'LIVE' | 'ROUND_END' = 'LIVE';
 
   private activeCheckpoint: CheckpointState | null = null;
   private customCheckpoint: CheckpointState | null = null;
@@ -209,6 +266,7 @@ export class SurfApp {
     this.loadMap(initialMapId, initialMap, false);
 
     window.addEventListener('keydown', this.handleSandboxHotkey);
+    window.addEventListener('keyup', this.handleSandboxKeyup);
     this.menu.syncAll();
   }
 
@@ -227,8 +285,18 @@ export class SurfApp {
     this.drivingVehicleId = null;
     this.prevChassisYaw = null;
     this.gravityGunActive = false;
+    this.roundRestartAtTick = 0;
+    this.tScore = 0;
+    this.ctScore = 0;
+    this.roundNumber = 1;
+    this.roundTimerSec = 115;
+    this.roundPhase = 'LIVE';
+    this.actorKills.fill(0);
+    this.actorDeaths.fill(0);
     this.runTracker.reset();
 
+    this.nameplates?.dispose();
+    this.nameplates = null;
     this.renderer?.dispose();
 
     this.renderer = new WorldRenderer(
@@ -241,6 +309,7 @@ export class SurfApp {
     this.renderer.baseFov = this.currentBaseFov;
     this.renderer.setDebugVisible(this.currentDebugVisible);
     this.renderer.resetVehicleChaseCamera();
+    this.nameplates = new TeammateNameplates(this.renderer.scene);
 
     this.physics = new GoldSrcPhysicsEngine(
       this.abi,
@@ -401,6 +470,47 @@ export class SurfApp {
 
     this.registerMapSubsystems(mapData);
 
+    // Initialize PODBot / ZBot AI controller
+    this.bots = new BotController(this.abi, this.physics, {
+      onBotFired: (ev) => {
+        const tracerColor = ev.slot === 1 ? 0xfef08a : 0xfde047;
+        this.renderer.spawnBulletTracer(ev.origin, ev.hitPoint, tracerColor);
+
+        const impactMat = ev.hitActorId !== undefined ? 'blood' : 'world';
+        this.renderer.spawnImpactEffect(ev.hitPoint, { x: 0, y: 0, z: 1 }, impactMat);
+        this.audio.playImpact(ev.hitPoint, impactMat, ev.slot === 1 ? 2600 : 1100);
+
+        if (ev.killed) {
+          this.matchManager.awardFrag(ev.shooterId);
+          if (ev.hitActorId !== undefined) {
+            const wpnName = ev.slot === 1 ? 'SCOUT' : ev.slot === 3 ? 'KNIFE' : 'USP .45';
+            this.recordKill(ev.shooterId, ev.hitActorId, wpnName, ev.hitGroup === HitGroup.HEAD);
+          }
+          if (ev.hitActorId === 0) {
+            this.hud.showToast(
+              ev.hitGroup === HitGroup.HEAD
+                ? `ELIMINATED BY ${this.getActorName(ev.shooterId)} [HEADSHOT]`
+                : `ELIMINATED BY ${this.getActorName(ev.shooterId)}`,
+              'rgba(220, 38, 38, 0.92)',
+            );
+          }
+        }
+      },
+      onObjectiveComplete: (actorId, team) => {
+        const label = team === TeamId.T ? 'C4 PLANTED BY TERRORISTS' : 'BOMB DEFUSED BY CT';
+        this.audio.playStartBeep();
+        this.hud.showToast(`${label} (${this.getActorName(actorId)})`, 'rgba(251, 191, 36, 0.9)');
+      },
+    });
+    this.bots.setNavGraph(mapData.navGraph ?? this.buildFallbackNavGraph(mapData.spawn));
+
+    // Initialize T vs. CT round & team match manager
+    this.matchManager = new TeamMatchManager(this.abi, this.physics, this.bots, {
+      tSpawns: mapData.tSpawns,
+      ctSpawns: mapData.ctSpawns,
+      fallbackSpawn: mapData.spawn,
+    });
+
     this.weapons = new WeaponSystem(
       this.abi,
       this.physics,
@@ -417,17 +527,170 @@ export class SurfApp {
             this.hud.setActiveWeaponSlot(slot);
           }
         },
+        onPlayerFired: (origin, soundRadiusHu) => {
+          this.bots.notifySoundEvent(0, origin, soundRadiusHu, this.abi.i32[I32.TICK]);
+        },
+        onActorKilled: (victimId, hitGroup) => {
+          this.matchManager.awardFrag(0);
+          const slot = this.weapons.getActiveSlot();
+          const wpnName =
+            slot === 1 ? 'SCOUT' : slot === 2 ? 'USP .45' : slot === 5 ? 'HE GRENADE' : 'KNIFE';
+          this.recordKill(0, victimId, wpnName, hitGroup === HitGroup.HEAD);
+          const hsTag = hitGroup === HitGroup.HEAD ? ' ★ HEADSHOT' : '';
+          this.hud.showToast(
+            `ELIMINATED ${this.getActorName(victimId)}${hsTag}  (+$300)`,
+            hitGroup === HitGroup.HEAD ? 'rgba(239, 68, 68, 0.95)' : 'rgba(52, 211, 153, 0.85)',
+          );
+        },
       },
     );
 
     this.physics.teleportToSpawn(false);
+    this.matchManager.configure(
+      {
+        tSpawns: mapData.tSpawns,
+        ctSpawns: mapData.ctSpawns,
+        fallbackSpawn: mapData.spawn,
+      },
+      this.playerTeam,
+      this.botsPerTeam,
+    );
     this.weapons.resetLoadout();
     this.input.resetView(mapData.spawn.yaw, mapData.spawn.pitch);
     this.menu.setSelectedMap(mapId);
 
     if (announce) {
-      this.hud.showToast(`LOADED ${def.name.toUpperCase()}`, 'rgba(56,189,248,0.85)');
+      const teamLabel = this.playerTeam === TeamId.CT ? 'CT' : 'T';
+      this.hud.showToast(
+        `LOADED ${def.name.toUpperCase()}  •  TEAM ${teamLabel} (${this.botsPerTeam}v${this.botsPerTeam})  •  [M] SWAP TEAM  •  [F3] SCOREBOARD`,
+        'rgba(56,189,248,0.85)',
+      );
     }
+  }
+
+  private getActorName(actorId: number): string {
+    return this.actorNames[actorId] ?? `BOT #${actorId}`;
+  }
+
+  private recordKill(
+    killerId: number,
+    victimId: number,
+    weapon: string,
+    headshot: boolean,
+  ): void {
+    const i32 = this.abi.i32;
+    if (killerId >= 0 && killerId < MAX_ACTORS && killerId !== victimId) {
+      this.actorKills[killerId] += 1;
+    }
+    if (victimId >= 0 && victimId < MAX_ACTORS) {
+      this.actorDeaths[victimId] += 1;
+    }
+
+    const killerTeam =
+      killerId >= 0 && killerId < MAX_ACTORS
+        ? (i32[ACTOR_I32_BASE_INDEX + killerId * ACTOR_I32_STRIDE + ActorI32.TEAM] as TeamId)
+        : TeamId.SPEC;
+    const victimTeam =
+      victimId >= 0 && victimId < MAX_ACTORS
+        ? (i32[ACTOR_I32_BASE_INDEX + victimId * ACTOR_I32_STRIDE + ActorI32.TEAM] as TeamId)
+        : TeamId.SPEC;
+
+    this.hud.pushKillFeed({
+      killerName: this.getActorName(killerId),
+      killerTeam,
+      victimName: this.getActorName(victimId),
+      victimTeam,
+      weapon,
+      headshot,
+      isLocalInvolved: killerId === 0 || victimId === 0,
+    });
+  }
+
+  private buildMatchHudState(): MatchHudState {
+    const i32 = this.abi.i32;
+    let tAlive = 0;
+    let ctAlive = 0;
+    const rows: ScoreboardRow[] = [];
+
+    for (let id = 0; id < MAX_ACTORS; id++) {
+      const idx = ACTOR_I32_BASE_INDEX + id * ACTOR_I32_STRIDE;
+      if (i32[idx + ActorI32.ACTIVE] !== 1) continue;
+
+      const team = i32[idx + ActorI32.TEAM] as TeamId;
+      const alive = i32[idx + ActorI32.ALIVE] === 1;
+      if (alive && team === TeamId.T) tAlive++;
+      else if (alive && team === TeamId.CT) ctAlive++;
+
+      rows.push({
+        actorId: id,
+        name: this.getActorName(id),
+        team,
+        alive,
+        hp: i32[idx + ActorI32.HP],
+        kills: this.actorKills[id],
+        deaths: this.actorDeaths[id],
+        cash: i32[idx + ActorI32.CASH],
+        isLocal: id === 0,
+      });
+    }
+
+    return {
+      active: this.matchActive,
+      tScore: this.tScore,
+      ctScore: this.ctScore,
+      tAlive,
+      ctAlive,
+      roundNumber: this.roundNumber,
+      roundTimerSec: this.roundTimerSec,
+      phase: this.roundPhase,
+      rows,
+    };
+  }
+
+  /**
+   * Generates a lightweight 4-node perimeter patrol graph around the spawn deck
+   * when a surf map does not define an explicit MapNavGraph.
+   */
+  private buildFallbackNavGraph(spawn: SpawnPoint): MapNavGraph {
+    const waypoints: NavWaypoint[] = [
+      {
+        id: 0,
+        x: spawn.x - 60,
+        y: spawn.y - 80,
+        z: spawn.z,
+        radius: 44,
+        flags: ['ct_spawn'],
+        edges: [{ to: 1 }, { to: 3 }],
+      },
+      {
+        id: 1,
+        x: spawn.x + 180,
+        y: spawn.y - 80,
+        z: spawn.z,
+        radius: 44,
+        flags: ['t_spawn'],
+        edges: [{ to: 0 }, { to: 2 }],
+      },
+      {
+        id: 2,
+        x: spawn.x + 180,
+        y: spawn.y + 80,
+        z: spawn.z,
+        radius: 44,
+        flags: ['t_spawn'],
+        edges: [{ to: 1 }, { to: 3 }],
+      },
+      {
+        id: 3,
+        x: spawn.x - 60,
+        y: spawn.y + 80,
+        z: spawn.z,
+        radius: 44,
+        flags: ['ct_spawn'],
+        edges: [{ to: 2 }, { to: 0 }],
+      },
+    ];
+    return { waypoints };
   }
 
   private registerMapSubsystems(mapData: ExtendedMapBuildResult): void {
@@ -482,13 +745,17 @@ export class SurfApp {
   private fullReset(): void {
     this.activeCheckpoint = null;
     this.visitedCheckpoints.clear();
+    this.roundRestartAtTick = 0;
+    this.roundTimerSec = 115;
+    this.roundPhase = 'LIVE';
     this.setGravityGunMode(false);
     this.physics.restoreVitals();
     this.resetSubsystemsAndProps();
     this.physics.teleportToSpawn(false);
+    this.matchManager.startNewRound(this.abi.i32[I32.TICK]);
     this.weapons.resetLoadout();
     this.input.resetView(this.currentMapData.spawn.yaw, this.currentMapData.spawn.pitch);
-    this.hud.showToast('FULL RUN, PROPS & SUBSYSTEMS RESET', 'rgba(245,158,11,0.65)');
+    this.hud.showToast('FULL RUN, BOTS, PROPS & SUBSYSTEMS RESET', 'rgba(245,158,11,0.65)');
   }
 
   // ---------------------------------------------------------------------------
@@ -535,7 +802,6 @@ export class SurfApp {
     }
 
     if (this.gravityGunActive) {
-      // Direct Gravity Gun punt impulse on looked-at rigid body
       const eye = this.physics.getPlayerEyePosition();
       const { forward } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
       const hit = this.physics.traceRay(eye, forward, 420);
@@ -644,7 +910,6 @@ export class SurfApp {
     this.physics.setVehicleControls(vehicleId, 0, 0, 0);
     this.viewmodel.root.visible = false;
 
-    // Align initial camera heading with the buggy chassis
     const chassisYaw = getChassisYaw(chassis.quat, this.input.viewYaw);
     const initPitch = this.vehicleCameraMode === 'chase' ? -0.22 : -0.05;
     this.prevChassisYaw = chassisYaw;
@@ -701,8 +966,23 @@ export class SurfApp {
     }
   }
 
+  private handleSandboxKeyup = (e: KeyboardEvent): void => {
+    if (e.code === 'F3') {
+      this.hud.setScoreboardVisible(false);
+    }
+  };
+
   private handleSandboxHotkey = (e: KeyboardEvent): void => {
-    if (!this.input.isPointerLocked || e.repeat) return;
+    if (e.repeat) return;
+
+    // Hold [F3] to display T vs. CT match scoreboard
+    if (e.code === 'F3') {
+      e.preventDefault();
+      this.hud.setScoreboardVisible(true);
+      return;
+    }
+
+    if (!this.input.isPointerLocked) return;
 
     if (this.drivingVehicleId && e.code === 'KeyC') {
       this.vehicleCameraMode = this.vehicleCameraMode === 'chase' ? 'first' : 'chase';
@@ -726,6 +1006,45 @@ export class SurfApp {
       if (!this.drivingVehicleId) {
         this.setGravityGunMode(!this.gravityGunActive);
       }
+      return;
+    }
+
+    // Classic CS 1.6 team-switch hotkey [M]
+    if (e.code === 'KeyM') {
+      this.playerTeam = this.playerTeam === TeamId.CT ? TeamId.T : TeamId.CT;
+      this.roundRestartAtTick = 0;
+      this.roundTimerSec = 115;
+      this.roundPhase = 'LIVE';
+      this.physics.restoreVitals();
+      this.matchManager.configure(
+        {
+          tSpawns: this.currentMapData.tSpawns,
+          ctSpawns: this.currentMapData.ctSpawns,
+          fallbackSpawn: this.currentMapData.spawn,
+        },
+        this.playerTeam,
+        this.botsPerTeam,
+      );
+      this.weapons.resetLoadout();
+      this.audio.playWeaponSwitch();
+      this.hud.showToast(
+        this.playerTeam === TeamId.CT
+          ? 'JOINED COUNTER-TERRORISTS (SAS / GIGN)'
+          : 'JOINED TERRORISTS (PHOENIX / LEET)',
+        this.playerTeam === TeamId.CT ? 'rgba(56, 189, 248, 0.9)' : 'rgba(239, 68, 68, 0.9)',
+      );
+      return;
+    }
+
+    // Toggle mp_solid_teammates [N] (Boosting vs. Semiclip)
+    if (e.code === 'KeyN') {
+      this.physics.solidTeammates = !this.physics.solidTeammates;
+      this.hud.showToast(
+        this.physics.solidTeammates
+          ? 'mp_solid_teammates 1 (BOOSTING ENABLED)'
+          : 'mp_solid_teammates 0 (SEMICLIP ENABLED)',
+        'rgba(251, 191, 36, 0.85)',
+      );
       return;
     }
 
@@ -953,10 +1272,51 @@ export class SurfApp {
     vi[I32.BUTTONS] = buttons;
 
     const preXY = Math.hypot(vf[F32.VEL_X], vf[F32.VEL_Y]);
+    const tick = vi[I32.TICK];
+
     const t0 = performance.now();
+    // 1. Write bot ActorInputCmds before stepping simulation
+    this.bots.stepTick(tick);
+    // 2. Step Actor 0 + VPhysics subsystems
     this.physics.simulateTick();
+    // 3. Step bot actors through GoldSrc CGameMovement + resolve solid PvP hulls / boosting
+    this.physics.simulateAllBotsAndPvp();
     const dtSim = performance.now() - t0;
     this.simMsAvg = this.simMsAvg * 0.92 + dtSim * 0.08;
+
+    // 4. Evaluate T vs. CT round status & delayed round restart
+    const nextTick = vi[I32.TICK];
+    if (this.matchActive && this.roundPhase === 'LIVE') {
+      this.roundTimerSec = Math.max(0, this.roundTimerSec - FIXED_DT);
+    }
+
+    if (this.roundRestartAtTick > 0) {
+      if (nextTick >= this.roundRestartAtTick) {
+        this.roundRestartAtTick = 0;
+        this.roundNumber += 1;
+        this.roundTimerSec = 115;
+        this.roundPhase = 'LIVE';
+        this.physics.restoreVitals();
+        this.resetSubsystemsAndProps();
+        this.matchManager.startNewRound(nextTick);
+        this.weapons.resetLoadout();
+        this.hud.showToast('NEW ROUND — LIVE!', 'rgba(52, 211, 153, 0.85)');
+      }
+    } else {
+      const { winner, snapshot } = this.matchManager.evaluateRound(nextTick);
+      this.tScore = snapshot.tScore;
+      this.ctScore = snapshot.ctScore;
+      if (winner !== null) {
+        this.roundPhase = 'ROUND_END';
+        const winText = winner === TeamId.CT ? 'COUNTER-TERRORISTS WIN' : 'TERRORISTS WIN';
+        this.audio.playFinishChime();
+        this.hud.showToast(
+          `${winText}  •  CT ${snapshot.ctScore} : ${snapshot.tScore} T`,
+          winner === TeamId.CT ? 'rgba(56, 189, 248, 0.92)' : 'rgba(239, 68, 68, 0.92)',
+        );
+        this.roundRestartAtTick = nextTick + 300; // 3.0 s round-end cooldown at 100 Hz
+      }
+    }
 
     // Sync driving state if chassis was removed/destroyed during simulateTick()
     if (this.drivingVehicleId && !this.physics.getDrivenVehicleId()) {
@@ -970,7 +1330,7 @@ export class SurfApp {
     const airborne = (vi[I32.FLAGS] & FL_ONGROUND) === 0;
     const yawDelta = this.input.consumeTickYawDelta();
     this.strafeSync.recordTick(airborne, keys.a, keys.d, yawDelta, preXY, postXY);
-    this.runTracker.tick(vi[I32.TICK]);
+    this.runTracker.tick(nextTick);
   }
 
   /**
@@ -989,7 +1349,6 @@ export class SurfApp {
     let yaw = this.input.viewYaw;
     let pitch = this.input.viewPitch;
 
-    // Detect manual mouse movement since the previous frame
     const mouseMoved =
       Math.abs(wrapAngleRad(yaw - this.lastAppliedViewYaw)) > 1e-4 ||
       Math.abs(pitch - this.lastAppliedViewPitch) > 1e-4;
@@ -1018,7 +1377,6 @@ export class SurfApp {
         Math.abs(veh.throttle) > 0.05 || Math.abs(veh.steer) > 0.05 || horizSpeed > 25;
 
       if (activelyDriving) {
-        // Subtle ~8 deg apex look-in when steering forward
         const apexOffset = fwdSpeed >= -15 ? veh.steer * 0.14 : 0;
         const targetYaw = wrapAngleRad(chassisYaw + apexOffset);
         const speedFactor = Math.min(1.6, 0.55 + horizSpeed / 450);
@@ -1033,7 +1391,6 @@ export class SurfApp {
       }
     }
 
-    // Clamp pitch tighter in chase cam so it won't burrow under the floor
     const minPitch = this.vehicleCameraMode === 'chase' ? -0.68 : -1.45;
     const maxPitch = this.vehicleCameraMode === 'chase' ? 0.35 : 1.45;
     pitch = Math.max(minPitch, Math.min(maxPitch, pitch));
@@ -1170,6 +1527,7 @@ export class SurfApp {
       cvarLabel: `${this.currentMapId} | aa:${Math.round(vf[F32.CVAR_AIRACCEL])} mv:${Math.round(vf[F32.CVAR_MAXVEL])}`,
       subsystems,
       grenade: weaponSnap.grenade,
+      match: this.buildMatchHudState(),
     });
 
     this.combatHud.update(frameDt, this.physics.getVitals(), weaponSnap);
@@ -1186,6 +1544,8 @@ export class SurfApp {
       heldBody ? eyePos : null,
       heldBody,
     );
+    this.renderer.syncActors(this.abi, frameDt, this.physics.solidTeammates);
+    this.nameplates?.sync(this.abi, this.actorNames, 0);
     this.renderer.render();
   };
 }
