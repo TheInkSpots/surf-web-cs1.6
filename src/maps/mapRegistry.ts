@@ -3,9 +3,13 @@ import { buildSurfSandbox01, MapBuildResult } from './surfSandbox01';
 import { buildSurfSandbox02 } from './surfSandbox02';
 import { buildSurfSandbox03 } from './surfSandbox03';
 import { buildSurfSandbox04 } from './surfSandbox04';
-
-export type MapId = 'surf_sandbox_01' | 'surf_sandbox_02' | 'surf_sandbox_03' | 'surf_sandbox_04';
-
+import { buildDeDust2 } from './deDust2';
+export type MapId =
+  | 'surf_sandbox_01'
+  | 'surf_sandbox_02'
+  | 'surf_sandbox_03'
+  | 'surf_sandbox_04'
+  | 'de_dust2';
 export interface MapDefinition {
   id: MapId;
   name: string;
@@ -51,7 +55,12 @@ export const MAP_LIST: readonly MapDefinition[] = [
     difficulty: 'TIER 4',
     description: 'rigid body, grav gun, vehicle,ladder testing.',
     build: buildSurfSandbox04,
-  },
+  },{
+      id: 'de_dust2',
+      name: 'de_dust2 (Bot Arena)',
+      subtitle: 'CS 1.6 T vs. CT • Long A / Mid / B Tunnels • Full NavGraph',
+      build: buildDeDust2,
+    },
 ];
 
 export const DEFAULT_MAP_ID: MapId = 'surf_sandbox_04';
