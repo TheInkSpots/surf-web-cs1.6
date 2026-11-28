@@ -57,10 +57,13 @@ export const MAP_LIST: readonly MapDefinition[] = [
     build: buildSurfSandbox04,
   },{
       id: 'de_dust2',
-      name: 'de_dust2 (Bot Arena)',
-      subtitle: 'CS 1.6 T vs. CT • Long A / Mid / B Tunnels • Full NavGraph',
+    name: 'de_dust2 (Bot Arena)',
+    shortName: 'de_dust2 (Bot Arena)',
+    stages: 7,
+      difficulty: 'TIER 4',
+      description: 'CS 1.6 T vs. CT • Long A / Mid / B Tunnels • Full NavGraph',
       build: buildDeDust2,
-    },
+    }
 ];
 
 export const DEFAULT_MAP_ID: MapId = 'surf_sandbox_04';
