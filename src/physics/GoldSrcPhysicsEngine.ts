@@ -46,6 +46,8 @@ export interface GrenadeData {
   pushScale?: number;
   /** Whether the blast deals HP damage to the player */
   applyPlayerHpDamage?: boolean;
+  /** Actor slot that threw the grenade (0 = local player) */
+    ownerActorId?: number;
 }
 export interface CheckpointState {
   index: number;
@@ -375,6 +377,7 @@ export interface PhysicsCallbacks {
   onJointBroken?: (jointId: string, pos: Vec3) => void;
   onGravityGunGrab?: (bodyId: string) => void;
   onGravityGunRelease?: (bodyId: string, punted: boolean) => void;
+  onActorExplosionKill?: (killerId: number, victimId: number, sourceId: string) => void;
 }
 
 export interface LadderVolume {
@@ -710,6 +713,7 @@ export function createGrenadeRigidBody(
     radius?: number;
     pushScale?: number;
     applyPlayerHpDamage?: boolean;
+    ownerActorId?: number;
   } = {},
 ): SourceRigidBody {
   return createBoxRigidBody(
@@ -732,6 +736,7 @@ export function createGrenadeRigidBody(
         radius: opts.radius ?? 560,
         pushScale: opts.pushScale ?? 1.25,
         applyPlayerHpDamage: opts.applyPlayerHpDamage ?? true,
+        ownerActorId: opts.ownerActorId ?? 0,
       },
     },
   );
@@ -2286,30 +2291,35 @@ export class GoldSrcPhysicsEngine {
   }
 
   public restoreVitals(): void {
-    this.vitals.hp = this.vitals.maxHp;
-    this.vitals.bloodMl = this.vitals.maxBloodMl;
-    this.vitals.bloodLossCount = 0;
-    this.vitals.dead = false;
-  }
-
-  public damagePlayer(amount: number, source: 'fall' | 'explosion' | 'hazard'): void {
-    if (this.vitals.dead || amount <= 0) return;
-    const dmg = Math.max(1, Math.round(amount));
-    this.vitals.hp = Math.max(0, this.vitals.hp - dmg);
-    const bloodLostMl = Math.min(this.vitals.bloodMl, Math.round(dmg * 36));
-    this.vitals.bloodMl = Math.max(0, this.vitals.bloodMl - bloodLostMl);
-    this.vitals.bloodLossCount += 1;
-
-    this.callbacks.onPlayerDamage?.(dmg, source, bloodLostMl);
-
-    if (this.vitals.hp <= 0) {
-      this.vitals.dead = true;
-      if (this.gravityGun.heldBodyId) {
-        this.releaseHeldBody(0);
-      }
-      this.callbacks.onPlayerDeath?.(source);
+      this.vitals.hp = this.vitals.maxHp;
+      this.vitals.bloodMl = this.vitals.maxBloodMl;
+      this.vitals.bloodLossCount = 0;
+      this.vitals.dead = false;
+      this.abi.i32[ACTOR_I32_BASE_INDEX + ActorI32.HP] = this.vitals.maxHp;
+      this.abi.i32[ACTOR_I32_BASE_INDEX + ActorI32.ALIVE] = 1;
     }
-  }
+
+    public damagePlayer(amount: number, source: 'fall' | 'explosion' | 'hazard'): void {
+        if (this.vitals.dead || amount <= 0) return;
+        const dmg = Math.max(1, Math.round(amount));
+        this.vitals.hp = Math.max(0, this.vitals.hp - dmg);
+        this.abi.i32[ACTOR_I32_BASE_INDEX + ActorI32.HP] = this.vitals.hp;
+
+        const bloodLostMl = Math.min(this.vitals.bloodMl, Math.round(dmg * 36));
+        this.vitals.bloodMl = Math.max(0, this.vitals.bloodMl - bloodLostMl);
+        this.vitals.bloodLossCount += 1;
+
+        this.callbacks.onPlayerDamage?.(dmg, source, bloodLostMl);
+
+        if (this.vitals.hp <= 0) {
+          this.vitals.dead = true;
+          this.abi.i32[ACTOR_I32_BASE_INDEX + ActorI32.ALIVE] = 0;
+          if (this.gravityGun.heldBodyId) {
+            this.releaseHeldBody(0);
+          }
+          this.callbacks.onPlayerDeath?.(source);
+        }
+      }
 
   public getRigidBodies(): readonly SourceRigidBody[] {
     return this.rigidBodies;
@@ -2802,13 +2812,14 @@ export class GoldSrcPhysicsEngine {
    *   delta_v = (I_mag / m) * (x_obj - x_exp) / ||x_obj - x_exp||
    */
   public applyExplosionImpulse(
-    origin: Vec3,
-    maxDamage: number,
-    radius: number,
-    pushScaleOverride?: number,
-    sourceId = 'manual_blast',
-    applyPlayerHpDamage = true,
-  ): void {
+      origin: Vec3,
+      maxDamage: number,
+      radius: number,
+      pushScaleOverride?: number,
+      sourceId = 'manual_blast',
+      applyPlayerHpDamage = true,
+      ownerActorId = 0,
+    ): void {
     if (radius <= 0) return;
     const kPush = pushScaleOverride ?? this.sourceConfig.physPushScale;
     const vf = this.abi.f32;
@@ -2882,6 +2893,70 @@ export class GoldSrcPhysicsEngine {
         }
       }
     }
+    // Apply HE blast damage, knockback & ragdoll death to bot actors (1..MAX_ACTORS-1)
+        const f32Arr = this.abi.f32;
+        const i32Arr = this.abi.i32;
+        const ownerTeam =
+          ownerActorId >= 0 && ownerActorId < MAX_ACTORS
+            ? i32Arr[ACTOR_I32_BASE_INDEX + ownerActorId * ACTOR_I32_STRIDE + ActorI32.TEAM]
+            : TeamId.SPEC;
+        const actorMass = Math.max(1, this.sourceConfig.playerMass);
+
+        for (let id = 1; id < MAX_ACTORS; id++) {
+          const idxI = ACTOR_I32_BASE_INDEX + id * ACTOR_I32_STRIDE;
+          if (i32Arr[idxI + ActorI32.ACTIVE] !== 1 || i32Arr[idxI + ActorI32.ALIVE] !== 1) continue;
+
+          const idxF = ACTOR_F32_BASE_INDEX + id * ACTOR_F32_STRIDE;
+          const ax = f32Arr[idxF + ActorF32.POS_X];
+          const ay = f32Arr[idxF + ActorF32.POS_Y];
+          const az = f32Arr[idxF + ActorF32.POS_Z];
+
+          const dx = ax - origin.x;
+          const dy = ay - origin.y;
+          const dz = az - origin.z;
+          const dist = Math.hypot(dx, dy, dz);
+          if (dist >= radius) continue;
+
+          const actorTeam = i32Arr[idxI + ActorI32.TEAM];
+          if (!this.friendlyFire && ownerTeam !== TeamId.SPEC && actorTeam === ownerTeam && id !== ownerActorId) {
+            continue;
+          }
+
+          const falloff = Math.max(0, 1 - dist / radius);
+          const dir: Vec3 =
+            dist > 1e-4
+              ? { x: f32(dx / dist), y: f32(dy / dist), z: f32(dz / dist) }
+              : { x: 0, y: 0, z: 1 };
+
+          // Reduce damage by 50% if solid BSP geometry sits between the blast and the bot
+          const los = this.traceWorld(origin.x, origin.y, origin.z + 8, ax, ay, az + 12, 0, 0, 0, this.auxTraceScratch);
+          const coverScale = los.fraction < 1.0 ? 0.5 : 1.0;
+
+          // Knockback velocity into bot's ActorF32 slot
+          const dv = Math.min(850, (maxDamage * falloff * kPush * coverScale) / actorMass);
+          f32Arr[idxF + ActorF32.VEL_X] = f32(f32Arr[idxF + ActorF32.VEL_X] + dv * dir.x);
+          f32Arr[idxF + ActorF32.VEL_Y] = f32(f32Arr[idxF + ActorF32.VEL_Y] + dv * dir.y);
+          f32Arr[idxF + ActorF32.VEL_Z] = f32(f32Arr[idxF + ActorF32.VEL_Z] + dv * Math.max(0.25, dir.z));
+          i32Arr[idxI + ActorI32.FLAGS] &= ~FL_ONGROUND;
+
+          // CS 1.6 HE damage (~115 base at point-blank, reduced by armor & distance)
+          const heDamage = Math.round(falloff * 115 * coverScale);
+          if (heDamage > 0) {
+            const res = this.applyActorDamage(
+              id,
+              heDamage,
+              HitGroup.GENERIC,
+              0.5,
+              { x: ax, y: ay, z: az },
+              dir,
+              Math.min(26000, 5000 + falloff * 18000),
+            );
+            if (res.killed) {
+              this.callbacks.onActorExplosionKill?.(ownerActorId, id, sourceId);
+            }
+          }
+        }
+
 
     this.checkVelocity();
     this.callbacks.onExplosion?.(sourceId, origin, radius);
@@ -3177,8 +3252,10 @@ export class GoldSrcPhysicsEngine {
           gd.pushScale,
           g.id,
           gd.applyPlayerHpDamage ?? true,
+            gd.ownerActorId ?? 0,
         );
       }
+
     }
   private stepSecondaryPhysics(playerAlive: boolean, playerIsSurfing = false): void {
     const hasBodies = this.rigidBodies.length > 0;

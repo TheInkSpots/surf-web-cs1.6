@@ -367,6 +367,17 @@ export class SurfApp {
             this.hud.showToast(`PUNTED: ${bodyId.toUpperCase()}`, 'rgba(251, 191, 36, 0.75)');
           }
         },
+        onActorExplosionKill: (killerId, victimId) => {
+                  this.matchManager.awardFrag(killerId);
+                  this.recordKill(killerId, victimId, 'HE GRENADE', false);
+                  if (killerId === 0) {
+                    this.combatHud.triggerHitMarker(true, true);
+                    this.hud.showToast(
+                      `ELIMINATED ${this.getActorName(victimId)} [HE GRENADE]  (+$300)`,
+                      'rgba(249, 115, 22, 0.95)',
+                    );
+                  }
+                },
         onPlayerDamage: (amount, source, bloodLostMl) => {
           this.audio.playPlayerHurt(amount);
           this.hud.flashScreen('rgba(220, 38, 38, 0.48)');
