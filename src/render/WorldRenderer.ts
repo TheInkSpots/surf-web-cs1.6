@@ -50,6 +50,7 @@ interface VehicleWheelVisual {
   wheelMeshes: THREE.Group[];
   strutLines: THREE.Line[];
 }
+
 export interface VehicleChaseCamInput {
   pivotX: number;
   pivotY: number;
@@ -79,6 +80,7 @@ export class WorldRenderer {
   private readonly ropeMat: THREE.LineBasicMaterial;
   private readonly strutMat: THREE.LineBasicMaterial;
   private readonly jointDbgMat: THREE.LineBasicMaterial;
+  private readonly sharedMaterials: THREE.Material[] = [];
 
   private readonly rigidBodyMeshes = new Map<string, THREE.Object3D>();
   private readonly seenRigidBodyIds = new Set<string>();
@@ -109,6 +111,7 @@ export class WorldRenderer {
   public readonly debugGroup = new THREE.Group();
   public baseFov = 90;
 
+  private disposed = false;
   private scopeZoomLevel: 0 | 1 | 2 = 0;
   private currentFov = 90;
   private readonly camPos = new THREE.Vector3();
@@ -117,64 +120,66 @@ export class WorldRenderer {
   private readonly tmpVecA = new THREE.Vector3();
   private readonly tmpVecB = new THREE.Vector3();
   private readonly tmpVecC = new THREE.Vector3();
+
   // Third-person vehicle chase camera spring-arm state (Hammer Z-up space)
-    private chaseInitialized = false;
-    private chaseCurrentDist = 210;
-    private chasePos = { x: 0, y: 0, z: 0 };
-    private chaseFovOffset = 0;
+  private chaseInitialized = false;
+  private chaseCurrentDist = 210;
+  private chasePos = { x: 0, y: 0, z: 0 };
+  private chaseFovOffset = 0;
 
-    public resetVehicleChaseCamera(): void {
-      this.chaseInitialized = false;
-      this.chaseFovOffset = 0;
+  public resetVehicleChaseCamera(): void {
+    this.chaseInitialized = false;
+    this.chaseFovOffset = 0;
+  }
+
+  /**
+   * Computes smoothed third-person chase camera coordinates in Hammer Z-up space.
+   * Retracts fast when wall-clamped and extends smoothly when clear.
+   */
+  public resolveVehicleChaseCamera(
+    dt: number,
+    input: VehicleChaseCamInput,
+  ): { x: number; y: number; z: number } {
+    const clampedDt = Math.min(0.05, Math.max(0, dt));
+
+    // Snap inward quickly on wall collision; ease outward smoothly when clear
+    const distRate = input.clampedDist < this.chaseCurrentDist ? 26 : 7.5;
+    const distAlpha = 1 - Math.exp(-distRate * clampedDt);
+    this.chaseCurrentDist = this.chaseInitialized
+      ? this.chaseCurrentDist + (input.clampedDist - this.chaseCurrentDist) * distAlpha
+      : input.clampedDist;
+
+    // Subtle lift above the sightline so the roof/hood stays cleanly framed
+    const liftZ = 14 + (this.chaseCurrentDist / 220) * 10;
+    const targetX = input.pivotX - input.forwardX * this.chaseCurrentDist;
+    const targetY = input.pivotY - input.forwardY * this.chaseCurrentDist;
+    const targetZ = input.pivotZ - input.forwardZ * this.chaseCurrentDist + liftZ;
+
+    if (!this.chaseInitialized) {
+      this.chasePos.x = targetX;
+      this.chasePos.y = targetY;
+      this.chasePos.z = targetZ;
+      this.chaseInitialized = true;
+    } else {
+      // Tighten tracking when wall-blocked so the spring never lags behind geometry
+      const posRate = input.clampedDist < 120 ? 28 : 14;
+      const posAlpha = 1 - Math.exp(-posRate * clampedDt);
+      this.chasePos.x += (targetX - this.chasePos.x) * posAlpha;
+      this.chasePos.y += (targetY - this.chasePos.y) * posAlpha;
+      this.chasePos.z += (targetZ - this.chasePos.z) * posAlpha;
     }
 
-    /**
-     * Computes smoothed third-person chase camera coordinates in Hammer Z-up space.
-     * Retracts fast when wall-clamped and extends smoothly when clear.
-     */
-    public resolveVehicleChaseCamera(
-      dt: number,
-      input: VehicleChaseCamInput,
-    ): { x: number; y: number; z: number } {
-      const clampedDt = Math.min(0.05, Math.max(0, dt));
+    // Optional speed FOV punch (+0..10 deg) you can add to your camera FOV in update()
+    const targetFovBoost = Math.min(10, Math.max(0, (input.speedXY - 220) * 0.014));
+    this.chaseFovOffset += (targetFovBoost - this.chaseFovOffset) * (1 - Math.exp(-6 * clampedDt));
 
-      // Snap inward quickly on wall collision; ease outward smoothly when clear
-      const distRate = input.clampedDist < this.chaseCurrentDist ? 26 : 7.5;
-      const distAlpha = 1 - Math.exp(-distRate * clampedDt);
-      this.chaseCurrentDist = this.chaseInitialized
-        ? this.chaseCurrentDist + (input.clampedDist - this.chaseCurrentDist) * distAlpha
-        : input.clampedDist;
+    return this.chasePos;
+  }
 
-      // Subtle lift above the sightline so the roof/hood stays cleanly framed
-      const liftZ = 14 + (this.chaseCurrentDist / 220) * 10;
-      const targetX = input.pivotX - input.forwardX * this.chaseCurrentDist;
-      const targetY = input.pivotY - input.forwardY * this.chaseCurrentDist;
-      const targetZ = input.pivotZ - input.forwardZ * this.chaseCurrentDist + liftZ;
+  public getVehicleChaseFovOffset(): number {
+    return this.chaseFovOffset;
+  }
 
-      if (!this.chaseInitialized) {
-        this.chasePos.x = targetX;
-        this.chasePos.y = targetY;
-        this.chasePos.z = targetZ;
-        this.chaseInitialized = true;
-      } else {
-        // Tighten tracking when wall-blocked so the spring never lags behind geometry
-        const posRate = input.clampedDist < 120 ? 28 : 14;
-        const posAlpha = 1 - Math.exp(-posRate * clampedDt);
-        this.chasePos.x += (targetX - this.chasePos.x) * posAlpha;
-        this.chasePos.y += (targetY - this.chasePos.y) * posAlpha;
-        this.chasePos.z += (targetZ - this.chasePos.z) * posAlpha;
-      }
-
-      // Optional speed FOV punch (+0..10 deg) you can add to your camera FOV in update()
-      const targetFovBoost = Math.min(10, Math.max(0, (input.speedXY - 220) * 0.014));
-      this.chaseFovOffset += (targetFovBoost - this.chaseFovOffset) * (1 - Math.exp(-6 * clampedDt));
-
-      return this.chasePos;
-    }
-
-    public getVehicleChaseFovOffset(): number {
-      return this.chaseFovOffset;
-    }
   constructor(
     canvas: HTMLCanvasElement,
     brushes: ConvexBrush[],
@@ -320,6 +325,19 @@ export class WorldRenderer {
       }),
     };
 
+    // Track all shared materials so unused map styles/prop materials are still disposed cleanly
+    this.sharedMaterials.push(
+      this.rigidBodyMat,
+      this.foamPropMat,
+      this.steelPropMat,
+      this.doorPropMat,
+      this.rigidBodyEdgeMat,
+      this.ropeMat,
+      this.strutMat,
+      this.jointDbgMat,
+      ...Object.values(mats),
+    );
+
     // Debug joint segments
     const jointGeo = new THREE.BufferGeometry();
     jointGeo.setAttribute('position', new THREE.BufferAttribute(this.jointDebugPositions, 3));
@@ -365,9 +383,51 @@ export class WorldRenderer {
     window.addEventListener('resize', this.handleResize);
   }
 
+  private disposeMaterialWithTextures(
+    mat: THREE.Material,
+    disposedMaterials: Set<THREE.Material>,
+    disposedTextures: Set<THREE.Texture>,
+  ): void {
+    if (disposedMaterials.has(mat)) return;
+    disposedMaterials.add(mat);
+
+    const record = mat as unknown as Record<string, unknown>;
+    const texKeys = [
+      'map',
+      'alphaMap',
+      'aoMap',
+      'bumpMap',
+      'emissiveMap',
+      'envMap',
+      'lightMap',
+      'metalnessMap',
+      'normalMap',
+      'roughnessMap',
+    ];
+    for (let i = 0; i < texKeys.length; i++) {
+      const val = record[texKeys[i]];
+      if (val instanceof THREE.Texture && !disposedTextures.has(val)) {
+        disposedTextures.add(val);
+        val.dispose();
+      }
+    }
+
+    mat.dispose();
+  }
+
   public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+
     window.removeEventListener('resize', this.handleResize);
+
+    // Detach vmRoot without disposing it so SurfApp can reuse the viewmodel across maps
     this.vmScene.remove(this.vmRoot);
+    this.vmScene.clear();
+
+    const disposedGeos = new Set<THREE.BufferGeometry>();
+    const disposedMats = new Set<THREE.Material>();
+    const disposedTexs = new Set<THREE.Texture>();
 
     this.scene.traverse((obj) => {
       if (
@@ -375,20 +435,53 @@ export class WorldRenderer {
         obj instanceof THREE.Line ||
         obj instanceof THREE.LineSegments
       ) {
-        obj.geometry.dispose();
+        if (obj.geometry && !disposedGeos.has(obj.geometry)) {
+          disposedGeos.add(obj.geometry);
+          obj.geometry.dispose();
+        }
         if (Array.isArray(obj.material)) {
-          obj.material.forEach((m) => m.dispose());
-        } else {
-          obj.material.dispose();
+          for (let i = 0; i < obj.material.length; i++) {
+            this.disposeMaterialWithTextures(obj.material[i], disposedMats, disposedTexs);
+          }
+        } else if (obj.material) {
+          this.disposeMaterialWithTextures(obj.material, disposedMats, disposedTexs);
         }
       }
     });
 
-    this.boosterTex.dispose();
-    this.waterTex.dispose();
-    this.explosionGeo.dispose();
-    this.particleGeo.dispose();
-    this.decalGeo.dispose();
+    for (let i = 0; i < this.sharedMaterials.length; i++) {
+      this.disposeMaterialWithTextures(this.sharedMaterials[i], disposedMats, disposedTexs);
+    }
+
+    if (!disposedTexs.has(this.boosterTex)) {
+      disposedTexs.add(this.boosterTex);
+      this.boosterTex.dispose();
+    }
+    if (!disposedTexs.has(this.waterTex)) {
+      disposedTexs.add(this.waterTex);
+      this.waterTex.dispose();
+    }
+
+    for (const geo of [this.explosionGeo, this.particleGeo, this.decalGeo]) {
+      if (!disposedGeos.has(geo)) {
+        disposedGeos.add(geo);
+        geo.dispose();
+      }
+    }
+
+    this.rigidBodyMeshes.clear();
+    this.seenRigidBodyIds.clear();
+    this.ropeLines.clear();
+    this.seenRopeIds.clear();
+    this.vehicleVisuals.clear();
+    this.seenVehicleIds.clear();
+    this.explosionEffects.length = 0;
+    this.tracerEffects.length = 0;
+    this.particleEffects.length = 0;
+    this.decals.length = 0;
+
+    this.scene.clear();
+    this.renderer.renderLists.dispose();
     this.renderer.dispose();
   }
 
