@@ -16,7 +16,13 @@ export class CombatHudOverlay {
   private readonly ammoReserveEl: HTMLSpanElement;
   private readonly reloadBarWrapEl: HTMLDivElement;
   private readonly reloadBarFillEl: HTMLDivElement;
-  private readonly slotEls: [HTMLDivElement, HTMLDivElement, HTMLDivElement];
+  private readonly controlsHintEl: HTMLDivElement;
+  private readonly slotEls: {
+    1: HTMLDivElement;
+    2: HTMLDivElement;
+    3: HTMLDivElement;
+    5: HTMLDivElement;
+  };
 
   private hitmarkerTimer = 0;
 
@@ -59,6 +65,7 @@ export class CombatHudOverlay {
           <div class="chud-slot" id="chud-slot-1">1 SCOUT</div>
           <div class="chud-slot" id="chud-slot-2">2 USP .45</div>
           <div class="chud-slot" id="chud-slot-3">3 KNIFE</div>
+          <div class="chud-slot chud-slot-he" id="chud-slot-5">5 HE ×5</div>
         </div>
         <div class="chud-ammo-box">
           <span class="chud-ammo-clip" id="chud-ammo-clip">10</span>
@@ -68,7 +75,7 @@ export class CombatHudOverlay {
         <div class="chud-reload-wrap hidden" id="chud-reload-wrap">
           <div class="chud-reload-fill" id="chud-reload-fill"></div>
         </div>
-        <div class="chud-controls-hint">LMB Fire/Slash • RMB Scope/Silencer/Stab • G Drop • E Take • R Reload</div>
+        <div class="chud-controls-hint" id="chud-controls-hint">LMB Fire/Slash • RMB Scope/Silencer/Stab • 5 HE • G Drop • E Take • R Reload</div>
       </div>
     `;
 
@@ -86,11 +93,13 @@ export class CombatHudOverlay {
     this.ammoReserveEl = this.root.querySelector('#chud-ammo-res')!;
     this.reloadBarWrapEl = this.root.querySelector('#chud-reload-wrap')!;
     this.reloadBarFillEl = this.root.querySelector('#chud-reload-fill')!;
-    this.slotEls = [
-      this.root.querySelector('#chud-slot-1')!,
-      this.root.querySelector('#chud-slot-2')!,
-      this.root.querySelector('#chud-slot-3')!,
-    ];
+    this.controlsHintEl = this.root.querySelector('#chud-controls-hint')!;
+    this.slotEls = {
+      1: this.root.querySelector('#chud-slot-1')!,
+      2: this.root.querySelector('#chud-slot-2')!,
+      3: this.root.querySelector('#chud-slot-3')!,
+      5: this.root.querySelector('#chud-slot-5')!,
+    };
   }
 
   public triggerHitMarker(isBlood: boolean, isKill: boolean): void {
@@ -135,36 +144,57 @@ export class CombatHudOverlay {
     this.bloodValueEl.textContent = `${vitals.bloodMl} mL`;
     this.bloodCountEl.textContent = `BLEED HITS: ${vitals.bloodLossCount}`;
 
-    // Weapon slots
-    const owned = [weapon.scout.owned, weapon.usp.owned, weapon.knifeOwned];
-    const labels = [
-      weapon.scout.owned ? '1 SCOUT' : '1 [EMPTY]',
-      weapon.usp.owned ? (weapon.usp.silenced ? '2 USP-S' : '2 USP .45') : '2 [EMPTY]',
-      '3 KNIFE',
-    ];
-    for (let i = 0; i < 3; i++) {
-      const el = this.slotEls[i];
-      el.textContent = labels[i];
-      el.classList.toggle('active', weapon.activeSlot === i + 1);
-      el.classList.toggle('missing', !owned[i]);
-    }
+    // Weapon slots (1, 2, 3, 5)
+    const grenade = weapon.grenade ?? { owned: true, count: 0, maxCount: 5 };
 
-    // Ammo readout
+    this.slotEls[1].textContent = weapon.scout.owned ? '1 SCOUT' : '1 [EMPTY]';
+    this.slotEls[1].classList.toggle('active', weapon.activeSlot === 1);
+    this.slotEls[1].classList.toggle('missing', !weapon.scout.owned);
+
+    this.slotEls[2].textContent = weapon.usp.owned
+      ? weapon.usp.silenced
+        ? '2 USP-S'
+        : '2 USP .45'
+      : '2 [EMPTY]';
+    this.slotEls[2].classList.toggle('active', weapon.activeSlot === 2);
+    this.slotEls[2].classList.toggle('missing', !weapon.usp.owned);
+
+    this.slotEls[3].textContent = '3 KNIFE';
+    this.slotEls[3].classList.toggle('active', weapon.activeSlot === 3);
+    this.slotEls[3].classList.toggle('missing', !weapon.knifeOwned);
+
+    this.slotEls[5].textContent = grenade.count > 0 ? `5 HE ×${grenade.count}` : '5 HE [0]';
+    this.slotEls[5].classList.toggle('active', weapon.activeSlot === 5);
+    this.slotEls[5].classList.toggle('missing', grenade.count <= 0);
+
+    // Ammo readout & context hint
     if (weapon.activeSlot === 1) {
       this.ammoClipEl.textContent = String(weapon.scout.clip);
       this.ammoReserveEl.textContent = String(weapon.scout.reserve);
+      this.controlsHintEl.textContent =
+        'LMB Fire • RMB Scope • 5 HE • G Drop • E Take • R Reload';
     } else if (weapon.activeSlot === 2) {
       this.ammoClipEl.textContent = String(weapon.usp.clip);
       this.ammoReserveEl.textContent = String(weapon.usp.reserve);
+      this.controlsHintEl.textContent =
+        'LMB Fire • RMB Silencer • 5 HE • G Drop • E Take • R Reload';
+    } else if (weapon.activeSlot === 5) {
+      this.ammoClipEl.textContent = String(grenade.count);
+      this.ammoReserveEl.textContent = `${grenade.maxCount} HE`;
+      this.controlsHintEl.textContent =
+        'LMB / 5 Overhand Throw • RMB Underhand Lob • R Restock';
     } else {
       this.ammoClipEl.textContent = '∞';
       this.ammoReserveEl.textContent = 'MELEE';
+      this.controlsHintEl.textContent =
+        'LMB Slash • RMB Heavy Stab • 5 HE • R Reset Run';
     }
 
-    // Reload bar
+    // Reload / restock bar
     this.reloadBarWrapEl.classList.toggle('hidden', !weapon.reloading);
     if (weapon.reloading) {
       this.reloadBarFillEl.style.width = `${Math.round(weapon.reloadProgress * 100)}%`;
+      this.reloadBarFillEl.style.background = weapon.activeSlot === 5 ? '#f97316' : '#38bdf8';
     }
   }
 
@@ -351,6 +381,11 @@ export class CombatHudOverlay {
         background: rgba(249, 115, 22, 0.22);
         color: #fdba74;
         border-color: rgba(249, 115, 22, 0.75);
+      }
+      .chud-slot-he.active {
+        background: rgba(234, 88, 12, 0.3);
+        color: #fed7aa;
+        border-color: rgba(251, 146, 60, 0.9);
       }
       .chud-slot.missing { opacity: 0.35; }
 

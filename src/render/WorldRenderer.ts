@@ -852,6 +852,32 @@ export class WorldRenderer {
       return group;
     }
 
+    if (b.kind === 'grenade') {
+      const group = new THREE.Group();
+      const hull = new THREE.Mesh(
+        new THREE.SphereGeometry(b.hx * 1.05, 12, 10),
+        new THREE.MeshStandardMaterial({ color: 0x3f4f2f, roughness: 0.55, metalness: 0.35 }),
+      );
+      hull.scale.set(1, 1.35, 1);
+      const band = new THREE.Mesh(
+        new THREE.TorusGeometry(b.hx * 0.98, 0.7, 6, 14),
+        new THREE.MeshStandardMaterial({
+          color: 0xf97316,
+          emissive: 0xea580c,
+          emissiveIntensity: 0.65,
+          roughness: 0.3,
+        }),
+      );
+      band.rotation.x = Math.PI / 2;
+      const cap = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.8, 2.2, 3.2, 8),
+        new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.35, metalness: 0.8 }),
+      );
+      cap.position.y = b.hz * 0.95;
+      group.add(hull, band, cap);
+      return group;
+    }
+
     // 4. Tactile Physics Props styled by role/mass
     let mat = this.rigidBodyMat;
     if (b.id.includes('door')) {

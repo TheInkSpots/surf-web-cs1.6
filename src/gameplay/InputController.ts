@@ -239,7 +239,7 @@ export class InputController {
     }
 
     if (!this.isPointerLocked) return;
-
+console.log('[input]', e.code, e.key, 'hasCb:', Boolean(this.callbacks.onSelectWeapon));
     switch (e.code) {
       case 'KeyW':
         this.keys.w = true;
@@ -269,6 +269,9 @@ export class InputController {
         break;
       case 'Digit3':
         if (!e.repeat) this.callbacks.onSelectWeapon?.(3);
+        break;
+      case 'Digit5':
+        if (!e.repeat) this.callbacks.onSelectWeapon?.(5);
         break;
       case 'KeyQ':
         if (!e.repeat) this.callbacks.onQuickSwitch?.();

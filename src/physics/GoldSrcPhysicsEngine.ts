@@ -24,8 +24,8 @@ export const IN_ATTACK2 = 1 << 11;
 export const IN_RELOAD = 1 << 12;
 export const IN_USE = 1 << 13;
 
-export type WeaponSlot = 1 | 2 | 3;
-export type RigidBodyKind = 'prop' | 'weapon' | 'target' | 'vehicle';
+export type WeaponSlot = 1 | 2 | 3 | 5;
+export type RigidBodyKind = 'prop' | 'weapon' | 'target' | 'vehicle' | 'grenade';
 export type JointKind = 'ball' | 'distance' | 'hinge' | 'fixed';
 
 export interface SpawnPoint {
@@ -35,7 +35,18 @@ export interface SpawnPoint {
   yaw: number;
   pitch: number;
 }
-
+export interface GrenadeData {
+  /** World tick at which the grenade detonates */
+  detonateTick: number;
+  /** Radial impulse magnitude forwarded to applyExplosionImpulse */
+  maxDamage: number;
+  /** Blast radius in Hammer units */
+  radius: number;
+  /** Optional push scale override */
+  pushScale?: number;
+  /** Whether the blast deals HP damage to the player */
+  applyPlayerHpDamage?: boolean;
+}
 export interface CheckpointState {
   index: number;
   label: string;
@@ -148,7 +159,7 @@ export interface SourceRigidBody {
   maxHp?: number;
   bleeds?: boolean;
   bloodLostMl?: number;
-  weaponData?: DroppedWeaponData;
+
   /** Solver & buoyancy extensions */
   sleeping?: boolean;
   sleepTimer?: number;
@@ -156,6 +167,8 @@ export interface SourceRigidBody {
   linearDrag?: number;
   angularDrag?: number;
   enableCcd?: boolean;
+  weaponData?: DroppedWeaponData;
+    grenadeData?: GrenadeData;
 }
 interface WaterTriggerMeta {
   water?: boolean;
@@ -548,6 +561,7 @@ export function createBoxRigidBody(
     weaponData?: DroppedWeaponData;
     buoyancyRatio?: number;
     enableCcd?: boolean;
+    grenadeData?: GrenadeData;
   } = {},
 ): SourceRigidBody {
   const sx = halfExtents.x * 2;
@@ -593,6 +607,7 @@ export function createBoxRigidBody(
     sleepTimer: 0,
     buoyancyRatio: opts.buoyancyRatio ?? 1.25,
     enableCcd: opts.enableCcd ?? true,
+    grenadeData: opts.grenadeData
   };
 }
 
@@ -622,7 +637,44 @@ export function createWeaponRigidBody(
     },
   );
 }
-
+/** Create a live VPhysics HE grenade rigid body with a deterministic tick fuse */
+export function createGrenadeRigidBody(
+  id: string,
+  pos: Vec3,
+  vel: Vec3,
+  detonateTick: number,
+  opts: {
+    angVel?: Vec3;
+    maxDamage?: number;
+    radius?: number;
+    pushScale?: number;
+    applyPlayerHpDamage?: boolean;
+  } = {},
+): SourceRigidBody {
+  return createBoxRigidBody(
+    id,
+    pos,
+    { x: 4.5, y: 4.5, z: 6.5 },
+    1.2,
+    {
+      kind: 'grenade',
+      vel,
+      angVel: opts.angVel ?? { x: f32(6.5), y: f32(-4.2), z: f32(8.0) },
+      restitution: 0.48,
+      gravityScale: 0.88,
+      surfaceFriction: 0.85,
+      buoyancyRatio: 0.55,
+      enableCcd: true,
+      grenadeData: {
+        detonateTick,
+        maxDamage: opts.maxDamage ?? 85000,
+        radius: opts.radius ?? 560,
+        pushScale: opts.pushScale ?? 1.25,
+        applyPlayerHpDamage: opts.applyPlayerHpDamage ?? true,
+      },
+    },
+  );
+}
 /** Create a bleeding combat dummy rigid body (reacts to bullet/knife impulses + loses HP & blood) */
 export function createTargetRigidBody(
   id: string,
@@ -1660,7 +1712,26 @@ export class GoldSrcPhysicsEngine {
   public addRigidBody(body: SourceRigidBody): void {
     this.rigidBodies.push(body);
   }
-
+  /** Spawn a live VPhysics HE grenade with a deterministic 100 Hz tick fuse */
+    public spawnGrenade(
+      id: string,
+      pos: Vec3,
+      vel: Vec3,
+      fuseSec = 1.8,
+      opts: {
+        angVel?: Vec3;
+        maxDamage?: number;
+        radius?: number;
+        pushScale?: number;
+        applyPlayerHpDamage?: boolean;
+      } = {},
+    ): SourceRigidBody {
+      const fuseTicks = Math.max(1, Math.round(fuseSec / FIXED_DT));
+      const detonateTick = this.abi.i32[I32.TICK] + fuseTicks;
+      const grenade = createGrenadeRigidBody(id, pos, vel, detonateTick, opts);
+      this.addRigidBody(grenade);
+      return grenade;
+    }
   public removeRigidBody(id: string): SourceRigidBody | null {
     const idx = this.rigidBodies.findIndex((b) => b.id === id);
     if (idx === -1) return null;
@@ -2469,7 +2540,40 @@ export class GoldSrcPhysicsEngine {
   // ---------------------------------------------------------------------------
   // Rapier-Style Rigid-Body Pipeline (TGS Soft + NGS + Support Subsystems)
   // ---------------------------------------------------------------------------
+  /** Advance live HE grenade fuses deterministically and detonate via existing explosion physics */
+    private stepGrenades(): void {
+      const tick = this.abi.i32[I32.TICK];
+      const detonating: SourceRigidBody[] = [];
 
+      for (let i = this.rigidBodies.length - 1; i >= 0; i--) {
+        const b = this.rigidBodies[i];
+        if (b.kind !== 'grenade' || !b.grenadeData) continue;
+
+        // Keep live grenades awake until detonation even after settling on the ground
+        this.wakeBody(b);
+
+        if (tick >= b.grenadeData.detonateTick) {
+          if (this.gravityGun.heldBodyId === b.id) {
+            this.gravityGun.heldBodyId = null;
+          }
+          this.rigidBodies.splice(i, 1);
+          detonating.push(b);
+        }
+      }
+
+      for (let i = 0; i < detonating.length; i++) {
+        const g = detonating[i];
+        const gd = g.grenadeData!;
+        this.applyExplosionImpulse(
+          { x: g.pos.x, y: g.pos.y, z: g.pos.z },
+          gd.maxDamage,
+          gd.radius,
+          gd.pushScale,
+          g.id,
+          gd.applyPlayerHpDamage ?? true,
+        );
+      }
+    }
   private stepSecondaryPhysics(playerAlive: boolean, playerIsSurfing = false): void {
     const hasBodies = this.rigidBodies.length > 0;
 
@@ -2483,8 +2587,12 @@ export class GoldSrcPhysicsEngine {
       if (this.waterVolumes.length > 0) {
         this.stepRigidBodyBuoyancy();
       }
-
       this.stepRigidBodiesTgsSoft();
+            this.stepGrenades();
+
+            if (playerAlive) {
+              this.resolvePlayerShadowCollisions(playerIsSurfing);
+            }
 
       if (playerAlive) {
         this.resolvePlayerShadowCollisions(playerIsSurfing);
@@ -2743,7 +2851,8 @@ export class GoldSrcPhysicsEngine {
             b.angVel.z = f32(b.angVel.z * 0.92 - nz * wTwist * (1 - twistDamp));
 
             const impactJ = Math.abs(vn) * b.mass;
-            if (impactJ > 260) {
+            const hitThreshold = b.kind === 'grenade' ? 120 : 260;
+            if (impactJ > hitThreshold) {
               this.callbacks.onRigidBodyHit?.(b.id, impactJ, b.pos, b.kind ?? 'prop');
             }
             if (nz >= SURF_NORMAL_Z && Math.abs(b.vel.z) < 16) {
@@ -3582,7 +3691,14 @@ export class GoldSrcPhysicsEngine {
 
     for (let i = 0; i < this.rigidBodies.length; i++) {
       const b = this.rigidBodies[i];
-      if (b.mass <= 0 || b.kind === 'weapon' || this.gravityGun.heldBodyId === b.id) continue;
+      if (
+        b.mass <= 0 ||
+        b.kind === 'weapon' ||
+        b.kind === 'grenade' ||
+        this.gravityGun.heldBodyId === b.id
+      ) {
+        continue;
+      }
 
       const dx = b.pos.x - pPos.x;
       const dy = b.pos.y - pPos.y;

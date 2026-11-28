@@ -7,14 +7,20 @@ export class ViewmodelRig {
   private readonly scoutGroup = new THREE.Group();
   private readonly uspGroup = new THREE.Group();
   private readonly knifeGroup = new THREE.Group();
+  private readonly grenadeGroup = new THREE.Group();
 
   private readonly uspSuppressor: THREE.Mesh;
   private readonly scoutBoltHandle: THREE.Mesh;
   private readonly scoutFlash: THREE.Mesh;
   private readonly uspFlash: THREE.Mesh;
 
+  private readonly grenadeBodyGroup = new THREE.Group();
+  private readonly grenadePinRing: THREE.Mesh;
+  private readonly grenadeSpoon: THREE.Mesh;
+
   private activeSlot = 1;
   private scoped = false;
+  private grenadeCount = 5;
   private bobPhase = 0;
   private deployTimer = 0;
   private recoilKick = 0;
@@ -25,6 +31,10 @@ export class ViewmodelRig {
   private knifeAnimTimer = 0;
   private knifeAnimDuration = 0.24;
   private knifeHeavy = false;
+
+  private grenadeAnimTimer = 0;
+  private grenadeAnimDuration = 0.62;
+  private grenadeUnderhand = false;
 
   private reloadTimer = 0;
   private reloadDuration = 1.1;
@@ -44,6 +54,18 @@ export class ViewmodelRig {
       color: 0x3b4838,
       roughness: 0.68,
       metalness: 0.12,
+    });
+    const grenadeOlive = new THREE.MeshStandardMaterial({
+      color: 0x3f4f2f,
+      roughness: 0.56,
+      metalness: 0.34,
+    });
+    const grenadeBandMat = new THREE.MeshStandardMaterial({
+      color: 0xf97316,
+      emissive: 0xea580c,
+      emissiveIntensity: 0.55,
+      roughness: 0.32,
+      metalness: 0.2,
     });
     const chromeSteel = new THREE.MeshStandardMaterial({
       color: 0xcbd5e1,
@@ -173,6 +195,43 @@ export class ViewmodelRig {
     this.knifeGroup.visible = false;
     this.root.add(this.knifeGroup);
 
+    // --- Slot 5: HE Fragmentation Grenade ---
+    const grenadeHull = new THREE.Mesh(new THREE.SphereGeometry(0.054, 14, 12), grenadeOlive);
+    grenadeHull.scale.set(1.0, 1.24, 1.0);
+    this.grenadeBodyGroup.add(grenadeHull);
+
+    const grenadeBand = new THREE.Mesh(new THREE.TorusGeometry(0.053, 0.0055, 8, 18), grenadeBandMat);
+    grenadeBand.rotation.x = Math.PI * 0.5;
+    grenadeBand.position.y = 0.008;
+    this.grenadeBodyGroup.add(grenadeBand);
+
+    const fuseCollar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.016, 0.021, 0.032, 10),
+      gunmetal,
+    );
+    fuseCollar.position.set(0, 0.074, 0);
+    this.grenadeBodyGroup.add(fuseCollar);
+
+    const fuseHead = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.02, 0.026), chromeSteel);
+    fuseHead.position.set(0.004, 0.095, 0);
+    this.grenadeBodyGroup.add(fuseHead);
+
+    this.grenadeSpoon = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.095, 0.02), gunmetal);
+    this.grenadeSpoon.position.set(0.044, 0.045, 0);
+    this.grenadeSpoon.rotation.z = -0.22;
+    this.grenadeBodyGroup.add(this.grenadeSpoon);
+
+    this.grenadePinRing = new THREE.Mesh(new THREE.TorusGeometry(0.018, 0.0026, 8, 16), chromeSteel);
+    this.grenadePinRing.position.set(-0.028, 0.092, 0.008);
+    this.grenadePinRing.rotation.y = 0.35;
+    this.grenadeBodyGroup.add(this.grenadePinRing);
+
+    this.grenadeGroup.add(this.grenadeBodyGroup);
+    this.grenadeGroup.position.set(0.22, -0.19, -0.34);
+    this.grenadeGroup.rotation.set(0.12, -0.28, 0.14);
+    this.grenadeGroup.visible = false;
+    this.root.add(this.grenadeGroup);
+
     this.setActiveSlot(1);
   }
 
@@ -191,15 +250,25 @@ export class ViewmodelRig {
     this.syncVisibility();
   }
 
+  public setGrenadeCount(count: number): void {
+    this.grenadeCount = Math.max(0, Math.round(count));
+    this.syncVisibility();
+  }
+
   private syncVisibility(): void {
     this.scoutGroup.visible = this.activeSlot === 1 && !this.scoped;
     this.uspGroup.visible = this.activeSlot === 2;
     this.knifeGroup.visible = this.activeSlot === 3;
+    this.grenadeGroup.visible =
+      this.activeSlot === 5 && (this.grenadeCount > 0 || this.grenadeAnimTimer > 0);
   }
 
   public triggerDeploy(): void {
     this.deployTimer = 0.24;
     this.reloadTimer = 0;
+    this.grenadeAnimTimer = 0;
+    this.resetGrenadeParts();
+    this.syncVisibility();
   }
 
   public triggerFire(slot: 1 | 2, silenced = false): void {
@@ -217,9 +286,26 @@ export class ViewmodelRig {
     this.knifeAnimTimer = this.knifeAnimDuration;
   }
 
+  public triggerGrenadeThrow(underhand = false): void {
+    this.grenadeUnderhand = underhand;
+    this.grenadeAnimDuration = underhand ? 0.56 : 0.64;
+    this.grenadeAnimTimer = this.grenadeAnimDuration;
+    this.deployTimer = 0;
+    this.syncVisibility();
+  }
+
   public triggerReload(durationSec = 1.15): void {
     this.reloadDuration = durationSec;
     this.reloadTimer = durationSec;
+  }
+
+  private resetGrenadeParts(): void {
+    this.grenadeBodyGroup.visible = true;
+    this.grenadePinRing.visible = true;
+    this.grenadePinRing.position.set(-0.028, 0.092, 0.008);
+    this.grenadePinRing.rotation.set(0, 0.35, 0);
+    this.grenadeSpoon.position.set(0.044, 0.045, 0);
+    this.grenadeSpoon.rotation.set(0, 0, -0.22);
   }
 
   public update(
@@ -239,7 +325,7 @@ export class ViewmodelRig {
     const bobY = Math.abs(Math.sin(this.bobPhase)) * -0.014 * moveFactor;
     const strafeRoll = (strafeA ? 0.055 : 0) + (strafeD ? -0.055 : 0);
 
-    // Decay deploy, recoil, flash, bolt cycle, reload, and knife timers
+    // Decay deploy, recoil, flash, bolt cycle, reload, knife, and grenade timers
     if (this.deployTimer > 0) this.deployTimer = Math.max(0, this.deployTimer - dt);
     this.recoilKick *= Math.pow(0.00025, dt);
     this.recoilPitch *= Math.pow(0.0004, dt);
@@ -269,7 +355,7 @@ export class ViewmodelRig {
       this.scoutBoltHandle.position.set(0.042, 0.04, 0.07);
     }
 
-    // Reload dip & tilt
+    // Reload / grenade restock dip & tilt
     let reloadDipY = 0;
     let reloadRoll = 0;
     if (this.reloadTimer > 0) {
@@ -281,43 +367,106 @@ export class ViewmodelRig {
     }
 
     // Knife slash / heavy stab swing kinematics
-    let knifeOffX = 0;
-    let knifeOffY = 0;
-    let knifeOffZ = 0;
-    let knifeRotX = 0;
-    let knifeRotY = 0;
-    let knifeRotZ = 0;
+    let animOffX = 0;
+    let animOffY = 0;
+    let animOffZ = 0;
+    let animRotX = 0;
+    let animRotY = 0;
+    let animRotZ = 0;
     if (this.knifeAnimTimer > 0 && this.activeSlot === 3) {
       this.knifeAnimTimer = Math.max(0, this.knifeAnimTimer - dt);
       const p = 1 - this.knifeAnimTimer / Math.max(0.01, this.knifeAnimDuration);
       const swing = Math.sin(p * Math.PI);
       if (this.knifeHeavy) {
-        knifeOffX = -0.12 * swing;
-        knifeOffY = 0.04 * swing;
-        knifeOffZ = -0.26 * swing;
-        knifeRotX = -0.58 * swing;
-        knifeRotY = 0.25 * swing;
+        animOffX = -0.12 * swing;
+        animOffY = 0.04 * swing;
+        animOffZ = -0.26 * swing;
+        animRotX = -0.58 * swing;
+        animRotY = 0.25 * swing;
       } else {
-        knifeOffX = -0.24 * swing;
-        knifeOffY = -0.05 * swing;
-        knifeOffZ = -0.11 * swing;
-        knifeRotY = 0.85 * swing;
-        knifeRotZ = 0.62 * swing;
+        animOffX = -0.24 * swing;
+        animOffY = -0.05 * swing;
+        animOffZ = -0.11 * swing;
+        animRotY = 0.85 * swing;
+        animRotZ = 0.62 * swing;
       }
+    }
+
+    // HE Grenade pin-pull -> throw follow-through -> re-draw next grenade
+    if (this.grenadeAnimTimer > 0 && this.activeSlot === 5) {
+      this.grenadeAnimTimer = Math.max(0, this.grenadeAnimTimer - dt);
+      const p = 1 - this.grenadeAnimTimer / Math.max(0.01, this.grenadeAnimDuration);
+
+      if (p < 0.28) {
+        // Phase 1: Pull pin outward to the left and wind arm back
+        const k = p / 0.28;
+        const ease = Math.sin(k * Math.PI * 0.5);
+        this.grenadeBodyGroup.visible = true;
+        this.grenadePinRing.visible = true;
+        this.grenadePinRing.position.set(-0.028 - ease * 0.09, 0.092 + ease * 0.02, 0.008 + ease * 0.02);
+        this.grenadePinRing.rotation.set(0, 0.35 + ease * 0.7, ease * 0.9);
+        this.grenadeSpoon.rotation.set(0, 0, -0.22 - ease * 0.14);
+
+        if (this.grenadeUnderhand) {
+          animOffY = -0.09 * ease;
+          animOffZ = 0.07 * ease;
+          animRotX = -0.35 * ease;
+        } else {
+          animOffX = 0.05 * ease;
+          animOffY = 0.08 * ease;
+          animOffZ = 0.11 * ease;
+          animRotX = 0.52 * ease;
+          animRotZ = -0.25 * ease;
+        }
+      } else if (p < 0.6) {
+        // Phase 2: Fast forward throw release (spoon pops, grenade leaves hand)
+        const k = (p - 0.28) / 0.32;
+        const whip = Math.sin(k * Math.PI * 0.5);
+        this.grenadePinRing.visible = false;
+        this.grenadeSpoon.rotation.set(0, 0, -0.58);
+        this.grenadeBodyGroup.visible = k < 0.45;
+
+        if (this.grenadeUnderhand) {
+          animOffY = -0.09 + 0.2 * whip;
+          animOffZ = 0.07 - 0.28 * whip;
+          animRotX = -0.35 + 0.78 * whip;
+        } else {
+          animOffX = 0.05 - 0.14 * whip;
+          animOffY = 0.08 - 0.19 * whip;
+          animOffZ = 0.11 - 0.34 * whip;
+          animRotX = 0.52 - 1.18 * whip;
+          animRotZ = -0.25 + 0.48 * whip;
+        }
+      } else {
+        // Phase 3: Re-draw next grenade from below if any remain
+        const k = (p - 0.6) / 0.4;
+        this.resetGrenadeParts();
+        this.grenadeBodyGroup.visible = this.grenadeCount > 0;
+        const rise = 1 - k;
+        animOffY = -0.24 * rise * rise;
+        animRotX = -0.4 * rise;
+      }
+
+      if (this.grenadeAnimTimer === 0) {
+        this.resetGrenadeParts();
+        this.syncVisibility();
+      }
+    } else if (this.activeSlot === 5) {
+      this.resetGrenadeParts();
     }
 
     const deployNorm = this.deployTimer / 0.24;
     const deployDrop = deployNorm * deployNorm * -0.24;
 
     this.root.position.set(
-      bobX + swayX + knifeOffX,
-      bobY + swayY + deployDrop + reloadDipY + knifeOffY,
-      this.recoilKick + knifeOffZ,
+      bobX + swayX + animOffX,
+      bobY + swayY + deployDrop + reloadDipY + animOffY,
+      this.recoilKick + animOffZ,
     );
     this.root.rotation.set(
-      this.recoilPitch - deployNorm * 0.45 + knifeRotX,
-      swayX * 1.4 + knifeRotY,
-      strafeRoll + reloadRoll + knifeRotZ,
+      this.recoilPitch - deployNorm * 0.45 + animRotX,
+      swayX * 1.4 + animRotY,
+      strafeRoll + reloadRoll + animRotZ,
     );
   }
 }

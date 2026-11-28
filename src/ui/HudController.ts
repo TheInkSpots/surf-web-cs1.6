@@ -38,6 +38,11 @@ export interface SubsystemTelemetry {
   vitals: Readonly<PlayerVitalState>;
 }
 
+export interface HudGrenadeBadge {
+  count: number;
+  maxCount: number;
+}
+
 export interface HudSnapshot {
   now: number;
   spdXY: number;
@@ -51,6 +56,7 @@ export interface HudSnapshot {
   keys: KeyState;
   cvarLabel: string;
   subsystems?: SubsystemTelemetry;
+  grenade?: HudGrenadeBadge;
 }
 
 type MovementKey = 'w' | 'a' | 's' | 'd' | 'jump' | 'duck';
@@ -82,6 +88,10 @@ export class HudController {
   private readonly elStrafeOverlay = document.getElementById('strafe-overlay')!;
   private readonly elSpdSlot1 = document.getElementById('spd-slot-1')!;
   private readonly elCrosshair = document.getElementById('crosshair');
+
+  // Slot 5 (HE Grenade) badge in the main HUD weapon bar
+  private elSlot5Badge: HTMLElement | null = null;
+  private elSlot5Container: HTMLElement | null = null;
 
   // Subsystem HUD nodes (optional lookup keeps backwards compatibility)
   private readonly elInteractPrompt = document.getElementById('interact-prompt');
@@ -131,10 +141,41 @@ export class HudController {
   private fpsTimer = performance.now();
   private lastTopRunsCount = -1;
   private lastBestRun = -1;
+  private lastGrenadeText = '';
 
   constructor(runTracker: RunTracker) {
     this.runTracker = runTracker;
+    this.ensureSlot5Element();
     this.refreshPbDisplay();
+  }
+
+  /** Locate existing Slot 5 weapon card or inject one next to the existing .weapon-slot cards */
+  private ensureSlot5Element(): void {
+    const existing = document.querySelector<HTMLElement>('.weapon-slot[data-slot="5"]');
+    if (existing) {
+      this.elSlot5Container = existing;
+      this.elSlot5Badge =
+        existing.querySelector<HTMLElement>('#ammo-slot-5') ??
+        existing.querySelector<HTMLElement>('.slot-spd');
+      return;
+    }
+
+    const firstSlot = document.querySelector<HTMLElement>('.weapon-slot');
+    const bar = firstSlot?.parentElement;
+    if (!bar) return;
+
+    const slot5 = document.createElement('div');
+    slot5.className = 'weapon-slot';
+    slot5.dataset.slot = '5';
+    slot5.innerHTML = `
+      <span class="slot-num">5</span>
+      <span class="slot-name">HE GRENADE</span>
+      <span class="slot-spd" id="ammo-slot-5">5/5 HE</span>
+    `;
+    bar.appendChild(slot5);
+
+    this.elSlot5Container = slot5;
+    this.elSlot5Badge = slot5.querySelector<HTMLElement>('#ammo-slot-5');
   }
 
   public showToast(msg: string, borderColor = 'rgba(34,211,238,0.5)'): void {
@@ -161,6 +202,20 @@ export class HudController {
 
   public setScoutSpeedLabel(legacy260: boolean): void {
     this.elSpdSlot1.textContent = legacy260 ? '260 u/s ★' : '250 u/s';
+  }
+
+  public setGrenadeAmmo(count: number, maxCount: number): void {
+    const label = count > 0 ? `${count}/${maxCount} HE` : 'EMPTY [R]';
+    if (label === this.lastGrenadeText) return;
+    this.lastGrenadeText = label;
+
+    if (this.elSlot5Badge) {
+      this.elSlot5Badge.textContent = label;
+      this.elSlot5Badge.style.color = count > 0 ? '#fdba74' : '#fb7185';
+    }
+    if (this.elSlot5Container) {
+      this.elSlot5Container.style.opacity = count > 0 ? '1' : '0.55';
+    }
   }
 
   public setStrafeHudVisible(visible: boolean): void {
@@ -266,6 +321,11 @@ export class HudController {
     }
 
     this.elNgHull.textContent = snap.ducking ? '36u (DUCK)' : '72u (STAND)';
+
+    // Slot 5 grenade badge
+    if (snap.grenade) {
+      this.setGrenadeAmmo(snap.grenade.count, snap.grenade.maxCount);
+    }
 
     // Subsystem overlays
     if (snap.subsystems) {

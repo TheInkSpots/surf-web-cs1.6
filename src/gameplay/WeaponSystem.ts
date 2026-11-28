@@ -22,11 +22,18 @@ export interface GunSlotState {
   silenced?: boolean;
 }
 
+export interface GrenadeSlotState {
+  owned: boolean;
+  count: number;
+  maxCount: number;
+}
+
 export interface WeaponHudSnapshot {
   activeSlot: WeaponSlot;
   scout: GunSlotState;
   usp: GunSlotState;
   knifeOwned: boolean;
+  grenade?: GrenadeSlotState;
   reloading: boolean;
   reloadProgress: number;
   scopeZoom: 0 | 1 | 2;
@@ -67,12 +74,19 @@ export class WeaponSystem {
     silenced: true,
   };
 
+  private readonly grenade: GrenadeSlotState = {
+    owned: true,
+    count: 5,
+    maxCount: 5,
+  };
+
   private nextPrimaryAt = 0;
   private nextSecondaryAt = 0;
   private reloadEndsAt = 0;
   private reloadDuration = 1.15;
-  private reloadingSlot: 1 | 2 | null = null;
+  private reloadingSlot: 1 | 2 | 5 | null = null;
   private droppedCounter = 0;
+  private grenadeCounter = 0;
   private nearbyWeapon: SourceRigidBody | null = null;
 
   constructor(
@@ -118,6 +132,10 @@ export class WeaponSystem {
     this.usp.reserve = 100;
     this.usp.silenced = true;
 
+    this.grenade.owned = true;
+    this.grenade.count = this.grenade.maxCount;
+    this.viewmodel.setGrenadeCount(this.grenade.count);
+
     this.cancelReload();
     this.setScopeZoom(0);
     this.viewmodel.setUspSilenced(true);
@@ -125,13 +143,18 @@ export class WeaponSystem {
   }
 
   public selectSlot(slot: number, silent = false): boolean {
-    if (slot !== 1 && slot !== 2 && slot !== 3) return false;
+    console.log('[weapon] selectSlot:', slot);
+    if (slot !== 1 && slot !== 2 && slot !== 3 && slot !== 5) return false;
     if (slot === 1 && !this.scout.owned) {
-      if (!silent) this.callbacks.onToast?.('NO PRIMARY WEAPON (Pick up a Scout)', 'rgba(148,163,184,0.75)');
+      if (!silent) {
+        this.callbacks.onToast?.('NO PRIMARY WEAPON (Pick up a Scout)', 'rgba(148,163,184,0.75)');
+      }
       return false;
     }
     if (slot === 2 && !this.usp.owned) {
-      if (!silent) this.callbacks.onToast?.('NO SECONDARY WEAPON (Pick up a USP .45)', 'rgba(148,163,184,0.75)');
+      if (!silent) {
+        this.callbacks.onToast?.('NO SECONDARY WEAPON (Pick up a USP .45)', 'rgba(148,163,184,0.75)');
+      }
       return false;
     }
     if (slot === this.activeSlot && !silent) return true;
@@ -146,7 +169,17 @@ export class WeaponSystem {
     this.abi.i32[I32.WEAPON] = slot;
 
     this.viewmodel.setActiveSlot(slot);
-    this.viewmodel.triggerDeploy();
+        if (slot === 5) {
+          this.viewmodel.setGrenadeCount(this.grenade.count);
+          if (!silent) {
+            this.callbacks.onToast?.(
+              `HE GRENADE [5] (${this.grenade.count}/${this.grenade.maxCount})  •  [LMB/5] THROW  •  [RMB] LOB  •  [R] RESTOCK`,
+              'rgba(249, 115, 22, 0.85)',
+            );
+          }
+        }
+        this.viewmodel.triggerDeploy();
+
     if (!silent) {
       this.audio.playWeaponSwitch();
     }
@@ -173,6 +206,8 @@ export class WeaponSystem {
       this.fireScout(nowSec);
     } else if (this.activeSlot === 2) {
       this.fireUsp(nowSec);
+    } else if (this.activeSlot === 5) {
+      this.throwGrenade(nowSec, false);
     } else {
       this.performKnifeAttack(nowSec, false);
     }
@@ -198,6 +233,8 @@ export class WeaponSystem {
         this.usp.silenced ? 'USP .45 SILENCER ATTACHED' : 'USP .45 SILENCER REMOVED',
         'rgba(148,163,184,0.8)',
       );
+    } else if (this.activeSlot === 5) {
+      this.throwGrenade(nowSec, true);
     } else {
       this.performKnifeAttack(nowSec, true);
     }
@@ -206,6 +243,19 @@ export class WeaponSystem {
   public tryReload(nowSec: number): boolean {
     if (this.physics.getVitals().dead) return false;
     if (this.activeSlot === 3 || this.reloadingSlot !== null) return false;
+
+    if (this.activeSlot === 5) {
+      if (this.grenade.count >= this.grenade.maxCount) return false;
+      this.reloadingSlot = 5;
+      this.reloadDuration = 0.85;
+      this.reloadEndsAt = nowSec + this.reloadDuration;
+      this.nextPrimaryAt = Math.max(this.nextPrimaryAt, this.reloadEndsAt);
+      this.nextSecondaryAt = Math.max(this.nextSecondaryAt, this.reloadEndsAt);
+      this.viewmodel.triggerReload(this.reloadDuration);
+      this.audio.playReload();
+      this.callbacks.onToast?.('RESTOCKING HE GRENADES...', 'rgba(251, 191, 36, 0.8)');
+      return true;
+    }
 
     const gun = this.activeSlot === 1 ? this.scout : this.usp;
     if (!gun.owned || gun.clip >= gun.clipMax || gun.reserve <= 0) return false;
@@ -225,6 +275,10 @@ export class WeaponSystem {
     if (this.physics.getVitals().dead) return;
     if (this.activeSlot === 3) {
       this.callbacks.onToast?.('CANNOT DROP COMBAT KNIFE', 'rgba(148,163,184,0.7)');
+      return;
+    }
+    if (this.activeSlot === 5) {
+      this.callbacks.onToast?.('CANNOT DROP HE GRENADE', 'rgba(148,163,184,0.7)');
       return;
     }
 
@@ -304,21 +358,30 @@ export class WeaponSystem {
     return this.equipGroundWeapon(candidate, true);
   }
 
-  /** Per-frame update: reload completion, held-fire repeat, auto-pickup, and pickup prompt */
+  /** Per-frame update: reload/restock completion, held-fire repeat, auto-pickup, and pickup prompt */
   public update(nowSec: number): void {
     if (this.physics.getVitals().dead) {
       this.nearbyWeapon = null;
       return;
     }
 
-    // 1. Finish active reload
+    // 1. Finish active reload or grenade restock
     if (this.reloadingSlot !== null && nowSec >= this.reloadEndsAt) {
-      const gun = this.reloadingSlot === 1 ? this.scout : this.usp;
-      if (gun.owned) {
-        const needed = gun.clipMax - gun.clip;
-        const load = Math.min(needed, gun.reserve);
-        gun.clip += load;
-        gun.reserve -= load;
+      if (this.reloadingSlot === 5) {
+        this.grenade.count = this.grenade.maxCount;
+        this.viewmodel.setGrenadeCount(this.grenade.count);
+        this.callbacks.onToast?.(
+          `HE GRENADES RESTOCKED (${this.grenade.count}/${this.grenade.maxCount})`,
+          'rgba(52, 211, 153, 0.85)',
+        );
+      } else {
+        const gun = this.reloadingSlot === 1 ? this.scout : this.usp;
+        if (gun.owned) {
+          const needed = gun.clipMax - gun.clip;
+          const load = Math.min(needed, gun.reserve);
+          gun.clip += load;
+          gun.reserve -= load;
+        }
       }
       this.reloadingSlot = null;
     }
@@ -367,11 +430,84 @@ export class WeaponSystem {
       scout: { ...this.scout },
       usp: { ...this.usp },
       knifeOwned: true,
+      grenade: { ...this.grenade },
       reloading,
       reloadProgress,
       scopeZoom: this.scopeZoom,
       nearbyPickupLabel,
     };
+  }
+
+  private throwGrenade(nowSec: number, underhand: boolean): void {
+    if (this.reloadingSlot !== null) return;
+    if (this.grenade.count <= 0) {
+      this.audio.playDryFire();
+      this.nextPrimaryAt = nowSec + 0.25;
+      this.nextSecondaryAt = nowSec + 0.25;
+      this.tryReload(nowSec);
+      return;
+    }
+
+    this.grenade.count -= 1;
+    this.viewmodel.setGrenadeCount(this.grenade.count);
+        this.viewmodel.triggerGrenadeThrow(underhand);
+    const cooldown = 0.72;
+    this.nextPrimaryAt = nowSec + cooldown;
+    this.nextSecondaryAt = nowSec + cooldown;
+
+    const vf = this.abi.f32;
+    const eye = this.physics.getPlayerEyePosition();
+    const { forward, right, up } = computeAngleVectors(-this.input.viewPitch, this.input.viewYaw, 0);
+
+    // Wall-safe spawn clamp so throwing flush against a brush never starts solid
+    const desiredDist = 30;
+    const wallCheck = this.physics.traceRay(eye, forward, desiredDist);
+    const safeDist = wallCheck.hit ? Math.max(8, wallCheck.distance - 8) : desiredDist;
+
+    const spawnPos: Vec3 = {
+      x: f32(eye.x + forward.x * safeDist + right.x * 5),
+      y: f32(eye.y + forward.y * safeDist + right.y * 5),
+      z: f32(eye.z + forward.z * safeDist - up.z * 4),
+    };
+
+    const throwSpeed = underhand ? 360 : 760;
+    const upBoost = underhand ? 110 : 155;
+    const velInherit = underhand ? 0.35 : 0.55;
+
+    const vel: Vec3 = {
+      x: f32(vf[F32.VEL_X] * velInherit + forward.x * throwSpeed),
+      y: f32(vf[F32.VEL_Y] * velInherit + forward.y * throwSpeed),
+      z: f32(vf[F32.VEL_Z] * velInherit + forward.z * throwSpeed + upBoost),
+    };
+
+    const spinRate = underhand ? 5.0 : 9.5;
+    const angVel: Vec3 = {
+      x: f32(right.x * spinRate + (Math.random() - 0.5) * 2.5),
+      y: f32(right.y * spinRate + (Math.random() - 0.5) * 2.5),
+      z: f32((Math.random() - 0.5) * 5.0),
+    };
+
+    const fuseSec = 1.8;
+    this.physics.spawnGrenade(`he_grenade_${++this.grenadeCounter}`, spawnPos, vel, fuseSec, {
+      angVel,
+      maxDamage: 85000,
+      radius: 560,
+      pushScale: 1.25,
+      applyPlayerHpDamage: true,
+    });
+
+    this.audio.playKnifeSwing(!underhand);
+    this.input.applyRecoilKick(underhand ? 0.008 : 0.016, 0);
+
+    const modeLabel = underhand ? 'LOBBED' : 'THROWN';
+    const remNote =
+      this.grenade.count > 0
+        ? `${this.grenade.count}/${this.grenade.maxCount} LEFT`
+        : 'EMPTY — PRESS R TO RESTOCK';
+    this.callbacks.onToast?.(
+      `HE GRENADE ${modeLabel} (${fuseSec.toFixed(1)}s FUSE)  •  ${remNote}`,
+      'rgba(249, 115, 22, 0.85)',
+    );
   }
 
   private equipGroundWeapon(body: SourceRigidBody, allowSwap: boolean): boolean {
@@ -382,7 +518,6 @@ export class WeaponSystem {
 
     if (gun.owned) {
       if (!allowSwap) return false;
-      // Drop current weapon in that slot first
       const prevActive = this.activeSlot;
       this.activeSlot = targetSlot;
       this.dropActiveWeapon();
@@ -431,7 +566,6 @@ export class WeaponSystem {
 
     this.fireHitscanRay(8192, spreadRad, 75, 19500, 0xfef08a);
 
-    // Classic CS 1.6 bolt-action unscope on shot
     if (wasScoped) {
       this.setScopeZoom(0);
     }

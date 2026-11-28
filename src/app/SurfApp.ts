@@ -118,6 +118,10 @@ export class SurfApp {
       onSelectWeapon: (slot) => {
         if (this.drivingVehicleId) return;
         this.setGravityGunMode(false);
+        if (slot === 5 && this.weapons.getActiveSlot() === 5) {
+          this.weapons.handlePrimaryPress(performance.now() * 0.001);
+          return;
+        }
         this.weapons.selectSlot(slot);
       },
       onQuickSwitch: () => {
@@ -256,6 +260,12 @@ export class SurfApp {
           this.hud.flashScreen('rgba(249, 115, 22, 0.42)');
         },
         onRigidBodyHit: (_bodyId, impulseMag, pos, kind) => {
+          if (kind === 'grenade') {
+            if (impulseMag > 140) {
+              this.audio.playRigidBodyClatter(pos, impulseMag * 2.2, 'weapon');
+            }
+            return;
+          }
           if (impulseMag > 650) {
             this.audio.playRigidBodyClatter(pos, impulseMag, kind);
           }
@@ -402,6 +412,7 @@ export class SurfApp {
         onToast: (msg, color) => this.hud.showToast(msg, color),
         onHitMarker: (isBlood, isKill) => this.combatHud.triggerHitMarker(isBlood, isKill),
         onActiveSlotChanged: (slot) => {
+          this.viewmodel.root.visible = !this.gravityGunActive && !this.drivingVehicleId;
           if (!this.gravityGunActive) {
             this.hud.setActiveWeaponSlot(slot);
           }
@@ -1144,6 +1155,7 @@ export class SurfApp {
     this.renderer.update(frameDt, camX, camY, camZ, renderYaw, renderPitch, spdXY);
 
     const subsystems = this.buildSubsystemTelemetry();
+    const weaponSnap = this.weapons.getHudSnapshot(nowSec);
     this.hud.update({
       now,
       spdXY,
@@ -1157,9 +1169,10 @@ export class SurfApp {
       keys: this.input.keys,
       cvarLabel: `${this.currentMapId} | aa:${Math.round(vf[F32.CVAR_AIRACCEL])} mv:${Math.round(vf[F32.CVAR_MAXVEL])}`,
       subsystems,
+      grenade: weaponSnap.grenade,
     });
 
-    this.combatHud.update(frameDt, this.physics.getVitals(), this.weapons.getHudSnapshot(nowSec));
+    this.combatHud.update(frameDt, this.physics.getVitals(), weaponSnap);
 
     const bodies = this.physics.getRigidBodies();
     const heldId = this.physics.getGravityGunState().heldBodyId;
